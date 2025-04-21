@@ -1,0 +1,26 @@
+[tool.poetry]
+name = "your-project-name"
+version = "0.1.0"
+description = ""
+authors = ["Your Name <yourname@example.com>"]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+alembic = "1.14.1"
+asyncpg = "0.30.0"
+fastapi = "0.115.7"
+SQLAlchemy = "2.0.37"
+uvicorn = "0.34.0"
+bcrypt = "4.2.1"
+python-jose = "3.3.0"
+pydantic = { version = "2.10", extras = ["email"] }
+passlib = "1.7.4"
+python-multipart = "0.0.20"
+minio = "7.2.15"
+boto3 = "1.37.37"
+requests = "2.32.3"
+apache-airflow-providers-amazon = "9.6.1"
+
+[build-system]
+requires = ["poetry>=1.0"]
+build-backend = "poetry.masonry.api"
