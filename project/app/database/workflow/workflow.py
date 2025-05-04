@@ -1,6 +1,6 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, JSON, TIMESTAMP
 from sqlalchemy.sql import func
-from .database import Base
+from ..database import Base
 
 class SyncJob(Base):
     __tablename__ = "metadata_sync_jobs"
@@ -35,3 +35,20 @@ class SyncExecutionHistory(Base):
     deleted_objects_count = Column(Integer, nullable=False, default=0)
     error_log = Column(String, nullable=True)
     execution_details = Column(JSON, nullable=False, default={})  # LIKE core.base_entity INCLUDING DEFAULTS
+
+class DatasetJob(Base):
+    __tablename__ = "dataset_jobs"
+    __table_args__ = {'schema': 'workflow'}
+
+    id = Column(Integer, primary_key=True)  # Replaced job_id UUID
+    dataset_id = Column(Integer, ForeignKey('core.datasets.id', ondelete='CASCADE'), nullable=False)
+    job_type = Column(String(50), nullable=False) # e.g., materialize, refresh, validate
+    airflow_dag_id = Column(String(255))
+    status = Column(String(50), nullable=False, default='pending')
+    last_run_start = Column(TIMESTAMP(timezone=True))
+    last_run_end = Column(TIMESTAMP(timezone=True))
+    last_run_duration_seconds = Column(Integer)
+    row_count = Column(Integer)
+    size_bytes = Column(Integer)
+    error_message = Column(String)
+    job_params = Column(JSON, default={}) # Changed from JSONB to JSON for broader compatibility

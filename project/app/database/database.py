@@ -21,6 +21,21 @@ async def create_schemas():
             await conn.execute(CreateSchema("core", if_not_exists=True))
         except Exception as e:
             print(f"Error creating core schema: {e}")
+
+        try:
+            await conn.execute(CreateSchema("equivalence", if_not_exists=True))
+        except Exception as e:
+            print(f"Error creating equivalence schema: {e}")
+
+        try:
+            await conn.execute(CreateSchema("metadata", if_not_exists=True))
+        except Exception as e:
+            print(f"Error creating metadata schema: {e}")
+
+        try:
+            await conn.execute(CreateSchema("storage", if_not_exists=True))
+        except Exception as e:
+            print(f"Error creating storage schema: {e}")
         
         try:
             await conn.execute(CreateSchema("workflow", if_not_exists=True))

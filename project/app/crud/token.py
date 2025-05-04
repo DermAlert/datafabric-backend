@@ -1,6 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
-from ..database.core import User
+from ..database.core.core import User
 from ..core.security import verify_password
 from datetime import datetime, timedelta
 from typing import Optional

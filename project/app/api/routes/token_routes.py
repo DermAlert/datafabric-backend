@@ -6,7 +6,7 @@ from jose import JWTError, jwt
 from ...database.database import get_db
 from ...crud.token import authenticate_user, create_access_token, get_user_by_cpf, get_current_user
 from ...core.config import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
-from ...database import core
+from ...database.core import core
 # from app.api.schemas import UserOut
 
 from ..schemas.token_routes import Token, TokenRefresh
