@@ -48,11 +48,10 @@ async def get_current_user(
     except JWTError:
         raise credentials_exception
 
-    # Consulta com eager loading para o relacionamento 'unidadeSaude'
     stmt = (
         select(User)
         .options(
-            selectinload(User.unidadeSaude),
+            selectinload(User.organizacao),
             selectinload(User.roles)
             )
         .filter(User.cpf == cpf)
@@ -62,4 +61,4 @@ async def get_current_user(
     
     if user is None:
         raise credentials_exception 
-    return user  
+    return user

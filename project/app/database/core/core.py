@@ -9,7 +9,7 @@ class DatasetAccessLevel(enum.Enum):
     """Define os níveis de permissão para acesso a um Dataset."""
     LER = "ler"              # Permite visualizar os dados e metadados do dataset.
     EDITAR = "editar"        # Permite modificar metadados (descrição, etc.), e potencialmente a definição (colunas, fontes) ou acionar atualizações.
-    EXCLUIR = "excluir"      # Permite apagar o dataset (a definição, não necessariamente os dados brutos originais).
+    # EXCLUIR = "excluir"      # Permite apagar o dataset (a definição, não necessariamente os dados brutos originais).
     ADMINISTRAR = "administrar" # Permite gerenciar as permissões de outros usuários/grupos para este dataset (conceder/revogar LER, EDITAR, EXCLUIR).
 
 # Association tables
@@ -29,13 +29,13 @@ class Organization(Base):
     usuarios = relationship("User", back_populates="organizacao")
     data_connections = relationship("DataConnection", back_populates="organization")
 
-# Models
+# Models        
 class User(AuditMixin, Base):
     __tablename__ = 'users'
     __table_args__ = {'schema': 'core'}
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     organization_id = Column(Integer, ForeignKey('core.organizacoes.id'), nullable=False) # every user MUST belong to an org
-    nome_usuario = Column(String(50), index=True, nullable=True)
+    nome_usuario = Column(String(50), nullable=True)
     email = Column(String(100), unique=True, index=True, nullable=False)
     cpf = Column(String(11), unique=True, index=True, nullable=False)
     senha_hash = Column(String(255), nullable=True)
@@ -55,7 +55,7 @@ class User(AuditMixin, Base):
 class Role(Base):
     __tablename__ = 'roles'
     __table_args__ = {'schema': 'core'}
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String(50), unique=True, index=True, nullable=False)
     nivel_acesso = Column(Integer, nullable=False, default=1)
     users = relationship('User', secondary=user_roles, back_populates='roles')
@@ -85,7 +85,6 @@ class DataConnection(Base):
     sync_status = Column(String, nullable=False, default='success')  # success, partial, failed
     last_sync_time = Column(TIMESTAMP(timezone=True), nullable=True)
     next_sync_time = Column(TIMESTAMP(timezone=True), nullable=True)
-    # sync_frequency = Column(String, nullable=False, default='weekly')  # daily, weekly, monthly    -> tirei porque o cron ja pode definir isso sem precisar dessa variavel
     cron_expression = Column(String, nullable=True)  # Weekly on Sunday at midnight "0 0 * * 0"
     sync_settings = Column(JSON, nullable=False, default={})  # Additional sync settings
 
@@ -104,7 +103,7 @@ class Group(Base):
     __tablename__ = 'groups'
     __table_args__ = {'schema': 'core'}
 
-    id = Column(Integer, primary_key=True, index=True)
+    id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False)
     organization_id = Column(Integer, ForeignKey('core.organizacoes.id'), nullable=False)
     description = Column(String, nullable=True)
@@ -226,7 +225,7 @@ class DatasetVersion(Base):
         {'schema': 'core'}
     )
 
-    id = Column(Integer, primary_key=True)  # Replaced version_id UUID
+    id = Column(Integer, primary_key=True)  
     # Assuming 'core.datasets' table has an Integer primary key named 'id'
     dataset_id = Column(Integer, ForeignKey('core.datasets.id', ondelete='CASCADE'), nullable=False)
     version_number = Column(String(50), nullable=False)

@@ -94,14 +94,3 @@ async def refresh_access_token(
         "token_type": "bearer"
     }
 
-# from sqlalchemy.ext.asyncio import AsyncSession
-# from fastapi import APIRouter, Depends, HTTPException, status
-# from fastapi.security import OAuth2PasswordRequestForm
-# from datetime import timedelta
-# from jose import JWTError, jwt
-    
-# router = APIRouter()
-# @router.post("/hello_word")
-# async def hello_word():
-#     return {"hello word"}
-

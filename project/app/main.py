@@ -21,11 +21,11 @@ async def lifespan(app: FastAPI):
 
     async with database.engine.begin() as conn:
         # drop all tables
-        await conn.run_sync(core.Base.metadata.drop_all)
-        await conn.run_sync(workflow.Base.metadata.drop_all)
-        await conn.run_sync(equivalence.Base.metadata.drop_all)
-        await conn.run_sync(metadata.Base.metadata.drop_all)
-        await conn.run_sync(storage.Base.metadata.drop_all)
+        # await conn.run_sync(core.Base.metadata.drop_all)
+        # await conn.run_sync(workflow.Base.metadata.drop_all)
+        # await conn.run_sync(equivalence.Base.metadata.drop_all)
+        # await conn.run_sync(metadata.Base.metadata.drop_all)
+        # await conn.run_sync(storage.Base.metadata.drop_all)
 
         # create all tables
         await conn.run_sync(core.Base.metadata.create_all)
