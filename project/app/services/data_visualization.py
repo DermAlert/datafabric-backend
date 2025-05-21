@@ -9,7 +9,7 @@ from ..api.schemas.data_visualization_schemas import Filter, Sort
 from .visualizers.postgres_visualizer import visualize_postgres_data, execute_postgres_query
 # from .visualizers.mongodb_visualizer import visualize_mongodb_data, execute_mongodb_query
 # from .visualizers.mysql_visualizer import visualize_mysql_data, execute_mysql_query
-# from .visualizers.minio_visualizer import visualize_minio_data
+from .visualizers.minio_visualizer import visualize_minio_data
 # from .visualizers.bigquery_visualizer import visualize_bigquery_data, execute_bigquery_query
 
 # Map connection types to their visualizer functions
@@ -17,8 +17,8 @@ DATA_VISUALIZERS = {
     "postgresql": visualize_postgres_data,
     "postgres": visualize_postgres_data,
     # "mongodb": visualize_mongodb_data,
-    # "minio": visualize_minio_data,
-    # "s3": visualize_minio_data,
+    "minio": visualize_minio_data,
+    "s3": visualize_minio_data,
     # "mysql": visualize_mysql_data,
     # "bigquery": visualize_bigquery_data,
     # Add more visualizers as needed

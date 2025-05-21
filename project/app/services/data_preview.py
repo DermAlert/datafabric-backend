@@ -6,7 +6,7 @@ import logging
 from .previewers.postgres_previewer import preview_postgres_data
 # from .previewers.mongodb_previewer import preview_mongodb_data
 # from .previewers.mysql_previewer import preview_mysql_data
-# from .previewers.minio_previewer import preview_minio_data
+from .previewers.minio_previewer import preview_minio_data
 # from .previewers.bigquery_previewer import preview_bigquery_data
 
 # Map connection types to their preview handlers
@@ -14,8 +14,8 @@ PREVIEWERS = {
     "postgresql": preview_postgres_data,
     "postgres": preview_postgres_data,
     # "mongodb": preview_mongodb_data,
-    # "minio": preview_minio_data,
-    # "s3": preview_minio_data,
+    "minio": preview_minio_data,
+    "s3": preview_minio_data,
     # "mysql": preview_mysql_data,
     # "bigquery": preview_bigquery_data,
     # Add more previewers as needed

@@ -15,7 +15,7 @@ from ..schemas.metadata_schemas import (
     TableDetailsResponse,
     DataPreviewResponse
 )
-from ...services.data_preview import get_data_preview
+# from ...services.data_preview import get_data_preview
 
 router = APIRouter()
 

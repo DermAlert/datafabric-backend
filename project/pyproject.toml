@@ -19,6 +19,7 @@ python-multipart = "0.0.20"
 minio = "7.2.15"
 boto3 = "1.37.37"
 requests = "2.32.3"
+pandas = "2.2.3"
 
 [build-system]
 requires = ["poetry>=1.0"]

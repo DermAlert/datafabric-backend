@@ -223,7 +223,7 @@ async def update_data_connection(
                 connection_id=db_connection.id
             )
         
-        logger.info(f"Data connection ID {connection_id} updated by user {current_user.email}")
+        # logger.info(f"Data connection ID {connection_id} updated by user {current_user.email}")
         return db_connection
         
     except HTTPException:

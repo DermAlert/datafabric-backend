@@ -17,10 +17,10 @@ async def test_postgres_connection(connection_params: Dict[str, Any]) -> Tuple[b
         # Extract connection parameters with defaults
         print("DEBUG - Connection Params: ",connection_params)
 
-        # host = connection_params.get("host", "localhost")
-        host = "postgres-backend"
+        host = connection_params.get("host", "localhost")
+        # host = "postgres-backend"
         port = connection_params.get("port", 5432)
-        port = 5432
+        # port = 5432
         database = connection_params.get("database")
         username = connection_params.get("username")
         password = connection_params.get("password")

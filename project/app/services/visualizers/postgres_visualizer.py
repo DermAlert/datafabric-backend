@@ -23,7 +23,7 @@ async def visualize_postgres_data(
     try:
         # Extract connection parameters
         host = connection_params.get("host", "localhost")
-        host = "postgres-backend"
+        # host = "postgres-backend"
         port = connection_params.get("port", 5432)
         database = connection_params.get("database")
         username = connection_params.get("username")

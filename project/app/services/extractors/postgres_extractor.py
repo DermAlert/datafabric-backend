@@ -11,7 +11,7 @@ class PostgresExtractor:
         Initialize the extractor with connection parameters.
         """
         self.host = connection_params.get("host", "localhost")
-        self.host = "postgres-backend"
+        # self.host = "postgres-backend"
         self.port = connection_params.get("port", 5432)
         self.database = connection_params.get("database")
         self.username = connection_params.get("username")
