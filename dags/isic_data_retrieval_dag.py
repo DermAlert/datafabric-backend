@@ -79,7 +79,6 @@ def query_delta_table(table_name, columns=None, filters=None, limit=1000, **cont
     """
     setup_delta_environment()
     
-    # Get table path based on name
     table_path_map = {
         "collections": DELTA_COLLECTIONS,
         "metadata": DELTA_METADATA,
