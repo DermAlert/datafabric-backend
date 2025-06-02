@@ -569,3 +569,6 @@ with DAG(
     )
     
     fetch_collections_task >> fetch_images_task >> process_metadata_task >> generate_stats_task
+
+
+    
