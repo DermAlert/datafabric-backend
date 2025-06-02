@@ -150,7 +150,6 @@ def fetch_collections(**context):
     return {"timestamp": timestamp, "valid_count": len(valid_collections)}
 
 def fetch_images_metadata(**context):
-    """Fetch metadata for all images in valid collections"""
     logger.info("Fetching image metadata")
     
     client = get_minio_client()
@@ -179,42 +178,70 @@ def fetch_images_metadata(**context):
                 "limit": MAX_LIMIT
             }
             
-            response_data = api_request(url, params)
-            
-            if 'results' not in response_data:
-                logger.warning(f"Unexpected response structure for collection {collection_id}")
-                continue
+            page_count = 1
+            while url:
+                logger.info(f"Fetching page {page_count} for collection {collection_id}")
                 
-            images = response_data.get('results', [])
-            
-            for image in images:
-                image['collection_id'] = collection_id
-                image['collection_name'] = collection_name
-            
-            all_images.extend(images)
-            total_images += len(images)
-            
-            logger.info(f"Retrieved {len(images)} images from collection {collection_id}")
-            
-            if len(all_images) >= 5000 or (idx == len(valid_collections) - 1 and len(all_images) > 0):
-                batch_num = (idx // 10) + 1  
+                if page_count == 1:
+                    response_data = api_request(url, params)
+                else:
+                    response_data = api_request(url)
                 
-                batch_json = json.dumps(all_images)
-                client.put_object(
-                    IMAGES_METADATA_BUCKET,
-                    f"images_batch_{batch_num}_{timestamp}.json",
-                    io.BytesIO(batch_json.encode()),
-                    length=len(batch_json),
-                    content_type='application/json'
-                )
+                if 'results' not in response_data:
+                    logger.warning(f"Unexpected response structure for collection {collection_id}")
+                    break
+                    
+                images = response_data.get('results', [])
                 
-                logger.info(f"Saved batch {batch_num} with {len(all_images)} images")
+                for image in images:
+                    image['collection_id'] = collection_id
+                    image['collection_name'] = collection_name
                 
-                # Clear memory
-                all_images = []
+                all_images.extend(images)
+                total_images += len(images)
+                
+                logger.info(f"Retrieved {len(images)} images from collection {collection_id} page {page_count}")
+                
+                if len(all_images) >= 5000:
+                    batch_num = (total_images // 5000)
+                    
+                    batch_json = json.dumps(all_images)
+                    client.put_object(
+                        IMAGES_METADATA_BUCKET,
+                        f"images_batch_{batch_num}_{timestamp}.json",
+                        io.BytesIO(batch_json.encode()),
+                        length=len(batch_json),
+                        content_type='application/json'
+                    )
+                    
+                    logger.info(f"Saved batch {batch_num} with {len(all_images)} images")
+                    
+                    # Clear memory
+                    all_images = []
+                
+                url = response_data.get('next')
+                if url:
+                    logger.info(f"Next page URL: {url}")
+                    params = None 
+                
+                page_count += 1
+            
+            logger.info(f"Completed fetching all pages for collection {collection_id}")
             
         except Exception as e:
             logger.error(f"Error processing collection {collection_id}: {e}")
+    
+    if all_images:
+        batch_num = (total_images // 5000) + 1
+        batch_json = json.dumps(all_images)
+        client.put_object(
+            IMAGES_METADATA_BUCKET,
+            f"images_batch_{batch_num}_{timestamp}.json",
+            io.BytesIO(batch_json.encode()),
+            length=len(batch_json),
+            content_type='application/json'
+        )
+        logger.info(f"Saved final batch {batch_num} with {len(all_images)} images")
     
     logger.info(f"Total images fetched: {total_images}")
     
@@ -246,13 +273,11 @@ def fetch_images_metadata(**context):
     return {"timestamp": timestamp, "total_images": total_images}
 
 def process_metadata(**context):
-    """Process raw metadata into structured format"""
     logger.info("Processing image metadata")
     
     client = get_minio_client()
     ensure_bucket_exists(IMAGES_METADATA_BUCKET)
     
-    # Get the manifest
     response = client.get_object(IMAGES_METADATA_BUCKET, "manifest_latest.json")
     manifest = json.loads(response.data.decode('utf-8'))
     response.close()
@@ -264,55 +289,84 @@ def process_metadata(**context):
     
     batch_objects = client.list_objects(IMAGES_METADATA_BUCKET, prefix=f"images_batch_")
     batch_files = [obj.object_name for obj in batch_objects]
-    batch_files.sort()  # Ensure proper order
+    batch_files.sort()  
     
-    # Process each batch
-    all_records = []
+    combined_records = {}
     current_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     
     for batch_file in batch_files:
         if timestamp not in batch_file:
-            continue  # Skip files from other runs
+            continue  
             
         try:
-            # Load batch
             response = client.get_object(IMAGES_METADATA_BUCKET, batch_file)
             batch_data = json.loads(response.data.decode('utf-8'))
             response.close()
             
-            # Process batch
-            batch_records = []
             for image in batch_data:
-                record = {
-                    'isic_id': image.get('isic_id', ''),
-                    'copyright_license': image.get('copyright_license', ''),
-                    'collection_id': image.get('collection_id', ''),
-                    'collection_name': image.get('collection_name', ''),
-                    'public': image.get('public', False)
-                }
+                isic_id = image.get('isic_id', '')
                 
-                # Handle files info
-                if 'files' in image and 'full' in image['files']:
-                    record['image_url'] = image['files']['full'].get('url', '')
-                    record['image_size'] = image['files']['full'].get('size', 0)
+                if not isic_id:
+                    logger.warning(f"Skipping image with no ISIC ID: {image}")
+                    continue
                 
-                # Extract metadata fields
+                if isic_id not in combined_records:
+                    combined_records[isic_id] = {
+                        'isic_id': isic_id,
+                        'copyright_license': image.get('copyright_license', ''),
+                        'public': image.get('public', False),
+                        'collection_id': [],
+                        'collection_name': []
+                    }
+                    
+                    if 'files' in image and 'full' in image['files']:
+                        combined_records[isic_id]['image_url'] = image['files']['full'].get('url', '')
+                        combined_records[isic_id]['image_size'] = image['files']['full'].get('size', 0)
+                        
+                    if 'files' in image and 'thumbnail_256' in image['files']:
+                        combined_records[isic_id]['thumbnail_url'] = image['files']['thumbnail_256'].get('url', '')
+                        combined_records[isic_id]['thumbnail_size'] = image['files']['thumbnail_256'].get('size', 0)
+                
+                collection_id = image.get('collection_id')
+                collection_name = image.get('collection_name')
+                
+                if collection_id and collection_id not in combined_records[isic_id]['collection_id']:
+                    combined_records[isic_id]['collection_id'].append(collection_id)
+                
+                if collection_name and collection_name not in combined_records[isic_id]['collection_name']:
+                    combined_records[isic_id]['collection_name'].append(collection_name)
+                
                 if 'metadata' in image:
                     for category, fields in image['metadata'].items():
                         for field, value in fields.items():
-                            record[f"{category}_{field}"] = value
-                
-                batch_records.append(record)
+                            field_key = f"{category}_{field}"
+                            
+                            if field_key in combined_records[isic_id]:
+                                current_value = combined_records[isic_id][field_key]
+                                
+                                if isinstance(current_value, list):
+                                    if value not in current_value:
+                                        current_value.append(value)
+                                else:
+                                    if current_value != value:
+                                        combined_records[isic_id][field_key] = [current_value, value]
+                            else:
+                                combined_records[isic_id][field_key] = value
             
-            all_records.extend(batch_records)
-            logger.info(f"Processed {len(batch_records)} records from {batch_file}")
+            logger.info(f"Processed records from {batch_file}")
             
         except Exception as e:
             logger.error(f"Error processing batch {batch_file}: {e}")
     
+    all_records = list(combined_records.values())
+    
+    for record in all_records:
+        for key, value in record.items():
+            if isinstance(value, list):
+                record[key] = json.dumps(value)
+    
     df = pd.DataFrame(all_records)
     
-    # Save as CSV
     if len(df) > 0:
         csv_buffer = io.StringIO()
         df.to_csv(csv_buffer, index=False)
@@ -334,41 +388,118 @@ def process_metadata(**context):
             content_type='text/csv'
         )
         
-        logger.info(f"Saved processed data for {len(df)} images")
+        json_data = json.dumps(all_records)
+        client.put_object(
+            IMAGES_METADATA_BUCKET,
+            f"processed_{current_timestamp}.json",
+            io.BytesIO(json_data.encode()),
+            length=len(json_data),
+            content_type='application/json'
+        )
+        
+        client.put_object(
+            IMAGES_METADATA_BUCKET,
+            "processed_latest.json",
+            io.BytesIO(json_data.encode()),
+            length=len(json_data),
+            content_type='application/json'
+        )
+        
+        logger.info(f"Saved processed data for {len(df)} unique images")
     else:
         logger.warning("No images to process")
     
     return {"processed_records": len(df), "timestamp": current_timestamp}
 
 def generate_stats(**context):
-    """Generate statistics from processed data"""
     logger.info("Generating statistics")
     
     try:
         client = get_minio_client()
         ensure_bucket_exists(STATS_BUCKET)
         
-        # Load processed data
-        response = client.get_object(IMAGES_METADATA_BUCKET, "processed_latest.csv")
-        df = pd.read_csv(io.BytesIO(response.data))
+        response = client.get_object(IMAGES_METADATA_BUCKET, "processed_latest.json")
+        records = json.loads(response.data.decode('utf-8'))
         response.close()
+        
+        df = pd.DataFrame(records)
+        
+        def count_values(series):
+            counter = {}
+            for item in series:
+                if isinstance(item, str) and item.startswith('['):
+                    try:
+                        values = json.loads(item)
+                        for val in values:
+                            counter[val] = counter.get(val, 0) + 1
+                    except:
+                        counter[item] = counter.get(item, 0) + 1
+                else:
+                    counter[item] = counter.get(item, 0) + 1
+            return counter
+        
+        collection_counts = {}
+        for idx, row in df.iterrows():
+            collections = row['collection_id']
+            if isinstance(collections, str) and collections.startswith('['):
+                try:
+                    col_list = json.loads(collections)
+                    for col in col_list:
+                        collection_counts[col] = collection_counts.get(col, 0) + 1
+                except:
+                    pass
+            elif collections:
+                collection_counts[collections] = collection_counts.get(collections, 0) + 1
+        
+        # Calculate collection name statistics
+        collection_name_counts = {}
+        for idx, row in df.iterrows():
+            names = row['collection_name']
+            if isinstance(names, str) and names.startswith('['):
+                try:
+                    name_list = json.loads(names)
+                    for name in name_list:
+                        collection_name_counts[name] = collection_name_counts.get(name, 0) + 1
+                except:
+                    pass
+            elif names:
+                collection_name_counts[names] = collection_name_counts.get(names, 0) + 1
         
         stats = {
             "timestamp": datetime.now().isoformat(),
             "total_images": len(df),
-            "collections_count": df['collection_id'].nunique(),
-            "collections": df['collection_name'].value_counts().head(20).to_dict(),
-            "copyright_licenses": df['copyright_license'].value_counts().to_dict(),
-            "public_images_count": int(df['public'].sum())
+            "collections_count": len(collection_counts),
+            "collections": dict(sorted(collection_name_counts.items(), key=lambda x: x[1], reverse=True)[:20]),
+            "copyright_licenses": count_values(df['copyright_license']),
+            "public_images_count": int(df['public'].sum() if 'public' in df.columns and pd.api.types.is_bool_dtype(df['public']) else 0)
         }
         
         metadata_fields = {}
         for column in df.columns:
             if column.startswith(('clinical_', 'acquisition_')):
                 try:
+                    unique_values = set()
+                    value_counts = {}
+                    
+                    for val in df[column]:
+                        if isinstance(val, str) and val.startswith('['):
+                            try:
+                                values = json.loads(val)
+                                for v in values:
+                                    unique_values.add(v)
+                                    value_counts[v] = value_counts.get(v, 0) + 1
+                            except:
+                                unique_values.add(val)
+                                value_counts[val] = value_counts.get(val, 0) + 1
+                        elif val is not None and val != '':
+                            unique_values.add(val)
+                            value_counts[val] = value_counts.get(val, 0) + 1
+                    
+                    top_values = dict(sorted(value_counts.items(), key=lambda x: x[1], reverse=True)[:5])
+                    
                     metadata_fields[column] = {
-                        "count": df[column].nunique(),
-                        "top_values": df[column].value_counts().head(5).to_dict()
+                        "count": len(unique_values),
+                        "top_values": top_values
                     }
                 except Exception as e:
                     logger.warning(f"Error analyzing field {column}: {e}")
@@ -437,5 +568,4 @@ with DAG(
         provide_context=True,
     )
     
-    # Define task dependencies
     fetch_collections_task >> fetch_images_task >> process_metadata_task >> generate_stats_task
