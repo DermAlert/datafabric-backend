@@ -15,22 +15,20 @@ try:
 except ImportError:
     logging.error("Delta Lake error.")
 
-# Configuration constants
 MINIO_ENDPOINT = "minio:9000"
 MINIO_ACCESS_KEY = "minio"
 MINIO_SECRET_KEY = "minio123"
 MINIO_SECURE = False
 
-# Bucket names
 DELTA_BUCKET = "isic-delta"
 REPORTS_BUCKET = "isic-reports"
 IMAGES_BUCKET = "isic-images"
 
-# Delta table paths
-DELTA_COLLECTIONS = "delta/collections"
-DELTA_METADATA = "delta/metadata"
-DELTA_CATEGORIES = "delta/categories"
-DELTA_UNIFIED = "delta/unified"
+DELTA_PATH_PREFIX = "delta"
+DELTA_COLLECTIONS = f"{DELTA_PATH_PREFIX}/collections"
+DELTA_METADATA = f"{DELTA_PATH_PREFIX}/metadata"
+DELTA_CATEGORIES = f"{DELTA_PATH_PREFIX}/categories"
+DELTA_UNIFIED = f"{DELTA_PATH_PREFIX}/unified"
 
 def get_minio_client():
     return Minio(
@@ -49,7 +47,6 @@ def ensure_bucket_exists(client, bucket_name):
         logging.error(f"Error creating bucket {bucket_name}: {str(e)}")
 
 def setup_delta_environment():
-    """Configure environment for Delta Lake with MinIO"""
     os.environ["AWS_ACCESS_KEY_ID"] = MINIO_ACCESS_KEY
     os.environ["AWS_SECRET_ACCESS_KEY"] = MINIO_SECRET_KEY
     os.environ["AWS_ENDPOINT_URL"] = f"http://{MINIO_ENDPOINT}"
@@ -57,7 +54,6 @@ def setup_delta_environment():
     os.environ["AWS_S3_ALLOW_UNSAFE_RENAME"] = "true"
 
 def generate_dashboard_data(**context):
-    """Generate summary statistics for dashboard"""
     setup_delta_environment()
     client = get_minio_client()
     ensure_bucket_exists(client, REPORTS_BUCKET)
@@ -65,24 +61,21 @@ def generate_dashboard_data(**context):
     dashboard = {}
     
     try:
-        # Collection statistics
         collections_path = f"s3://{DELTA_BUCKET}/{DELTA_COLLECTIONS}"
         collections_dt = DeltaTable(collections_path)
         collections_df = collections_dt.to_pandas()
         
         dashboard["collections"] = {
             "total_count": len(collections_df),
-            "public_count": collections_df['public'].sum(),
-            "total_images": collections_df['image_count'].sum(),
+            "public_count": int(collections_df['public'].sum()),
+            "total_images": int(collections_df['image_count'].sum()),
             "top_collections": collections_df.sort_values('image_count', ascending=False)[['name', 'image_count']].head(5).to_dict('records')
         }
         
-        # Metadata statistics
         unified_path = f"s3://{DELTA_BUCKET}/{DELTA_UNIFIED}"
         unified_dt = DeltaTable(unified_path)
         unified_df = unified_dt.to_pandas()
         
-        # Count downloaded images
         downloaded_count = unified_df['image_downloaded'].sum() if 'image_downloaded' in unified_df.columns else 0
         
         dashboard["images"] = {
@@ -91,7 +84,6 @@ def generate_dashboard_data(**context):
             "download_percentage": round((downloaded_count / len(unified_df)) * 100, 2) if len(unified_df) > 0 else 0
         }
         
-        # Category statistics
         categories_path = f"s3://{DELTA_BUCKET}/{DELTA_CATEGORIES}"
         categories_dt = DeltaTable(categories_path)
         categories_df = categories_dt.to_pandas()
@@ -101,7 +93,6 @@ def generate_dashboard_data(**context):
             "most_common": categories_df.sort_values('occurrence_percentage', ascending=False)[['name', 'count', 'occurrence_percentage']].head(10).to_dict('records')
         }
         
-        # Storage statistics
         storage_stats = {
             "buckets": {}
         }
@@ -122,7 +113,6 @@ def generate_dashboard_data(**context):
         
         dashboard["storage"] = storage_stats
         
-        # Save dashboard data
         report_date = datetime.now().strftime("%Y%m%d")
         dashboard_json = json.dumps(dashboard, indent=2)
         
@@ -157,7 +147,6 @@ def generate_dashboard_data(**context):
         return {"error": error_msg}
 
 def generate_quality_report(**context):
-    """Generate data quality report"""
     setup_delta_environment()
     client = get_minio_client()
     
@@ -180,7 +169,6 @@ def generate_quality_report(**context):
                 "completeness_pct": round((non_null / total) * 100, 2) if total > 0 else 0
             }
         
-        # Find duplicate records
         id_count = unified_df['id'].value_counts()
         duplicate_ids = id_count[id_count > 1].to_dict()
         
@@ -226,7 +214,6 @@ def generate_quality_report(**context):
         return {"error": error_msg}
 
 def generate_data_catalog(**context):
-    """Generate data catalog with schema information"""
     setup_delta_environment()
     client = get_minio_client()
     
@@ -236,7 +223,6 @@ def generate_data_catalog(**context):
     }
     
     try:
-        # Process each table
         for table_name, table_path in {
             "collections": DELTA_COLLECTIONS,
             "metadata": DELTA_METADATA,
@@ -248,7 +234,6 @@ def generate_data_catalog(**context):
                 dt = DeltaTable(s3_path)
                 df = dt.to_pandas()
                 
-                # Get schema information
                 schema_info = []
                 for column in df.columns:
                     col_info = {
@@ -282,7 +267,6 @@ def generate_data_catalog(**context):
                 logging.error(f"Error processing table {table_name}: {str(e)}")
                 catalog["tables"][table_name] = {"error": str(e)}
         
-        # Save catalog
         report_date = datetime.now().strftime("%Y%m%d")
         catalog_json = json.dumps(catalog, indent=2)
         
@@ -302,7 +286,6 @@ def generate_data_catalog(**context):
             content_type='application/json'
         )
         
-        # Generate catalog summary
         table_summaries = {}
         for table_name, table_info in catalog["tables"].items():
             if "row_count" in table_info:
@@ -317,6 +300,72 @@ def generate_data_catalog(**context):
         
     except Exception as e:
         error_msg = f"Error generating data catalog: {str(e)}"
+        logging.error(error_msg)
+        return {"error": error_msg}
+
+def generate_usage_stats(**context):
+    client = get_minio_client()
+    ensure_bucket_exists(client, REPORTS_BUCKET)
+    
+    setup_delta_environment()
+    
+    stats = {
+        "timestamp": datetime.now().isoformat(),
+        "data": {}
+    }
+    
+    try:
+        unified_path = f"s3://{DELTA_BUCKET}/{DELTA_UNIFIED}"
+        unified_dt = DeltaTable(unified_path)
+        unified_df = unified_dt.to_pandas()
+        
+        downloads_by_collection = {}
+        if 'collection_name' in unified_df.columns and 'image_downloaded' in unified_df.columns:
+            collection_stats = unified_df.groupby('collection_name')['image_downloaded'].agg(['count', 'sum'])
+            for idx, row in collection_stats.iterrows():
+                downloads_by_collection[idx] = {
+                    "total": int(row['count']),
+                    "downloaded": int(row['sum']),
+                    "percentage": round((row['sum'] / row['count']) * 100, 1) if row['count'] > 0 else 0
+                }
+        
+        stats["data"]["downloads_by_collection"] = downloads_by_collection
+        
+        if 'clinical_diagnosis' in unified_df.columns and 'image_downloaded' in unified_df.columns:
+            diagnosis_stats = unified_df.groupby('clinical_diagnosis')['image_downloaded'].agg(['count', 'sum'])
+            downloads_by_diagnosis = {}
+            for idx, row in diagnosis_stats.iterrows():
+                if not pd.isna(idx) and row['count'] >= 5:  # Only include categories with at least 5 images
+                    downloads_by_diagnosis[idx] = {
+                        "total": int(row['count']),
+                        "downloaded": int(row['sum']),
+                        "percentage": round((row['sum'] / row['count']) * 100, 1) if row['count'] > 0 else 0
+                    }
+            stats["data"]["downloads_by_diagnosis"] = downloads_by_diagnosis
+        
+        report_date = datetime.now().strftime("%Y%m%d")
+        usage_json = json.dumps(stats, indent=2)
+        
+        client.put_object(
+            REPORTS_BUCKET,
+            f"usage_{report_date}.json",
+            io.BytesIO(usage_json.encode()),
+            length=len(usage_json),
+            content_type='application/json'
+        )
+        
+        client.put_object(
+            REPORTS_BUCKET,
+            "usage_latest.json",
+            io.BytesIO(usage_json.encode()),
+            length=len(usage_json),
+            content_type='application/json'
+        )
+        
+        return stats
+    
+    except Exception as e:
+        error_msg = f"Error generating usage stats: {str(e)}"
         logging.error(error_msg)
         return {"error": error_msg}
 
@@ -357,4 +406,10 @@ with DAG(
         provide_context=True,
     )
     
-    dashboard_task >> quality_task >> catalog_task
+    usage_task = PythonOperator(
+        task_id='generate_usage_stats',
+        python_callable=generate_usage_stats,
+        provide_context=True,
+    )
+    
+    dashboard_task >> quality_task >> catalog_task >> usage_task
