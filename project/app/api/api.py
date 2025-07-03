@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    token_routes, connection_routes, connections, metadata_viewer, data_visualization
+    token_routes, connection_routes, connections, metadata_viewer, data_visualization, isic_archive
 )
 
 api_router = APIRouter()
@@ -27,3 +27,6 @@ api_router.include_router(
     data_visualization.router, prefix="/visualize-data", tags=["Data Visualization"]
 )
 
+api_router.include_router(
+    isic_archive.router, prefix="/isic-archive", tags=["ISIC Archive"]
+)

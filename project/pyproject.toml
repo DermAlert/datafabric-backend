@@ -20,7 +20,7 @@ minio = "7.2.15"
 boto3 = "1.37.37"
 requests = "2.32.3"
 pandas = "2.2.3"
-
+pyarrow = "^15.0.2"
 [build-system]
 requires = ["poetry>=1.0"]
 build-backend = "poetry.masonry.api"

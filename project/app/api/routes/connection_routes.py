@@ -21,13 +21,8 @@ router = APIRouter()
 async def create_connection_type(
     connection_type: ConnectionTypeCreate,
     db: AsyncSession = Depends(get_db),
-    # current_user: core.User = Depends(require_role(RoleEnum.ADMIN)),
 ):
-    """
-    Create a new connection type.
-    
-    Requires admin role.
-    """
+  
     try:
         # Check if connection type with same name already exists
         result = await db.execute(
@@ -54,7 +49,6 @@ async def create_connection_type(
         await db.commit()
         await db.refresh(db_connection_type)
         
-        # logger.info(f"Connection type '{db_connection_type.name}' created by user {current_user.email}")
         return db_connection_type
     except HTTPException:
         raise
@@ -73,11 +67,7 @@ async def list_connection_types(
     db: AsyncSession = Depends(get_db),
     # current_user: core.User = Depends(require_role([RoleEnum.USER])),
 ):
-    """
-    List all available connection types.
-    
-    Any authenticated user with basic role can access.
-    """
+
     try:
         result = await db.execute(
             select(core.ConnectionType)
@@ -98,7 +88,6 @@ async def list_connection_types(
 async def get_connection_type(
     connection_type_id: int,
     db: AsyncSession = Depends(get_db),
-    # current_user: core.User = Depends(require_role([RoleEnum.USER])),
 ):
     """
     Get details of a specific connection type.
@@ -130,13 +119,8 @@ async def update_connection_type(
     connection_type_id: int,
     connection_type: ConnectionTypeUpdate,
     db: AsyncSession = Depends(get_db),
-    # current_user: core.User = Depends(require_role([RoleEnum.SUPERVISOR])),
 ):
-    """
-    Update an existing connection type.
-    
-    Requires admin or supervisor role.
-    """
+   
     try:
         # Get existing connection type
         result = await db.execute(
@@ -150,7 +134,6 @@ async def update_connection_type(
                 detail=f"Connection type with ID {connection_type_id} not found"
             )
         
-        # Check for name conflicts if name is being changed
         if connection_type.name is not None and connection_type.name != db_connection_type.name:
             name_result = await db.execute(
                 select(core.ConnectionType).where(core.ConnectionType.name == connection_type.name)
@@ -162,7 +145,6 @@ async def update_connection_type(
                     detail=f"Connection type with name '{connection_type.name}' already exists"
                 )
         
-        # Update fields
         for attr, value in connection_type.model_dump(exclude_unset=True).items():
             if value is not None:  # Only update non-None values
                 setattr(db_connection_type, attr, value)
@@ -170,7 +152,6 @@ async def update_connection_type(
         await db.commit()
         await db.refresh(db_connection_type)
         
-        # logger.info(f"Connection type ID {connection_type_id} updated by user {current_user.email}")
         return db_connection_type
         
     except HTTPException:
@@ -189,13 +170,8 @@ async def delete_connection_type(
     db: AsyncSession = Depends(get_db),
     # current_user: core.User = Depends(require_role(RoleEnum.ADMIN)),
 ):
-    """
-    Delete a connection type.
     
-    Requires admin role. Cannot delete connection types currently in use by data connections.
-    """
     try:
-        # Check if connection type exists
         result = await db.execute(
             select(core.ConnectionType).where(core.ConnectionType.id == connection_type_id)
         )
@@ -207,8 +183,6 @@ async def delete_connection_type(
                 detail=f"Connection type with ID {connection_type_id} not found"
             )
         
-        # Check if connection type is in use (requires a query to DataConnection table)
-        # This would need to be implemented based on your specific database structure
         
         # Delete the connection type
         await db.delete(db_connection_type)
