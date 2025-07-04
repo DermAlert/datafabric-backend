@@ -1,10 +1,8 @@
 x-airflow-common:
   &airflow-common
-  # Keep using the standard Airflow image
-  image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.10.5}
-  # build: 
-  #   context: .
-  #   dockerfile: Dockerfile.airflow
+  # Use custom Airflow image
+  image: dermalert-airflow:latest
+  # build: ./Dockerfile.airflow  # Uncomment this and comment out image: line to build locally
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
@@ -16,20 +14,26 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Configure AWS/S3 variables at the Docker level
+    AWS_ACCESS_KEY_ID: minio
+    AWS_SECRET_ACCESS_KEY: minio123
+    AWS_ENDPOINT_URL: http://minio:9000
     AWS_REGION: us-east-1
     AWS_S3_ALLOW_UNSAFE_RENAME: "true"
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-minio deltalake==1.0.2 pyarrow==20.0.0 fsspec==2023.12.0 s3fs==2023.12.0}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
     - ${AIRFLOW_PROJ_DIR:-.}/config:/opt/airflow/config
     - ${AIRFLOW_PROJ_DIR:-.}/plugins:/opt/airflow/plugins
+    - ${AIRFLOW_PROJ_DIR:-.}/data:/data
   user: "${AIRFLOW_UID:-50000}:0"
   depends_on:
     &airflow-common-depends-on
     redis:
       condition: service_healthy
     postgres-airflow:
+      condition: service_healthy
+    minio:
       condition: service_healthy
 
 services:
@@ -57,10 +61,30 @@ services:
       - "9001:9001"
     command: server /data --console-address ":9001"
     healthcheck:
-      test: ["CMD-SHELL", "curl --silent --fail http://127.0.0.1:9000/minio/health/ready || exit 1"]
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
-      timeout: 2s
+      timeout: 5s
       retries: 10
+
+  # Script to create initial buckets
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc config host add myminio http://minio:9000 minio minio123;
+      /usr/bin/mc mb myminio/isic-delta;
+      /usr/bin/mc mb myminio/isic-raw;
+      /usr/bin/mc mb myminio/isic-processed;
+      /usr/bin/mc mb myminio/isic-collections;
+      /usr/bin/mc mb myminio/isic-metadata;
+      /usr/bin/mc mb myminio/isic-categories;
+      /usr/bin/mc mb myminio/isic-images;
+      /usr/bin/mc mb myminio/isic-reports;
+      exit 0;
+      "
 
   postgres-airflow:
     image: postgres:15.3
@@ -122,6 +146,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
 
   airflow-scheduler:
     <<: *airflow-common
@@ -136,6 +162,8 @@ services:
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
 
   airflow-worker:
@@ -157,6 +185,8 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+      minio-init:
+        condition: service_completed_successfully
 
   airflow-triggerer:
     <<: *airflow-common
@@ -171,6 +201,8 @@ services:
     depends_on:
       <<: *airflow-common-depends-on
       airflow-init:
+        condition: service_completed_successfully
+      minio-init:
         condition: service_completed_successfully
 
   airflow-init:
@@ -230,7 +262,6 @@ services:
       _AIRFLOW_WWW_USER_CREATE: 'true'
       _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-airflow}
       _AIRFLOW_WWW_USER_PASSWORD: ${_AIRFLOW_WWW_USER_PASSWORD:-airflow}
-      _PIP_ADDITIONAL_REQUIREMENTS: ''
     user: "0:0"
     volumes:
       - ${AIRFLOW_PROJ_DIR:-.}:/sources
