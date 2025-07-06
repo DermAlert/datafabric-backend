@@ -44,6 +44,8 @@ services:
       - 8004:8000
     depends_on:
       - postgres-backend
+    networks:
+      - shared-network
 
   minio:
     image: minio/minio:latest
@@ -61,6 +63,8 @@ services:
       interval: 5s
       timeout: 2s
       retries: 10
+    networks:
+      - shared-network
 
   postgres-airflow:
     image: postgres:15.3
@@ -93,6 +97,8 @@ services:
      interval: 10s
      timeout: 5s
      retries: 5
+    networks:
+      - shared-network
 
   redis:
     image: redis:7.2-bookworm
@@ -250,3 +256,7 @@ services:
 volumes:
   airflow_pgdata:
   backend_pgdata:
+
+networks:
+  shared-network:
+    external: true
