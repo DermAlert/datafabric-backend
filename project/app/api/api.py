@@ -2,10 +2,15 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    token_routes, connection_routes, connections, metadata_viewer, data_visualization, equivalence
+    delta, token_routes, connection_routes, connections, metadata_viewer, data_visualization, equivalence
 )
 
 api_router = APIRouter()
+
+# teste delta spark
+api_router.include_router(
+    delta.router, prefix="/delta", tags=["Delta"]
+)
 
 api_router.include_router(
     token_routes.router, prefix="/token", tags=["Token Routes"]
@@ -30,4 +35,3 @@ api_router.include_router(
 api_router.include_router(
     equivalence.router, prefix="/equivalence", tags=["Equivalence"]
 )
-
