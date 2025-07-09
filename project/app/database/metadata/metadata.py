@@ -1,8 +1,9 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, JSON, TIMESTAMP, UniqueConstraint, Boolean, Numeric
 from sqlalchemy.sql import func
 from ..database import Base
+from ..baseMixin import AuditMixin
 
-class ExternalTables (Base):
+class ExternalTables (AuditMixin, Base):
     __tablename__ = "external_tables"
     __table_args__ = (
         UniqueConstraint('schema_id', 'table_name'),
@@ -20,7 +21,7 @@ class ExternalTables (Base):
     properties = Column(JSON, nullable=False, default={})
     description = Column(String, nullable=True)
 
-class ExternalCatalogs(Base):
+class ExternalCatalogs(AuditMixin, Base):
     __tablename__ = "external_catalogs"
     __table_args__ = {'schema': 'metadata'}
     id = Column(Integer, primary_key=True)  # substitui catalog_id UUID
@@ -30,7 +31,7 @@ class ExternalCatalogs(Base):
     external_reference = Column(String(255), nullable=True)  # external identifier in source system
     properties = Column(JSON, nullable=False, default={})
 
-class ExternalSchema(Base):
+class ExternalSchema(AuditMixin, Base):
     __tablename__ = "external_schemas"
     __table_args__ = (
         UniqueConstraint('connection_id', 'schema_name'),
@@ -44,7 +45,7 @@ class ExternalSchema(Base):
     external_reference = Column(String(255), nullable=True)
     properties = Column(JSON, nullable=False, default={})
 
-class ExternalColumn(Base):
+class ExternalColumn(AuditMixin, Base):
     __tablename__ = "external_columns"
     __table_args__ = (
         UniqueConstraint('table_id', 'column_name'),
@@ -70,7 +71,7 @@ class ExternalColumn(Base):
     sample_values = Column(JSON, nullable=False, default=[])
     properties = Column(JSON, nullable=False, default={})
 
-class ColumnTag(Base):
+class ColumnTag(AuditMixin, Base):
     __tablename__ = "column_tags"
     __table_args__ = (
         UniqueConstraint('column_id', 'tag_name', 'tag_type'),
