@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    delta, token_routes, connection_routes, connections, metadata_viewer, data_visualization, equivalence
+    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence
 )
 
 api_router = APIRouter()
@@ -21,7 +21,7 @@ api_router.include_router(
 )
 
 api_router.include_router(
-    connections.router, prefix="/connections", tags=["Connections"]
+    data_connection.router, prefix="/data-connections", tags=["Data Connection"]
 )
 
 api_router.include_router(

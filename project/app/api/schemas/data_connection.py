@@ -1,5 +1,5 @@
-from typing import Dict, Any, Optional, List
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
+from typing import Dict, Any, Optional
 from datetime import datetime
 
 class DataConnectionBase(BaseModel):
@@ -28,7 +28,6 @@ class DataConnectionResponse(DataConnectionBase):
     sync_status: str
     last_sync_time: Optional[datetime] = None
     next_sync_time: Optional[datetime] = None
-    
     class Config:
         orm_mode = True
 
