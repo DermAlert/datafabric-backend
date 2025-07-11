@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field, validator
 from typing import Dict, Any, Optional
+from app.api.schemas.search import BaseSearchRequest
 
 class ConnectionTypeBase(BaseModel):
     name: str = Field(..., description="Unique name of the connection type (e.g., 'PostgreSQL', 'MinIO')")
@@ -18,6 +19,11 @@ class ConnectionTypeBase(BaseModel):
 class ConnectionTypeCreate(ConnectionTypeBase):
     pass
 
+
+class SearchConnectionType(BaseSearchRequest):
+    connection_type_id: Optional[int] = None
+  
+
 class ConnectionTypeUpdate(BaseModel):
     name: Optional[str] = None
     description: Optional[str] = None
@@ -34,5 +40,6 @@ class ConnectionTypeUpdate(BaseModel):
 
 class ConnectionTypeResponse(ConnectionTypeBase):
     id: int
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }

@@ -3,10 +3,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 from app.database.database import get_db
 from app.api.schemas.connection_type import (
-    ConnectionTypeCreate, ConnectionTypeUpdate, ConnectionTypeResponse
+    ConnectionTypeCreate, ConnectionTypeUpdate, ConnectionTypeResponse,SearchConnectionType
 )
-from app.api.schemas.search import BaseSearchRequest, SearchResult
-from app.api.service.connection_type_service import ConnectionTypeService
+from app.api.schemas.search import BaseSearchRequest, SearchResult 
+from app.api.service.connection_type_service import ConnectionTypeService 
 
 router = APIRouter(prefix="/connection-types", tags=["connection-types"])
 
@@ -19,10 +19,16 @@ async def create_connection_type(
 
 @router.post("/search", response_model=SearchResult[ConnectionTypeResponse])
 async def search_connection_types(
-    search: BaseSearchRequest,
+    search: SearchConnectionType,
     db: AsyncSession = Depends(get_db),
-):
-    result = await ConnectionTypeService(db).list(search)
+): 
+    service = ConnectionTypeService(db)
+
+    if search.connection_type_id:
+        result = await service.list_by_id(search)
+    else:
+        result = await service.list(search)
+
     return SearchResult(
         total=result.total,
         items=[ConnectionTypeResponse.from_orm(obj) for obj in result.items]

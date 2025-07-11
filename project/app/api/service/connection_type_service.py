@@ -1,7 +1,7 @@
 from sqlalchemy.future import select
 from fastapi import HTTPException, status
 from app.api.schemas.connection_type import (
-    ConnectionTypeCreate, ConnectionTypeUpdate, ConnectionTypeResponse
+    ConnectionTypeCreate, ConnectionTypeUpdate, ConnectionTypeResponse,SearchConnectionType
 )
 from app.api.schemas.search import BaseSearchRequest, SearchDataResult
 from app.database.databaseUtils import DatabaseService
@@ -28,6 +28,15 @@ class ConnectionTypeService:
         stmt = select(core.ConnectionType).order_by(core.ConnectionType.name)
         result = await self.db_service.scalars_paginate(search, stmt)
         return result
+    
+    async def list_by_id(self, search: SearchConnectionType) -> SearchDataResult:
+        stmt = select(core.ConnectionType)
+
+        if search.connection_type_id:
+            stmt = stmt.where(core.ConnectionType.id == search.connection_type_id)
+
+        return await  self.db_service.scalars_paginate(search, stmt)
+
 
     async def get(self, id: int):
         stmt = select(core.ConnectionType).where(core.ConnectionType.id == id)
