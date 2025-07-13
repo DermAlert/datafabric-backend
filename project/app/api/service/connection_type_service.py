@@ -24,8 +24,17 @@ class ConnectionTypeService:
         await self.db.refresh(obj)
         return obj
 
-    async def list(self, search: BaseSearchRequest):
-        stmt = select(core.ConnectionType).order_by(core.ConnectionType.name)
+    async def list(self, search: SearchConnectionType):
+        stmt = select(core.ConnectionType)
+        
+        # Apply filters
+        if search.name:
+            stmt = stmt.where(core.ConnectionType.name.ilike(f"%{search.name}%"))
+        
+        if search.metadata_extraction_method:
+            stmt = stmt.where(core.ConnectionType.metadata_extraction_method == search.metadata_extraction_method)
+        
+        stmt = stmt.order_by(core.ConnectionType.name)
         result = await self.db_service.scalars_paginate(search, stmt)
         return result
     
@@ -34,8 +43,16 @@ class ConnectionTypeService:
 
         if search.connection_type_id:
             stmt = stmt.where(core.ConnectionType.id == search.connection_type_id)
-
-        return await  self.db_service.scalars_paginate(search, stmt)
+        
+        # Apply additional filters
+        if search.name:
+            stmt = stmt.where(core.ConnectionType.name.ilike(f"%{search.name}%"))
+        
+        if search.metadata_extraction_method:
+            stmt = stmt.where(core.ConnectionType.metadata_extraction_method == search.metadata_extraction_method)
+        
+        stmt = stmt.order_by(core.ConnectionType.name)
+        return await self.db_service.scalars_paginate(search, stmt)
 
 
     async def get(self, id: int):

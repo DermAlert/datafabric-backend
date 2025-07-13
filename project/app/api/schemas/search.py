@@ -5,8 +5,8 @@ from dataclasses import dataclass
 T = TypeVar("T")
 
 class SearchRequestPagination(BaseModel):
-    skip: Optional[int] = None
-    limit: Optional[int] = Field(None, examples=[15])
+    skip: Optional[int] = 0
+    limit: Optional[int] = Field(15, examples=[15])
     query_total: bool = False
 
 class BaseSearchRequest(BaseModel):

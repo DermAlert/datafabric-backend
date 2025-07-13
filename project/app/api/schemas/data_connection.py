@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 from datetime import datetime
+from app.api.schemas.search import BaseSearchRequest
 
 class DataConnectionBase(BaseModel):
     name: str
@@ -21,6 +22,12 @@ class DataConnectionUpdate(BaseModel):
     cron_expression: Optional[str] = None
     sync_settings: Optional[Dict[str, Any]] = None
 
+class SearchDataConnection(BaseSearchRequest):
+    organization_id: Optional[int] = None
+    status: Optional[str] = None
+    connection_type_id: Optional[int] = None
+    name: Optional[str] = None
+
 class DataConnectionResponse(DataConnectionBase):
     id: int
     organization_id: int
@@ -28,8 +35,10 @@ class DataConnectionResponse(DataConnectionBase):
     sync_status: str
     last_sync_time: Optional[datetime] = None
     next_sync_time: Optional[datetime] = None
-    class Config:
-        orm_mode = True
+    
+    model_config = {
+        "from_attributes": True
+    }
 
 class ConnectionTestResult(BaseModel):
     success: bool

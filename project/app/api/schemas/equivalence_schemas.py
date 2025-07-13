@@ -2,6 +2,7 @@ from typing import Dict, Any, List, Optional
 from pydantic import BaseModel, Field
 from decimal import Decimal
 from datetime import datetime
+from app.api.schemas.search import BaseSearchRequest
 
 # Semantic Domain Schemas
 class SemanticDomainBase(BaseModel):
@@ -22,8 +23,9 @@ class SemanticDomainUpdate(BaseModel):
 class SemanticDomainResponse(SemanticDomainBase):
     id: int
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 # Data Dictionary Schemas
 class DataDictionaryBase(BaseModel):
@@ -52,8 +54,9 @@ class DataDictionaryUpdate(BaseModel):
 class DataDictionaryResponse(DataDictionaryBase):
     id: int
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 # Column Group Schemas
 class ColumnGroupBase(BaseModel):
@@ -76,8 +79,9 @@ class ColumnGroupUpdate(BaseModel):
 class ColumnGroupResponse(ColumnGroupBase):
     id: int
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 # Column Mapping Schemas
 class ColumnMappingBase(BaseModel):
@@ -98,8 +102,9 @@ class ColumnMappingUpdate(BaseModel):
 class ColumnMappingResponse(ColumnMappingBase):
     id: int
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 # Value Mapping Schemas
 class ValueMappingBase(BaseModel):
@@ -120,8 +125,9 @@ class ValueMappingUpdate(BaseModel):
 class ValueMappingResponse(ValueMappingBase):
     id: int
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 # Complex Response Schemas
 class ColumnGroupWithMappingsResponse(ColumnGroupResponse):
@@ -144,7 +150,30 @@ class BulkValueMappingCreate(BaseModel):
     mappings: List[ValueMappingCreate]
 
 # Search and filter schemas
-class EquivalenceSearchRequest(BaseModel):
+class SearchSemanticDomain(BaseSearchRequest):
+    name: Optional[str] = Field(None, description="Filtrar por nome")
+    parent_domain_id: Optional[int] = Field(None, description="Filtrar por domínio pai")
+
+class SearchDataDictionary(BaseSearchRequest):
+    name: Optional[str] = Field(None, description="Filtrar por nome")
+    semantic_domain_id: Optional[int] = Field(None, description="Filtrar por domínio semântico")
+    data_type: Optional[str] = Field(None, description="Filtrar por tipo de dados")
+
+class SearchColumnGroup(BaseSearchRequest):
+    name: Optional[str] = Field(None, description="Filtrar por nome")
+    semantic_domain_id: Optional[int] = Field(None, description="Filtrar por domínio semântico")
+    data_dictionary_term_id: Optional[int] = Field(None, description="Filtrar por termo do dicionário")
+
+class SearchColumnMapping(BaseSearchRequest):
+    group_id: Optional[int] = Field(None, description="Filtrar por grupo")
+    column_id: Optional[int] = Field(None, description="Filtrar por coluna")
+
+class SearchValueMapping(BaseSearchRequest):
+    group_id: Optional[int] = Field(None, description="Filtrar por grupo")
+    source_column_id: Optional[int] = Field(None, description="Filtrar por coluna de origem")
+    source_value: Optional[str] = Field(None, description="Filtrar por valor de origem")
+
+class EquivalenceSearchRequest(BaseSearchRequest):
     query: Optional[str] = Field(None, description="Texto de busca")
     semantic_domain_id: Optional[int] = Field(None, description="Filtrar por domínio semântico")
     data_type: Optional[str] = Field(None, description="Filtrar por tipo de dados")

@@ -30,8 +30,14 @@ from ..schemas.equivalence_schemas import (
     ValueMappingResponse,
     BulkColumnMappingCreate,
     BulkValueMappingCreate,
-    EquivalenceSearchRequest
+    EquivalenceSearchRequest,
+    SearchSemanticDomain,
+    SearchDataDictionary,
+    SearchColumnGroup,
+    SearchColumnMapping,
+    SearchValueMapping
 )
+from ..schemas.search import SearchResult
 
 from ...database.core import core
 from ...services.connectors.postgres_connector import test_postgres_connection
@@ -216,6 +222,55 @@ async def delete_semantic_domain(
             detail=f"Erro ao remover domínio semântico: {str(e)}"
         )
 
+@router.post("/semantic-domains/search", response_model=SearchResult[SemanticDomainResponse])
+async def search_semantic_domains(
+    search: SearchSemanticDomain,
+    db: AsyncSession = Depends(get_db),
+):
+    """Search semantic domains with pagination and filters"""
+    try:
+        query = select(equivalence.SemanticDomain)
+        
+        # Apply filters
+        if search.name:
+            query = query.where(equivalence.SemanticDomain.name.ilike(f"%{search.name}%"))
+        
+        if search.parent_domain_id is not None:
+            query = query.where(equivalence.SemanticDomain.parent_domain_id == search.parent_domain_id)
+        
+        # Get total count if requested
+        total = 0
+        if search.pagination.query_total:
+            count_result = await db.execute(
+                select(func.count()).select_from(query.subquery())
+            )
+            total = count_result.scalar()
+        
+        # Apply pagination
+        if search.pagination.skip:
+            query = query.offset(search.pagination.skip)
+        if search.pagination.limit:
+            query = query.limit(search.pagination.limit)
+        
+        query = query.order_by(equivalence.SemanticDomain.name)
+        
+        result = await db.execute(query)
+        domains = result.scalars().all()
+        
+        # If query_total is false, set total to the count of returned items
+        if not search.pagination.query_total:
+            total = len(domains)
+        
+        return SearchResult(
+            total=total,
+            items=domains
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao buscar domínios semânticos: {str(e)}"
+        )
+
 # ==================== DATA DICTIONARY ====================
 
 @router.get("/data-dictionary", response_model=List[DataDictionaryResponse])
@@ -387,6 +442,60 @@ async def delete_data_dictionary_term(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao remover termo: {str(e)}"
         )
+    
+# ==================== DATA DICTIONARY ====================
+
+@router.post("/data-dictionary/search", response_model=SearchResult[DataDictionaryResponse])
+async def search_data_dictionary(
+    search: SearchDataDictionary,
+    db: AsyncSession = Depends(get_db),
+):
+    """Search data dictionary terms with pagination and filters"""
+    try:
+        query = select(equivalence.DataDictionary)
+        
+        # Apply filters
+        if search.name:
+            query = query.where(equivalence.DataDictionary.name.ilike(f"%{search.name}%"))
+        
+        if search.semantic_domain_id is not None:
+            query = query.where(equivalence.DataDictionary.semantic_domain_id == search.semantic_domain_id)
+        
+        if search.data_type:
+            query = query.where(equivalence.DataDictionary.data_type == search.data_type)
+        
+        # Get total count if requested
+        total = 0
+        if search.pagination.query_total:
+            count_result = await db.execute(
+                select(func.count()).select_from(query.subquery())
+            )
+            total = count_result.scalar()
+        
+        # Apply pagination
+        if search.pagination.skip:
+            query = query.offset(search.pagination.skip)
+        if search.pagination.limit:
+            query = query.limit(search.pagination.limit)
+        
+        query = query.order_by(equivalence.DataDictionary.name)
+        
+        result = await db.execute(query)
+        terms = result.scalars().all()
+        
+        # If query_total is false, set total to the count of returned items
+        if not search.pagination.query_total:
+            total = len(terms)
+        
+        return SearchResult(
+            total=total,
+            items=terms
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao buscar termos do dicionário: {str(e)}"
+        )
 
 # ==================== COLUMN GROUPS ====================
 
@@ -549,6 +658,58 @@ async def delete_column_group(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao remover grupo de colunas: {str(e)}"
+        )
+
+@router.post("/column-groups/search", response_model=SearchResult[ColumnGroupResponse])
+async def search_column_groups(
+    search: SearchColumnGroup,
+    db: AsyncSession = Depends(get_db),
+):
+    """Search column groups with pagination and filters"""
+    try:
+        query = select(equivalence.ColumnGroup)
+        
+        # Apply filters
+        if search.name:
+            query = query.where(equivalence.ColumnGroup.name.ilike(f"%{search.name}%"))
+        
+        if search.semantic_domain_id is not None:
+            query = query.where(equivalence.ColumnGroup.semantic_domain_id == search.semantic_domain_id)
+        
+        if search.data_dictionary_term_id is not None:
+            query = query.where(equivalence.ColumnGroup.data_dictionary_term_id == search.data_dictionary_term_id)
+        
+        # Get total count if requested
+        total = 0
+        if search.pagination.query_total:
+            count_result = await db.execute(
+                select(func.count()).select_from(query.subquery())
+            )
+            total = count_result.scalar()
+        
+        # Apply pagination
+        if search.pagination.skip:
+            query = query.offset(search.pagination.skip)
+        if search.pagination.limit:
+            query = query.limit(search.pagination.limit)
+        
+        query = query.order_by(equivalence.ColumnGroup.name)
+        
+        result = await db.execute(query)
+        groups = result.scalars().all()
+        
+        # If query_total is false, set total to the count of returned items
+        if not search.pagination.query_total:
+            total = len(groups)
+        
+        return SearchResult(
+            total=total,
+            items=groups
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao buscar grupos de colunas: {str(e)}"
         )
 
 # ==================== COLUMN MAPPINGS ====================
@@ -747,6 +908,55 @@ async def delete_column_mapping(
             detail=f"Erro ao remover mapeamento: {str(e)}"
         )
 
+@router.post("/column-mappings/search", response_model=SearchResult[ColumnMappingResponse])
+async def search_column_mappings(
+    search: SearchColumnMapping,
+    db: AsyncSession = Depends(get_db),
+):
+    """Search column mappings with pagination and filters"""
+    try:
+        query = select(equivalence.ColumnMapping)
+        
+        # Apply filters
+        if search.group_id is not None:
+            query = query.where(equivalence.ColumnMapping.group_id == search.group_id)
+        
+        if search.column_id is not None:
+            query = query.where(equivalence.ColumnMapping.column_id == search.column_id)
+        
+        # Get total count if requested
+        total = 0
+        if search.pagination.query_total:
+            count_result = await db.execute(
+                select(func.count()).select_from(query.subquery())
+            )
+            total = count_result.scalar()
+        
+        # Apply pagination
+        if search.pagination.skip:
+            query = query.offset(search.pagination.skip)
+        if search.pagination.limit:
+            query = query.limit(search.pagination.limit)
+        
+        query = query.order_by(equivalence.ColumnMapping.id)
+        
+        result = await db.execute(query)
+        mappings = result.scalars().all()
+        
+        # If query_total is false, set total to the count of returned items
+        if not search.pagination.query_total:
+            total = len(mappings)
+        
+        return SearchResult(
+            total=total,
+            items=mappings
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao buscar mapeamentos de colunas: {str(e)}"
+        )
+
 # ==================== VALUE MAPPINGS ====================
 
 @router.get("/column-groups/{group_id}/value-mappings", response_model=List[ValueMappingResponse])
@@ -916,6 +1126,61 @@ async def delete_value_mapping(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao remover mapeamento de valor: {str(e)}"
         )
+
+# ==================== VALUE MAPPINGS ====================
+
+@router.post("/value-mappings/search", response_model=SearchResult[ValueMappingResponse])
+async def search_value_mappings(
+    search: SearchValueMapping,
+    db: AsyncSession = Depends(get_db),
+):
+    """Search value mappings with pagination and filters"""
+    try:
+        query = select(equivalence.ValueMapping)
+        
+        # Apply filters
+        if search.group_id is not None:
+            query = query.where(equivalence.ValueMapping.group_id == search.group_id)
+        
+        if search.source_column_id is not None:
+            query = query.where(equivalence.ValueMapping.source_column_id == search.source_column_id)
+        
+        if search.source_value:
+            query = query.where(equivalence.ValueMapping.source_value.ilike(f"%{search.source_value}%"))
+        
+        # Get total count if requested
+        total = 0
+        if search.pagination.query_total:
+            count_result = await db.execute(
+                select(func.count()).select_from(query.subquery())
+            )
+            total = count_result.scalar()
+        
+        # Apply pagination
+        if search.pagination.skip:
+            query = query.offset(search.pagination.skip)
+        if search.pagination.limit:
+            query = query.limit(search.pagination.limit)
+        
+        query = query.order_by(equivalence.ValueMapping.id)
+        
+        result = await db.execute(query)
+        mappings = result.scalars().all()
+        
+        # If query_total is false, set total to the count of returned items
+        if not search.pagination.query_total:
+            total = len(mappings)
+        
+        return SearchResult(
+            total=total,
+            items=mappings
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao buscar mapeamentos de valores: {str(e)}"
+        )
+
 
 # ==================== SEARCH AND SUGGESTIONS ====================
 

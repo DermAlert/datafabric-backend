@@ -3,12 +3,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from app.database.database import get_db
 from app.api.schemas.data_connection import (
-    DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult
+    DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult, SearchDataConnection
 )
-from app.api.schemas.search import BaseSearchRequest, SearchResult
+from app.api.schemas.search import SearchResult
 from app.api.service.data_connection_service import DataConnectionService
 
-router = APIRouter(prefix="/data-connections", tags=["data-connections"])
+# router = APIRouter(prefix="/data-connections", tags=["data-connections"])
+router = APIRouter()
 
 @router.post("/", response_model=DataConnectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_data_connection(
@@ -20,21 +21,20 @@ async def create_data_connection(
 
 @router.post("/search", response_model=SearchResult[DataConnectionResponse])
 async def search_data_connections(
-    search: BaseSearchRequest,
-    organization_id: Optional[int] = None,
-    status: Optional[str] = None,
-    connection_type_id: Optional[int] = None,
+    search: SearchDataConnection,
     db: AsyncSession = Depends(get_db),
 ):
+    """Search data connections with pagination and filters"""
     result = await DataConnectionService(db).list(
         search,
-        organization_id=organization_id,
-        status=status,
-        connection_type_id=connection_type_id
+        organization_id=search.organization_id,
+        status=search.status,
+        connection_type_id=search.connection_type_id,
+        name=search.name
     )
     return SearchResult(
         total=result.total,
-        items=[DataConnectionResponse.from_orm(obj) for obj in result.items]
+        items=[DataConnectionResponse.model_validate(obj) for obj in result.items]
     )
 
 @router.get("/{id}", response_model=DataConnectionResponse)

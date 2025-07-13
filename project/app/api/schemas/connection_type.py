@@ -22,6 +22,8 @@ class ConnectionTypeCreate(ConnectionTypeBase):
 
 class SearchConnectionType(BaseSearchRequest):
     connection_type_id: Optional[int] = None
+    name: Optional[str] = None
+    metadata_extraction_method: Optional[str] = None
   
 
 class ConnectionTypeUpdate(BaseModel):

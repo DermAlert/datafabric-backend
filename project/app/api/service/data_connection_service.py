@@ -40,7 +40,8 @@ class DataConnectionService:
         return obj
 
     async def list(self, search: BaseSearchRequest, organization_id: Optional[int] = None,
-                   status: Optional[str] = None, connection_type_id: Optional[int] = None):
+                   status: Optional[str] = None, connection_type_id: Optional[int] = None,
+                   name: Optional[str] = None):
         stmt = select(core.DataConnection)
         if organization_id:
             stmt = stmt.where(core.DataConnection.organization_id == organization_id)
@@ -48,6 +49,8 @@ class DataConnectionService:
             stmt = stmt.where(core.DataConnection.status == status)
         if connection_type_id:
             stmt = stmt.where(core.DataConnection.connection_type_id == connection_type_id)
+        if name:
+            stmt = stmt.where(core.DataConnection.name.ilike(f"%{name}%"))
         stmt = stmt.order_by(core.DataConnection.id)
         result = await self.db_service.scalars_paginate(search, stmt)
         return result

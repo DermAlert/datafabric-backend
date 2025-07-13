@@ -10,8 +10,9 @@ class CatalogResponse(BaseModel):
     external_reference: Optional[str] = None
     properties: Dict[str, Any]
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class SchemaResponse(BaseModel):
     id: int
@@ -21,8 +22,9 @@ class SchemaResponse(BaseModel):
     external_reference: Optional[str] = None
     properties: Dict[str, Any]
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class TableResponse(BaseModel):
     id: int
@@ -37,8 +39,9 @@ class TableResponse(BaseModel):
     properties: Dict[str, Any]
     description: Optional[str] = None
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class ColumnResponse(BaseModel):
     id: int
@@ -60,8 +63,9 @@ class ColumnResponse(BaseModel):
     sample_values: List[Any]
     properties: Dict[str, Any]
     
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class TableDetailsResponse(TableResponse):
     schema_name: Optional[str] = None

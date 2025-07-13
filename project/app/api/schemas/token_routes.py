@@ -16,8 +16,9 @@ class RoleOut(BaseModel):
     name: str
     nivel_acesso: int
 
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
 
 class UserOut(BaseModel):
     id: int
@@ -27,5 +28,6 @@ class UserOut(BaseModel):
     fl_ativo: bool
     roles: List[RoleOut] = []
 
-    class Config:
-        orm_mode = True
+    model_config = {
+        "from_attributes": True
+    }
