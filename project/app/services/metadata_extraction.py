@@ -12,8 +12,9 @@ from ..utils.logger import logger
 
 # Import specific extractors
 from .extractors.postgres_extractor import PostgresExtractor
+from .extractors.delta_extractor import DeltaExtractor
 # from .extractors.mongodb_extractor import MongoDBExtractor
-from .extractors.minio_extractor import MinioExtractor
+# from .extractors.minio_extractor import MinioExtractor
 # from .extractors.mysql_extractor import MySQLExtractor
 # from .extractors.bigquery_extractor import BigQueryExtractor
 
@@ -21,9 +22,11 @@ from .extractors.minio_extractor import MinioExtractor
 EXTRACTORS = {
     "postgresql": PostgresExtractor,
     "postgres": PostgresExtractor,
+    "deltalake": DeltaExtractor,
+    "delta": DeltaExtractor,
     # "mongodb": MongoDBExtractor,
-    "minio": MinioExtractor,
-    "s3": MinioExtractor,
+    # "minio": MinioExtractor,
+    # "s3": MinioExtractor,
     # "mysql": MySQLExtractor,
     # "bigquery": BigQueryExtractor,
     # Add more extractors as needed

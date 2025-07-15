@@ -7,18 +7,21 @@ from ..api.schemas.data_visualization_schemas import Filter, Sort
 
 # Import specific visualizers
 from .visualizers.postgres_visualizer import visualize_postgres_data, execute_postgres_query
+from .visualizers.delta_visualizer import visualize_delta_data, execute_delta_query
 # from .visualizers.mongodb_visualizer import visualize_mongodb_data, execute_mongodb_query
 # from .visualizers.mysql_visualizer import visualize_mysql_data, execute_mysql_query
-from .visualizers.minio_visualizer import visualize_minio_data
+# from .visualizers.minio_visualizer import visualize_minio_data
 # from .visualizers.bigquery_visualizer import visualize_bigquery_data, execute_bigquery_query
 
 # Map connection types to their visualizer functions
 DATA_VISUALIZERS = {
     "postgresql": visualize_postgres_data,
     "postgres": visualize_postgres_data,
+    "deltalake": visualize_delta_data,
+    "delta": visualize_delta_data,
     # "mongodb": visualize_mongodb_data,
-    "minio": visualize_minio_data,
-    "s3": visualize_minio_data,
+    # "minio": visualize_minio_data,
+    # "s3": visualize_minio_data,
     # "mysql": visualize_mysql_data,
     # "bigquery": visualize_bigquery_data,
     # Add more visualizers as needed
@@ -28,6 +31,8 @@ DATA_VISUALIZERS = {
 QUERY_EXECUTORS = {
     "postgresql": execute_postgres_query,
     "postgres": execute_postgres_query,
+    "deltalake": execute_delta_query,
+    "delta": execute_delta_query,
     # "mongodb": execute_mongodb_query,
     # "mysql": execute_mysql_query,
     # "bigquery": execute_bigquery_query,
