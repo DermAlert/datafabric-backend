@@ -38,7 +38,7 @@ DELTA_BUCKET = "isic-delta"
 IMAGES_BUCKET = "isic-images"
 
 # Delta Lake paths
-COLLECTIONS_DELTA_PATH = "collections/collections.delta"
+COLLECTIONS_DELTA_PATH = "collections/collections"
 IMAGES_METADATA_DELTA_PATH = "images_metadata"
 
 # S3-compatible storage configuration for Delta Lake
