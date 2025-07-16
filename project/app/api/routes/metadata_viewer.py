@@ -213,7 +213,8 @@ async def get_table_details(
                 # Adding the missing required fields
                 is_indexed=getattr(col, 'is_indexed', False),  # Default to False if not available
                 statistics=getattr(col, 'statistics', {}),     # Default to empty dict if not available
-                sample_values=getattr(col, 'sample_values', [])  # Default to empty list if not available
+                sample_values=getattr(col, 'sample_values', []),  # Default to empty list if not available
+                fl_ativo=col.fl_ativo
             ) for col in columns_db
         ]
         
@@ -232,6 +233,7 @@ async def get_table_details(
             last_analyzed=table.last_analyzed,
             properties=table.properties,
             description=table.description,
+            fl_ativo=table.fl_ativo,
             schema_name=schema.schema_name if schema else None,
             columns=columns,
             primary_key_count=primary_key_count,

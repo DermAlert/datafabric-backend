@@ -9,6 +9,7 @@ class CatalogResponse(BaseModel):
     catalog_type: Optional[str] = None
     external_reference: Optional[str] = None
     properties: Dict[str, Any]
+    fl_ativo: bool
     
     model_config = {
         "from_attributes": True
@@ -21,6 +22,7 @@ class SchemaResponse(BaseModel):
     schema_name: str
     external_reference: Optional[str] = None
     properties: Dict[str, Any]
+    fl_ativo: bool
     
     model_config = {
         "from_attributes": True
@@ -38,6 +40,7 @@ class TableResponse(BaseModel):
     last_analyzed: Optional[datetime] = None
     properties: Dict[str, Any]
     description: Optional[str] = None
+    fl_ativo: bool
     
     model_config = {
         "from_attributes": True
@@ -62,6 +65,7 @@ class ColumnResponse(BaseModel):
     statistics: Dict[str, Any]
     sample_values: List[Any]
     properties: Dict[str, Any]
+    fl_ativo: bool
     
     model_config = {
         "from_attributes": True

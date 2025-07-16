@@ -34,9 +34,6 @@ class DataConnectionService:
         self.db.add(obj)
         await self.db.commit()
         await self.db.refresh(obj)
-        # Metadata extraction in background
-        if background_tasks:
-            background_tasks.add_task(extract_metadata, connection_id=obj.id)
         return obj
 
     async def list(self, search: BaseSearchRequest, organization_id: Optional[int] = None,
@@ -75,16 +72,11 @@ class DataConnectionService:
             if existing:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                                     detail=f"Connection with name '{data.name}' already exists in this organization")
-        connection_params_updated = False
-        if data.connection_params is not None and data.connection_params != obj.connection_params:
-            connection_params_updated = True
         for attr, value in data.model_dump(exclude_unset=True).items():
             if value is not None:
                 setattr(obj, attr, value)
         await self.db.commit()
         await self.db.refresh(obj)
-        if connection_params_updated and background_tasks:
-            background_tasks.add_task(extract_metadata, connection_id=obj.id)
         return obj
 
     async def delete(self, id: int):
