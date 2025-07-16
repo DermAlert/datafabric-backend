@@ -40,8 +40,8 @@ from ..schemas.equivalence_schemas import (
 from ..schemas.search import SearchResult
 
 from ...database.core import core
-from ...services.connectors.postgres_connector import test_postgres_connection
-from ...services.distinct_values_service import DistinctValuesService
+# from ...services.connectors.postgres_connector import test_postgres_connection
+# from ...services.distinct_values_service import DistinctValuesService
 
 router = APIRouter()
 
@@ -1429,117 +1429,4 @@ async def get_mapping_coverage_statistics(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao calcular estatísticas: {str(e)}"
-        )
-
-@router.get("/columns/{column_id}/distinct-values")
-async def get_distinct_values_for_column(
-    column_id: int,
-    limit: int = 100,
-    db: AsyncSession = Depends(get_db),
-):
-    """
-    Retorna os valores distintos encontrados para uma coluna de metadados,
-    consultando diretamente a fonte de dados (PostgreSQL, Delta Lake, etc.).
-    """
-    try:
-        # Buscar a coluna
-        column_result = await db.execute(
-            select(metadata.ExternalColumn)
-            .where(metadata.ExternalColumn.id == column_id)
-        )
-        column = column_result.scalars().first()
-        if not column:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Coluna com ID {column_id} não encontrada"
-            )
-        
-        # Buscar a tabela
-        table_result = await db.execute(
-            select(metadata.ExternalTables)
-            .where(metadata.ExternalTables.id == column.table_id)
-        )
-        table = table_result.scalars().first()
-        if not table:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Tabela com ID {column.table_id} não encontrada"
-            )
-        
-        # Buscar o schema
-        schema_result = await db.execute(
-            select(metadata.ExternalSchema)
-            .where(metadata.ExternalSchema.id == table.schema_id)
-        )
-        schema = schema_result.scalars().first()
-        if not schema:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Schema com ID {table.schema_id} não encontrado"
-            )
-        
-        # Buscar a conexão
-        conn_result = await db.execute(
-            select(core.DataConnection)
-            .where(core.DataConnection.id == table.connection_id)
-        )
-        conn = conn_result.scalars().first()
-        if not conn:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Connection com ID {table.connection_id} não encontrada"
-            )
-        
-        # Buscar o tipo da conexão
-        conn_type = None
-        if hasattr(conn, 'connection_type_id'):
-            type_result = await db.execute(
-                select(core.ConnectionType)
-                .where(core.ConnectionType.id == conn.connection_type_id)
-            )
-            conn_type_obj = type_result.scalars().first()
-            if conn_type_obj:
-                conn_type = conn_type_obj.name.lower()
-        
-        if not conn_type:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Tipo de conexão não encontrado"
-            )
-        
-        # Verificar se o tipo de conexão é suportado
-        if not await DistinctValuesService.is_connection_type_supported(conn_type):
-            supported_types = DistinctValuesService.get_supported_connection_types()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Tipo de conexão '{conn_type}' não suportado. Tipos suportados: {', '.join(supported_types)}"
-            )
-        
-        # Buscar valores distintos usando o serviço genérico
-        schema_name = schema.schema_name
-        table_name = table.table_name
-        column_name = column.column_name
-        
-        values = await DistinctValuesService.get_distinct_values(
-            connection_type=conn_type,
-            connection_params=conn.connection_params,
-            schema_name=schema_name,
-            table_name=table_name,
-            column_name=column_name,
-            limit=limit
-        )
-        
-        return {
-            "column_id": column_id,
-            "connection_type": conn_type,
-            "distinct_values": values,
-            "total_returned": len(values)
-        }
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Erro ao buscar valores distintos: {str(e)}"
         )
