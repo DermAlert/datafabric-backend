@@ -28,9 +28,9 @@ api_router.include_router(
     metadata_viewer.router, prefix="/metadata", tags=["Metadata Viewer"]
 )
 
-api_router.include_router(
-    data_visualization.router, prefix="/visualize-data", tags=["Data Visualization"]
-)
+# api_router.include_router(
+#     data_visualization.router, prefix="/visualize-data", tags=["Data Visualization"]
+# )
 
 api_router.include_router(
     equivalence.router, prefix="/equivalence", tags=["Equivalence"]
