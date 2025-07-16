@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import update
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 
 from ...database.database import get_db
 from ...database.core import core
@@ -13,7 +15,11 @@ from ..schemas.metadata_schemas import (
     TableResponse,
     ColumnResponse,
     TableDetailsResponse,
-    DataPreviewResponse
+    DataPreviewResponse,
+    UpdateFlAtivoRequest,
+    BulkUpdateFlAtivoRequest,
+    UpdateFlAtivoResponse,
+    BulkUpdateFlAtivoResponse
 )
 # from ...services.data_preview import get_data_preview
 from ...services.distinct_values_service import DistinctValuesService
@@ -360,4 +366,394 @@ async def get_distinct_values_for_column(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar valores distintos: {str(e)}"
+        )
+
+# APIs para editar fl_ativo
+
+# APIs para atualização em lote (devem vir ANTES das rotas com parâmetros dinâmicos)
+
+@router.patch("/catalogs/bulk/fl_ativo", response_model=BulkUpdateFlAtivoResponse)
+async def bulk_update_catalogs_fl_ativo(
+    request: BulkUpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Bulk update the fl_ativo status of multiple catalogs.
+    """
+    try:
+        # Verify catalogs exist
+        catalogs_result = await db.execute(
+            select(metadata.ExternalCatalogs).where(metadata.ExternalCatalogs.id.in_(request.ids))
+        )
+        catalogs = catalogs_result.scalars().all()
+        
+        existing_ids = [catalog.id for catalog in catalogs]
+        missing_ids = set(request.ids) - set(existing_ids)
+        
+        if missing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Catalogs with IDs {list(missing_ids)} not found"
+            )
+        
+        # Update fl_ativo
+        result = await db.execute(
+            update(metadata.ExternalCatalogs)
+            .where(metadata.ExternalCatalogs.id.in_(request.ids))
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return BulkUpdateFlAtivoResponse(
+            updated_count=result.rowcount,
+            updated_ids=request.ids,
+            fl_ativo=request.fl_ativo
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to bulk update catalogs fl_ativo: {str(e)}"
+        )
+
+@router.patch("/schemas/bulk/fl_ativo", response_model=BulkUpdateFlAtivoResponse)
+async def bulk_update_schemas_fl_ativo(
+    request: BulkUpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Bulk update the fl_ativo status of multiple schemas.
+    """
+    try:
+        # Verify schemas exist
+        schemas_result = await db.execute(
+            select(metadata.ExternalSchema).where(metadata.ExternalSchema.id.in_(request.ids))
+        )
+        schemas = schemas_result.scalars().all()
+        
+        existing_ids = [schema.id for schema in schemas]
+        missing_ids = set(request.ids) - set(existing_ids)
+        
+        if missing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Schemas with IDs {list(missing_ids)} not found"
+            )
+        
+        # Update fl_ativo
+        result = await db.execute(
+            update(metadata.ExternalSchema)
+            .where(metadata.ExternalSchema.id.in_(request.ids))
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return BulkUpdateFlAtivoResponse(
+            updated_count=result.rowcount,
+            updated_ids=request.ids,
+            fl_ativo=request.fl_ativo
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to bulk update schemas fl_ativo: {str(e)}"
+        )
+
+@router.patch("/tables/bulk/fl_ativo", response_model=BulkUpdateFlAtivoResponse)
+async def bulk_update_tables_fl_ativo(
+    request: BulkUpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Bulk update the fl_ativo status of multiple tables.
+    """
+    try:
+        # Verify tables exist
+        tables_result = await db.execute(
+            select(metadata.ExternalTables).where(metadata.ExternalTables.id.in_(request.ids))
+        )
+        tables = tables_result.scalars().all()
+        
+        existing_ids = [table.id for table in tables]
+        missing_ids = set(request.ids) - set(existing_ids)
+        
+        if missing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tables with IDs {list(missing_ids)} not found"
+            )
+        
+        # Update fl_ativo
+        result = await db.execute(
+            update(metadata.ExternalTables)
+            .where(metadata.ExternalTables.id.in_(request.ids))
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return BulkUpdateFlAtivoResponse(
+            updated_count=result.rowcount,
+            updated_ids=request.ids,
+            fl_ativo=request.fl_ativo
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to bulk update tables fl_ativo: {str(e)}"
+        )
+
+@router.patch("/columns/bulk/fl_ativo", response_model=BulkUpdateFlAtivoResponse)
+async def bulk_update_columns_fl_ativo(
+    request: BulkUpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Bulk update the fl_ativo status of multiple columns.
+    """
+    try:
+        # Verify columns exist
+        columns_result = await db.execute(
+            select(metadata.ExternalColumn).where(metadata.ExternalColumn.id.in_(request.ids))
+        )
+        columns = columns_result.scalars().all()
+        
+        existing_ids = [column.id for column in columns]
+        missing_ids = set(request.ids) - set(existing_ids)
+        
+        if missing_ids:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Columns with IDs {list(missing_ids)} not found"
+            )
+        
+        # Update fl_ativo
+        result = await db.execute(
+            update(metadata.ExternalColumn)
+            .where(metadata.ExternalColumn.id.in_(request.ids))
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return BulkUpdateFlAtivoResponse(
+            updated_count=result.rowcount,
+            updated_ids=request.ids,
+            fl_ativo=request.fl_ativo
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to bulk update columns fl_ativo: {str(e)}"
+        )
+
+# APIs para atualização individual
+
+@router.patch("/catalogs/{catalog_id}/fl_ativo", response_model=UpdateFlAtivoResponse)
+async def update_catalog_fl_ativo(
+    catalog_id: int,
+    request: UpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Update the fl_ativo status of a catalog.
+    """
+    try:
+        # Verify catalog exists
+        catalog_result = await db.execute(
+            select(metadata.ExternalCatalogs).where(metadata.ExternalCatalogs.id == catalog_id)
+        )
+        catalog = catalog_result.scalars().first()
+        
+        if not catalog:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Catalog with ID {catalog_id} not found"
+            )
+        
+        # Update fl_ativo
+        await db.execute(
+            update(metadata.ExternalCatalogs)
+            .where(metadata.ExternalCatalogs.id == catalog_id)
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return UpdateFlAtivoResponse(
+            id=catalog_id,
+            fl_ativo=request.fl_ativo,
+            data_atualizacao=datetime.utcnow()
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update catalog fl_ativo: {str(e)}"
+        )
+
+@router.patch("/schemas/{schema_id}/fl_ativo", response_model=UpdateFlAtivoResponse)
+async def update_schema_fl_ativo(
+    schema_id: int,
+    request: UpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Update the fl_ativo status of a schema.
+    """
+    try:
+        # Verify schema exists
+        schema_result = await db.execute(
+            select(metadata.ExternalSchema).where(metadata.ExternalSchema.id == schema_id)
+        )
+        schema = schema_result.scalars().first()
+        
+        if not schema:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Schema with ID {schema_id} not found"
+            )
+        
+        # Update fl_ativo
+        await db.execute(
+            update(metadata.ExternalSchema)
+            .where(metadata.ExternalSchema.id == schema_id)
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return UpdateFlAtivoResponse(
+            id=schema_id,
+            fl_ativo=request.fl_ativo,
+            data_atualizacao=datetime.utcnow()
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update schema fl_ativo: {str(e)}"
+        )
+
+@router.patch("/tables/{table_id}/fl_ativo", response_model=UpdateFlAtivoResponse)
+async def update_table_fl_ativo(
+    table_id: int,
+    request: UpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Update the fl_ativo status of a table.
+    """
+    try:
+        # Verify table exists
+        table_result = await db.execute(
+            select(metadata.ExternalTables).where(metadata.ExternalTables.id == table_id)
+        )
+        table = table_result.scalars().first()
+        
+        if not table:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Table with ID {table_id} not found"
+            )
+        
+        # Update fl_ativo
+        await db.execute(
+            update(metadata.ExternalTables)
+            .where(metadata.ExternalTables.id == table_id)
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return UpdateFlAtivoResponse(
+            id=table_id,
+            fl_ativo=request.fl_ativo,
+            data_atualizacao=datetime.utcnow()
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update table fl_ativo: {str(e)}"
+        )
+
+@router.patch("/columns/{column_id}/fl_ativo", response_model=UpdateFlAtivoResponse)
+async def update_column_fl_ativo(
+    column_id: int,
+    request: UpdateFlAtivoRequest,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Update the fl_ativo status of a column.
+    """
+    try:
+        # Verify column exists
+        column_result = await db.execute(
+            select(metadata.ExternalColumn).where(metadata.ExternalColumn.id == column_id)
+        )
+        column = column_result.scalars().first()
+        
+        if not column:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Column with ID {column_id} not found"
+            )
+        
+        # Update fl_ativo
+        await db.execute(
+            update(metadata.ExternalColumn)
+            .where(metadata.ExternalColumn.id == column_id)
+            .values(fl_ativo=request.fl_ativo, data_atualizacao=datetime.utcnow())
+        )
+        
+        await db.commit()
+        
+        return UpdateFlAtivoResponse(
+            id=column_id,
+            fl_ativo=request.fl_ativo,
+            data_atualizacao=datetime.utcnow()
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update column fl_ativo: {str(e)}"
         )

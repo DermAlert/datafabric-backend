@@ -86,3 +86,36 @@ class DataPreviewResponse(BaseModel):
     row_count: int
     preview_limit: int
     truncated: bool
+
+class UpdateFlAtivoRequest(BaseModel):
+    fl_ativo: bool
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+class BulkUpdateFlAtivoRequest(BaseModel):
+    ids: List[int]
+    fl_ativo: bool
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+class UpdateFlAtivoResponse(BaseModel):
+    id: int
+    fl_ativo: bool
+    data_atualizacao: datetime
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+class BulkUpdateFlAtivoResponse(BaseModel):
+    updated_count: int
+    updated_ids: List[int]
+    fl_ativo: bool
+    
+    model_config = {
+        "from_attributes": True
+    }
