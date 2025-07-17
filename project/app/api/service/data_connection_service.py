@@ -11,6 +11,7 @@ from app.database.databaseUtils import DatabaseService
 from app.database.core import core
 from app.services.metadata_extraction import extract_metadata
 from app.services.connection_manager import test_connection
+from app.utils.connection_validators import validate_metadata_connection
 
 class DataConnectionService:
     def __init__(self, db):
@@ -38,7 +39,7 @@ class DataConnectionService:
 
     async def list(self, search: BaseSearchRequest, organization_id: Optional[int] = None,
                    status: Optional[str] = None, connection_type_id: Optional[int] = None,
-                   name: Optional[str] = None):
+                   content_type: Optional[str] = None, name: Optional[str] = None):
         stmt = select(core.DataConnection)
         if organization_id:
             stmt = stmt.where(core.DataConnection.organization_id == organization_id)
@@ -46,6 +47,8 @@ class DataConnectionService:
             stmt = stmt.where(core.DataConnection.status == status)
         if connection_type_id:
             stmt = stmt.where(core.DataConnection.connection_type_id == connection_type_id)
+        if content_type:
+            stmt = stmt.where(core.DataConnection.content_type == content_type)
         if name:
             stmt = stmt.where(core.DataConnection.name.ilike(f"%{name}%"))
         stmt = stmt.order_by(core.DataConnection.id)
@@ -87,6 +90,7 @@ class DataConnectionService:
 
     async def test(self, id: int):
         obj = await self.get(id)
+        
         # Get connection type
         stmt_ct = select(core.ConnectionType).where(core.ConnectionType.id == obj.connection_type_id)
         ct = await self.db_service.scalars_first(stmt_ct)
@@ -103,6 +107,10 @@ class DataConnectionService:
 
     async def sync(self, id: int, background_tasks):
         obj = await self.get(id)
+        
+        # Validate that connection is not of type IMAGE
+        validate_metadata_connection(obj, "metadata synchronization")
+        
         obj.sync_status = 'pending'
         obj.last_sync_time = datetime.now()
         await self.db.commit()

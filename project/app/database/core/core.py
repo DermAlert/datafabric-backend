@@ -1,6 +1,7 @@
 from sqlalchemy import Column, Integer, String, ForeignKey, Table, JSON, TIMESTAMP, Boolean, Enum, DATE, CheckConstraint, UniqueConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
+from sqlalchemy.dialects.postgresql import ENUM
 from ..database import Base
 from ..baseMixin import AuditMixin
 import enum
@@ -11,6 +12,18 @@ class DatasetAccessLevel(enum.Enum):
     EDITAR = "editar"        # Permite modificar metadados (descrição, etc.), e potencialmente a definição (colunas, fontes) ou acionar atualizações.
     # EXCLUIR = "excluir"      # Permite apagar o dataset (a definição, não necessariamente os dados brutos originais).
     ADMINISTRAR = "administrar" # Permite gerenciar as permissões de outros usuários/grupos para este dataset (conceder/revogar LER, EDITAR, EXCLUIR).
+
+class ContentType(enum.Enum):
+    """Define o tipo de conteúdo armazenado na conexão de dados."""
+    METADATA = "metadata"    # Conexão contém metadados estruturados
+    IMAGE = "image"          # Conexão contém imagens referenciadas pelos metadados
+
+# Create PostgreSQL enum type with proper handling
+content_type_enum = ENUM(
+    'metadata', 'image',
+    name='contenttype',
+    create_type=True  # Auto-create the enum type
+)
 
 # Association tables
 user_roles = Table(
@@ -80,6 +93,7 @@ class DataConnection(Base):
     description = Column(String, nullable=True)
     connection_type_id = Column(Integer, ForeignKey("core.connection_types.id"), nullable=False)
     connection_params = Column(JSON, nullable=False)
+    content_type = Column(content_type_enum, nullable=False, default='metadata')
     # credentials_id = Column(Integer, ForeignKey("security.credentials.id"), nullable=True)  -> ainda não existe security.credentials.id
     status = Column(String, nullable=False, default='inactive')  # inactive, active, error
     sync_status = Column(String, nullable=False, default='success')  # success, partial, failed

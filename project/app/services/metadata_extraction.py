@@ -67,6 +67,14 @@ async def extract_metadata(connection_id: int) -> bool:
                 connection_type = record[1]  # ConnectionType
                 print("connection_type", record[1])
                 
+                # Validate that connection is not of type IMAGE
+                if connection.content_type == 'image':
+                    logger.error(f"Cannot extract metadata from connection {connection_id} of type 'image'")
+                    connection.sync_status = "failed"
+                    connection.status = "error"
+                    await db.commit()
+                    return False
+                
                 # Update connection status
                 connection.sync_status = "running"
                 connection.last_sync_time = datetime.now()

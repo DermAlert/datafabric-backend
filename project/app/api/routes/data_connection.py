@@ -30,6 +30,7 @@ async def search_data_connections(
         organization_id=search.organization_id,
         status=search.status,
         connection_type_id=search.connection_type_id,
+        content_type=search.content_type,
         name=search.name
     )
     return SearchResult(

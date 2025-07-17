@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, JSON, TIMESTAMP, UniqueConstraint, Boolean, Numeric
+from sqlalchemy import Column, Integer, String, ForeignKey, JSON, TIMESTAMP, UniqueConstraint, Boolean, Numeric, Enum
 from sqlalchemy.sql import func
 from ..database import Base
 from ..baseMixin import AuditMixin
@@ -67,6 +67,8 @@ class ExternalColumn(AuditMixin, Base):
     is_indexed = Column(Boolean, nullable=False, default=False)
     default_value = Column(String, nullable=True)
     description = Column(String, nullable=True)
+    is_image_path = Column(Boolean, nullable=False, default=False)
+    image_connection_id = Column(Integer, ForeignKey('core.data_connections.id'), nullable=True)
     statistics = Column(JSON, nullable=False, default={})
     sample_values = Column(JSON, nullable=False, default=[])
     properties = Column(JSON, nullable=False, default={})
