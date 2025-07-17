@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence
+    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes
 )
 
 api_router = APIRouter()
@@ -28,10 +28,11 @@ api_router.include_router(
     metadata_viewer.router, prefix="/metadata", tags=["Metadata Viewer"]
 )
 
-# api_router.include_router(
-#     data_visualization.router, prefix="/visualize-data", tags=["Data Visualization"]
-# )
+api_router.include_router(
+    image_path_routes.router, prefix="/image-paths", tags=["Image Path Management"]
+)
 
 api_router.include_router(
     equivalence.router, prefix="/equivalence", tags=["Equivalence"]
 )
+
