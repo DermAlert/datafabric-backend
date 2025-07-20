@@ -337,6 +337,111 @@ class PostgresExtractor:
             print(f"Error extracting columns for table {schema_name}.{table_name}: {str(e)}")
             return []
     
+    async def extract_table_data(self, schema_name: str, table_name: str, limit: Optional[int] = None, offset: int = 0) -> Dict[str, Any]:
+        """
+        Extract actual data from a PostgreSQL table.
+        
+        Args:
+            schema_name: Name of the schema
+            table_name: Name of the table
+            limit: Maximum number of rows to extract (None for all)
+            offset: Number of rows to skip
+        
+        Returns:
+            Dict containing data, columns info, and row count
+        """
+        try:
+            conn = await self._get_connection()
+            
+            # Get column information first
+            columns = await self.extract_columns(schema_name, table_name)
+            
+            # Build query
+            query = f'SELECT * FROM "{schema_name}"."{table_name}"'
+            
+            # Add LIMIT and OFFSET if specified
+            if limit is not None:
+                query += f" LIMIT {limit}"
+            if offset > 0:
+                query += f" OFFSET {offset}"
+            
+            # Execute query
+            rows = await conn.fetch(query)
+            
+            # Convert rows to list of dictionaries
+            data = []
+            for row in rows:
+                row_dict = {}
+                for col in columns:
+                    col_name = col['column_name']
+                    row_dict[col_name] = row.get(col_name)
+                data.append(row_dict)
+            
+            # Get total row count
+            count_query = f'SELECT COUNT(*) as total FROM "{schema_name}"."{table_name}"'
+            count_result = await conn.fetchrow(count_query)
+            total_rows = count_result['total'] if count_result else 0
+            
+            return {
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "columns": columns,
+                "data": data,
+                "total_rows": total_rows,
+                "fetched_rows": len(data),
+                "offset": offset
+            }
+            
+        except Exception as e:
+            print(f"Error extracting data from table {schema_name}.{table_name}: {str(e)}")
+            return {
+                "schema_name": schema_name,
+                "table_name": table_name,
+                "columns": [],
+                "data": [],
+                "total_rows": 0,
+                "fetched_rows": 0,
+                "offset": offset,
+                "error": str(e)
+            }
+    
+    async def extract_table_data_chunked(self, schema_name: str, table_name: str, chunk_size: int = 10000) -> List[Dict[str, Any]]:
+        """
+        Extract table data in chunks for large tables.
+        
+        Args:
+            schema_name: Name of the schema
+            table_name: Name of the table
+            chunk_size: Number of rows per chunk
+        
+        Yields:
+            Dict containing chunk data
+        """
+        try:
+            # Get total row count first
+            conn = await self._get_connection()
+            count_query = f'SELECT COUNT(*) as total FROM "{schema_name}"."{table_name}"'
+            count_result = await conn.fetchrow(count_query)
+            total_rows = count_result['total'] if count_result else 0
+            
+            chunks = []
+            offset = 0
+            
+            while offset < total_rows:
+                chunk_data = await self.extract_table_data(schema_name, table_name, chunk_size, offset)
+                chunks.append(chunk_data)
+                offset += chunk_size
+                
+                # Break if no more data
+                if len(chunk_data.get('data', [])) < chunk_size:
+                    break
+            
+            return chunks
+            
+        except Exception as e:
+            print(f"Error extracting chunked data from table {schema_name}.{table_name}: {str(e)}")
+            return []
+    
     async def close(self):
         """
         Close any open connections.

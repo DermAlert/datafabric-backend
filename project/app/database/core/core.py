@@ -212,8 +212,7 @@ class DatasetColumn(Base):
     properties = Column(JSON, default={})  # Substituto para JSONB
 
 
-
-class Dataset(Base):
+class Dataset(AuditMixin, Base):
     __tablename__ = "datasets"
     __table_args__ = {'schema': 'core'}
     

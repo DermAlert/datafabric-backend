@@ -2,8 +2,9 @@ import asyncio
 from typing import Dict, Any, Tuple
 import pyspark
 from delta import configure_spark_with_delta_pip
+import logging
 
-from ...utils.logger import logger
+logger = logging.getLogger(__name__)
 
 
 async def test_delta_connection(connection_params: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:

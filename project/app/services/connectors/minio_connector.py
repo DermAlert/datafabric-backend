@@ -4,8 +4,9 @@ from minio import Minio
 from minio.error import S3Error
 import urllib3
 from urllib.parse import urlparse
+import logging
 
-from ...utils.logger import logger
+logger = logging.getLogger(__name__)
 
 async def test_minio_connection(connection_params: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
     """
