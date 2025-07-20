@@ -179,6 +179,73 @@ async def list_tables(
             detail=f"Failed to retrieve tables: {str(e)}"
         )
 
+@router.get("/tables/{table_id}/columns", response_model=List[ColumnResponse])
+async def list_columns(
+    table_id: int,
+    fl_ativo: Optional[bool] = Query(None, description="Filter by fl_ativo status. If not provided, returns all columns."),
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    List all columns for a specific table.
+    """
+    try:
+        # Verify table exists
+        table_result = await db.execute(
+            select(metadata.ExternalTables).where(metadata.ExternalTables.id == table_id)
+        )
+        table = table_result.scalars().first()
+        
+        if not table:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Table with ID {table_id} not found"
+            )
+        
+        # TODO: Check if user has access to this connection's organization
+        
+        # Build query
+        query = select(metadata.ExternalColumn).where(metadata.ExternalColumn.table_id == table_id)
+        
+        if fl_ativo is not None:
+            query = query.where(metadata.ExternalColumn.fl_ativo == fl_ativo)
+            
+        query = query.order_by(metadata.ExternalColumn.column_position)
+        
+        # Get columns
+        result = await db.execute(query)
+        columns_db = result.scalars().all()
+        
+        # Convert ORM objects to Pydantic model instances
+        columns = [
+            ColumnResponse(
+                id=col.id,
+                table_id=col.table_id,
+                column_name=col.column_name,
+                column_position=col.column_position,
+                data_type=col.data_type,
+                description=col.description,
+                is_nullable=col.is_nullable,
+                is_primary_key=col.is_primary_key,
+                is_unique=col.is_unique,
+                properties=col.properties,
+                is_indexed=getattr(col, 'is_indexed', False),
+                statistics=getattr(col, 'statistics', {}),
+                sample_values=getattr(col, 'sample_values', []),
+                fl_ativo=col.fl_ativo
+            ) for col in columns_db
+        ]
+        
+        return columns
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to retrieve columns: {str(e)}"
+        )
+    
 @router.get("/tables/{table_id}", response_model=TableDetailsResponse)
 async def get_table_details(
     table_id: int,
@@ -273,72 +340,6 @@ async def get_table_details(
             detail=f"Failed to retrieve table details: {str(e)}"
         )
         
-@router.get("/tables/{table_id}/columns", response_model=List[ColumnResponse])
-async def list_columns(
-    table_id: int,
-    fl_ativo: Optional[bool] = Query(None, description="Filter by fl_ativo status. If not provided, returns all columns."),
-    db: AsyncSession = Depends(get_db),
-    # current_user: core.User = Depends(get_current_user),
-):
-    """
-    List all columns for a specific table.
-    """
-    try:
-        # Verify table exists
-        table_result = await db.execute(
-            select(metadata.ExternalTables).where(metadata.ExternalTables.id == table_id)
-        )
-        table = table_result.scalars().first()
-        
-        if not table:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Table with ID {table_id} not found"
-            )
-        
-        # TODO: Check if user has access to this connection's organization
-        
-        # Build query
-        query = select(metadata.ExternalColumn).where(metadata.ExternalColumn.table_id == table_id)
-        
-        if fl_ativo is not None:
-            query = query.where(metadata.ExternalColumn.fl_ativo == fl_ativo)
-            
-        query = query.order_by(metadata.ExternalColumn.column_position)
-        
-        # Get columns
-        result = await db.execute(query)
-        columns_db = result.scalars().all()
-        
-        # Convert ORM objects to Pydantic model instances
-        columns = [
-            ColumnResponse(
-                id=col.id,
-                table_id=col.table_id,
-                column_name=col.column_name,
-                column_position=col.column_position,
-                data_type=col.data_type,
-                description=col.description,
-                is_nullable=col.is_nullable,
-                is_primary_key=col.is_primary_key,
-                is_unique=col.is_unique,
-                properties=col.properties,
-                is_indexed=getattr(col, 'is_indexed', False),
-                statistics=getattr(col, 'statistics', {}),
-                sample_values=getattr(col, 'sample_values', []),
-                fl_ativo=col.fl_ativo
-            ) for col in columns_db
-        ]
-        
-        return columns
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to retrieve columns: {str(e)}"
-        )
     
 @router.get("/columns/{column_id}/distinct-values")
 async def get_distinct_values_for_column(
