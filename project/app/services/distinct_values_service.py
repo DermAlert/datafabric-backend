@@ -28,7 +28,8 @@ class DistinctValuesService:
         schema_name: str,
         table_name: str,
         column_name: str,
-        limit: int = 100
+        limit: int = 100,
+        search: Optional[str] = None
     ) -> List[Any]:
         """
         Get distinct values for a column from any supported data source.
@@ -40,6 +41,7 @@ class DistinctValuesService:
             table_name: Table name  
             column_name: Column name
             limit: Maximum number of distinct values to return
+            search: Optional search term to filter values (case insensitive partial match)
             
         Returns:
             List of distinct values
@@ -52,11 +54,11 @@ class DistinctValuesService:
         
         if connection_type_lower in ["postgresql", "postgres"]:
             return await DistinctValuesService._get_postgres_distinct_values(
-                connection_params, schema_name, table_name, column_name, limit
+                connection_params, schema_name, table_name, column_name, limit, search
             )
         elif connection_type_lower in ["deltalake", "delta"]:
             return await DistinctValuesService._get_delta_distinct_values(
-                connection_params, schema_name, table_name, column_name, limit
+                connection_params, schema_name, table_name, column_name, limit, search
             )
         else:
             raise ValueError(f"Unsupported connection type: {connection_type}")
@@ -67,7 +69,8 @@ class DistinctValuesService:
         schema_name: str,
         table_name: str,
         column_name: str,
-        limit: int
+        limit: int,
+        search: Optional[str] = None
     ) -> List[Any]:
         """Get distinct values from PostgreSQL."""
         if not ASYNCPG_AVAILABLE:
@@ -85,9 +88,26 @@ class DistinctValuesService:
                 ssl=connection_params.get("ssl", False)
             )
             
-            # Build and execute query
-            query = f'SELECT DISTINCT "{column_name}" FROM "{schema_name}"."{table_name}" LIMIT {limit}'
-            rows = await pg_conn.fetch(query)
+            # Build query with optional search filter
+            if search:
+                # Use parameterized query to prevent SQL injection
+                query = f'''
+                    SELECT DISTINCT "{column_name}" 
+                    FROM "{schema_name}"."{table_name}" 
+                    WHERE CAST("{column_name}" AS TEXT) ILIKE $1 
+                    ORDER BY "{column_name}" 
+                    LIMIT $2
+                '''
+                search_param = f'%{search}%'
+                rows = await pg_conn.fetch(query, search_param, limit)
+            else:
+                query = f'''
+                    SELECT DISTINCT "{column_name}" 
+                    FROM "{schema_name}"."{table_name}" 
+                    ORDER BY "{column_name}" 
+                    LIMIT $1
+                '''
+                rows = await pg_conn.fetch(query, limit)
             
             # Extract values from rows
             values = [row[column_name] for row in rows]
@@ -106,7 +126,8 @@ class DistinctValuesService:
         schema_name: str,
         table_name: str,
         column_name: str,
-        limit: int
+        limit: int,
+        search: Optional[str] = None
     ) -> List[Any]:
         """Get distinct values from Delta Lake."""
         spark = None
@@ -130,8 +151,14 @@ class DistinctValuesService:
             # Read Delta table and get distinct values
             df = spark.read.format("delta").load(table_path)
             
+            # Apply search filter if provided
+            if search:
+                # Add case-insensitive search filter
+                from pyspark.sql.functions import col, lower
+                df = df.filter(lower(col(column_name).cast("string")).contains(search.lower()))
+            
             # Get distinct values for the column
-            distinct_df = df.select(column_name).distinct().limit(limit)
+            distinct_df = df.select(column_name).distinct().orderBy(column_name).limit(limit)
             rows = distinct_df.collect()
             
             # Extract values
