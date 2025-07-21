@@ -77,8 +77,20 @@ class DatasetMinioService:
                 .config("spark.hadoop.fs.s3a.path.style.access", "true") \
                 .config("spark.hadoop.fs.s3a.connection.ssl.enabled", str(self.minio_config.get('secure', False)).lower()) \
                 .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-                .config("spark.sql.adaptive.enabled", "true") \
-                .config("spark.sql.adaptive.coalescePartitions.enabled", "true")
+                # .config("spark.hadoop.fs.s3a.fast.upload", "true") \
+                # .config("spark.hadoop.fs.s3a.block.size", "32M") \
+                # .config("spark.hadoop.fs.s3a.multipart.size", "16M") \
+                # .config("spark.hadoop.fs.s3a.multipart.threshold", "32M") \
+                # .config("spark.hadoop.fs.s3a.committer.name", "file") \
+                # .config("spark.sql.adaptive.enabled", "true") \
+                # .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+                # .config("spark.executor.memory", "512m") \
+                # .config("spark.driver.memory", "256m") \
+                # .config("spark.executor.cores", "1") \
+                # .config("spark.executor.instances", "1") \
+                # .config("spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold", "20MB") \
+                # .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
+                # .config("spark.sql.execution.arrow.pyspark.enabled", "false")
             
             packages = [
                 "io.delta:delta-spark_2.12:3.2.0",
@@ -182,6 +194,29 @@ class DatasetMinioService:
             
         except Exception as e:
             logger.error(f"Failed to export dataset {dataset_id} with real data to Delta Lake: {e}")
+            raise
+
+    async def export_dataset_metadata_to_delta(
+        self, 
+        dataset_id: int, 
+        bucket_name: str, 
+        dataset_metadata: Dict[str, Any],
+        columns_metadata: List[Dict[str, Any]],
+        sources_metadata: List[Dict[str, Any]]
+    ) -> str:
+        """Export only dataset metadata to Delta Lake (for use with incremental data save)"""
+        try:
+            # Export metadata only (data was already saved incrementally)
+            await self._export_metadata_to_delta(dataset_id, bucket_name, dataset_metadata, columns_metadata, sources_metadata)
+            
+            # Return the data path (where incremental data was saved)
+            data_path = f"s3a://{bucket_name}/data/unified_data"
+            
+            logger.info(f"Exported metadata for dataset {dataset_id} to Delta Lake (data was saved incrementally)")
+            return data_path
+            
+        except Exception as e:
+            logger.error(f"Failed to export metadata for dataset {dataset_id} to Delta Lake: {e}")
             raise
     
     async def _export_metadata_to_delta(
@@ -384,6 +419,271 @@ class DatasetMinioService:
             
         except Exception as e:
             logger.error(f"Failed to export unified DataFrame to Delta Lake: {e}")
+            raise
+
+    async def initialize_incremental_delta_table(
+        self, 
+        dataset_id: int, 
+        bucket_name: str, 
+        column_names: List[str]
+    ) -> str:
+        """Initialize an empty Delta table for incremental writes"""
+        try:
+            from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType
+            
+            logger.info(f"Initializing incremental Delta table for dataset {dataset_id} with {len(column_names)} columns")
+            
+            # Validate inputs
+            if not self.spark:
+                raise ValueError("Spark session is not initialized")
+            
+            if not bucket_name:
+                raise ValueError("Bucket name cannot be empty")
+            
+            if not column_names:
+                logger.warning("No column names provided, creating table with metadata columns only")
+            
+            # Create schema for the Delta table
+            schema_fields = []
+            
+            # Add data columns first
+            for column in column_names:
+                if column not in ["_dataset_id", "_extraction_timestamp", "_batch_id"]:
+                    # All data columns as string to avoid type conflicts
+                    schema_fields.append(StructField(column, StringType(), True))
+            
+            # Add metadata columns (these are added automatically during processing)
+            schema_fields.extend([
+                StructField("_dataset_id", IntegerType(), True),
+                StructField("_extraction_timestamp", TimestampType(), True),
+                StructField("_batch_id", IntegerType(), True)
+            ])
+            
+            schema = StructType(schema_fields)
+            logger.info(f"Created schema with {len(schema_fields)} fields")
+            
+            # Create empty DataFrame with the schema
+            empty_df = self.spark.createDataFrame([], schema)
+            logger.info(f"Created empty DataFrame with schema")
+            
+            # Define Delta table path
+            delta_path = f"s3a://{bucket_name}/data/unified_data"
+            logger.info(f"Writing to Delta path: {delta_path}")
+            
+            # Write empty Delta table to establish schema
+            empty_df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .option("mergeSchema", "true") \
+                .save(delta_path)
+            
+            logger.info(f"Successfully initialized incremental Delta table for dataset {dataset_id} at {delta_path}")
+            return delta_path
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize incremental Delta table for dataset {dataset_id}: {e}")
+            logger.error(f"Error details - bucket: {bucket_name}, columns: {len(column_names) if column_names else 0}")
+            raise
+
+    async def append_batch_to_delta_table(
+        self, 
+        dataset_id: int, 
+        bucket_name: str, 
+        batch_df: pd.DataFrame, 
+        batch_id: int
+    ) -> bool:
+        """Append a batch of data to the existing Delta table"""
+        try:
+            # Validate inputs
+            if not self.spark:
+                raise ValueError("Spark session is not initialized")
+                
+            if batch_df.empty:
+                logger.warning(f"Empty batch {batch_id} for dataset {dataset_id} - skipping")
+                return False
+            
+            if not bucket_name:
+                raise ValueError("Bucket name cannot be empty")
+            
+            logger.info(f"Processing batch {batch_id} for dataset {dataset_id} with {len(batch_df)} rows")
+            
+            # Add metadata columns
+            batch_df = batch_df.copy()
+            batch_df["_dataset_id"] = dataset_id
+            batch_df["_extraction_timestamp"] = datetime.now()
+            batch_df["_batch_id"] = batch_id
+            
+            # Use helper method to prepare DataFrame for Spark
+            try:
+                cleaned_df = self._prepare_dataframe_for_spark(batch_df)
+                logger.info(f"Successfully prepared DataFrame for batch {batch_id}")
+            except Exception as prep_error:
+                logger.error(f"Failed to prepare DataFrame for batch {batch_id}: {prep_error}")
+                raise
+            
+            # Create explicit schema to avoid type inference issues
+            from pyspark.sql.types import StructType, StructField, StringType, IntegerType, TimestampType
+            
+            schema_fields = []
+            for column in cleaned_df.columns:
+                if column == "_dataset_id":
+                    schema_fields.append(StructField(column, IntegerType(), True))
+                elif column in ["_extraction_timestamp"]:
+                    schema_fields.append(StructField(column, TimestampType(), True))
+                elif column == "_batch_id":
+                    schema_fields.append(StructField(column, IntegerType(), True))
+                else:
+                    # All data columns as string to avoid type conflicts
+                    schema_fields.append(StructField(column, StringType(), True))
+            
+            explicit_schema = StructType(schema_fields)
+            
+            # Debug: Log schema and sample data
+            logger.info(f"Creating Spark DataFrame for batch {batch_id} with {len(cleaned_df)} rows and {len(cleaned_df.columns)} columns")
+            
+            try:
+                # Convert to Spark DataFrame with explicit schema
+                spark_df = self.spark.createDataFrame(cleaned_df, schema=explicit_schema)
+                logger.info(f"Successfully created Spark DataFrame for batch {batch_id}")
+            except Exception as spark_error:
+                logger.error(f"Failed to create Spark DataFrame for batch {batch_id}: {spark_error}")
+                logger.error(f"DataFrame sample: {cleaned_df.head()}")
+                logger.error(f"DataFrame dtypes: {cleaned_df.dtypes}")
+                logger.error(f"Expected schema fields: {[f.name for f in explicit_schema.fields]}")
+                raise
+            
+            # Define Delta table path
+            delta_path = f"s3a://{bucket_name}/data/unified_data"
+            logger.info(f"Writing batch {batch_id} to Delta path: {delta_path}")
+            
+            try:
+                # Append to existing Delta table
+                spark_df.write \
+                    .format("delta") \
+                    .mode("append") \
+                    .option("mergeSchema", "true") \
+                    .save(delta_path)
+                
+                logger.info(f"Successfully appended batch {batch_id} ({len(batch_df)} rows) to Delta table for dataset {dataset_id}")
+            except Exception as delta_error:
+                logger.error(f"Failed to write batch {batch_id} to Delta table: {delta_error}")
+                logger.error(f"Delta path: {delta_path}")
+                logger.error(f"Spark DataFrame schema: {spark_df.schema}")
+                raise
+            
+            # Clear DataFrame from memory
+            del batch_df, cleaned_df, spark_df
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to append batch {batch_id} to Delta table: {e}")
+            
+            # Additional debugging information
+            try:
+                logger.error(f"Batch DataFrame info - Shape: {batch_df.shape}, Columns: {list(batch_df.columns)}")
+                logger.error(f"DataFrame dtypes: {batch_df.dtypes.to_dict()}")
+                
+                # Check for completely empty columns
+                empty_cols = [col for col in batch_df.columns if batch_df[col].isna().all()]
+                if empty_cols:
+                    logger.error(f"Completely empty columns detected: {empty_cols}")
+                
+                # Check for columns with mixed types
+                for col in batch_df.columns:
+                    unique_types = set(type(x).__name__ for x in batch_df[col].dropna().values[:5])
+                    if len(unique_types) > 1:
+                        logger.error(f"Column {col} has mixed types: {unique_types}")
+                        
+            except Exception as debug_error:
+                logger.error(f"Could not gather debug info: {debug_error}")
+            
+            raise
+
+    async def finalize_incremental_delta_table(
+        self, 
+        dataset_id: int, 
+        bucket_name: str
+    ) -> bool:
+        """Finalize the incremental Delta table (optimize, vacuum, etc.)"""
+        try:
+            delta_path = f"s3a://{bucket_name}/data/unified_data"
+            
+            # Read the Delta table to get the total count
+            df = self.spark.read.format("delta").load(delta_path)
+            total_rows = df.count()
+            
+            logger.info(f"Finalizing Delta table for dataset {dataset_id} with {total_rows} total rows")
+            
+            # Optimize the Delta table (compaction)
+            try:
+                from delta.tables import DeltaTable
+                delta_table = DeltaTable.forPath(self.spark, delta_path)
+                delta_table.optimize().executeCompaction()
+                logger.info(f"Optimized Delta table for dataset {dataset_id}")
+            except Exception as optimize_error:
+                logger.warning(f"Could not optimize Delta table: {optimize_error}")
+            
+            # Vacuum old files (keep 7 days of history)
+            try:
+                delta_table = DeltaTable.forPath(self.spark, delta_path)
+                delta_table.vacuum(168)  # 7 days * 24 hours
+                logger.info(f"Vacuumed Delta table for dataset {dataset_id}")
+            except Exception as vacuum_error:
+                logger.warning(f"Could not vacuum Delta table: {vacuum_error}")
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Failed to finalize incremental Delta table: {e}")
+            return False
+
+    def _prepare_dataframe_for_spark(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Prepare pandas DataFrame for Spark to avoid type inference issues"""
+        try:
+            import numpy as np
+            
+            cleaned_df = df.copy()
+            
+            # Fix each column individually
+            for column in cleaned_df.columns:
+                if column not in ["_dataset_id", "_extraction_timestamp", "_batch_id"]:
+                    # Convert to object type first to handle mixed types
+                    cleaned_df[column] = cleaned_df[column].astype('object')
+                    
+                    # Replace various forms of missing values
+                    cleaned_df[column] = cleaned_df[column].replace({
+                        'nan': None,
+                        'NaT': None,
+                        np.nan: None,
+                        pd.NaT: None,
+                        'None': None,
+                        '': None,
+                        'null': None,
+                        'NULL': None
+                    })
+                    
+                    # Convert to string, handling None values properly
+                    cleaned_df[column] = cleaned_df[column].apply(
+                        lambda x: None if (x is None or pd.isna(x) or str(x).lower() in ['nan', 'nat', 'none', 'null']) else str(x)
+                    )
+                    
+                    # If column is still all None/NaN, fill with empty string
+                    if cleaned_df[column].isna().all() or all(x is None for x in cleaned_df[column]):
+                        cleaned_df[column] = ""
+                        logger.warning(f"Column {column} was completely empty, filled with empty strings")
+            
+            # Ensure metadata columns have correct types
+            if "_dataset_id" in cleaned_df.columns:
+                cleaned_df["_dataset_id"] = cleaned_df["_dataset_id"].astype(int)
+            if "_batch_id" in cleaned_df.columns:
+                cleaned_df["_batch_id"] = cleaned_df["_batch_id"].astype(int)
+            
+            logger.debug(f"Prepared DataFrame with shape {cleaned_df.shape} and dtypes: {cleaned_df.dtypes.to_dict()}")
+            return cleaned_df
+            
+        except Exception as e:
+            logger.error(f"Error preparing DataFrame for Spark: {e}")
             raise
     
     async def _export_real_data_to_delta(self, dataset_id: int, bucket_name: str, real_data: Dict[str, Any]) -> str:

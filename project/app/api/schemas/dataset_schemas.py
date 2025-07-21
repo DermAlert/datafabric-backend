@@ -30,6 +30,10 @@ class TransformationType(str, Enum):
     CALCULATED = "calculated"
     AGGREGATED = "aggregated"
 
+class SelectionMode(str, Enum):
+    TABLES = "tables"
+    COLUMNS = "columns"
+
 # Dataset Creation Schemas
 class DatasetSourceCreate(BaseModel):
     table_id: int
@@ -66,6 +70,10 @@ class DatasetCreate(BaseModel):
     columns: List[DatasetColumnCreate]
     column_sources: List[DatasetColumnSourceCreate]
 
+class SelectionMode(str, Enum):
+    TABLES = "tables"
+    COLUMNS = "columns"
+
 class DatasetUnifiedCreate(BaseModel):
     """Schema for creating datasets with automatic column mapping unification"""
     name: str
@@ -76,8 +84,14 @@ class DatasetUnifiedCreate(BaseModel):
     version: str = "1.0"
     properties: Dict[str, Any] = {}
     
-    # Selected connections and tables
-    selected_tables: List[int] = Field(..., description="List of table IDs to include in the dataset")
+    # Selection mode: choose between selecting tables or specific columns
+    selection_mode: SelectionMode = Field(..., description="Whether to select entire tables or specific columns")
+    
+    # Table-based selection (when selection_mode = "tables")
+    selected_tables: Optional[List[int]] = Field(None, description="List of table IDs to include in the dataset")
+    
+    # Column-based selection (when selection_mode = "columns") 
+    selected_columns: Optional[List[int]] = Field(None, description="List of specific column IDs to include in the dataset")
     
     # Column mapping options
     auto_include_mapped_columns: bool = Field(True, description="Automatically include columns with existing mappings")
@@ -85,6 +99,50 @@ class DatasetUnifiedCreate(BaseModel):
     
     # Storage configuration
     storage_properties: Dict[str, Any] = {}
+    
+    @validator('selected_tables')
+    def validate_tables_selection(cls, v, values):
+        selection_mode = values.get('selection_mode')
+        if selection_mode == SelectionMode.TABLES and not v:
+            raise ValueError("selected_tables is required when selection_mode is 'tables'")
+        if selection_mode == SelectionMode.COLUMNS and v:
+            raise ValueError("selected_tables should not be provided when selection_mode is 'columns'")
+        return v
+    
+    @validator('selected_columns')
+    def validate_columns_selection(cls, v, values):
+        selection_mode = values.get('selection_mode')
+        if selection_mode == SelectionMode.COLUMNS and not v:
+            raise ValueError("selected_columns is required when selection_mode is 'columns'")
+        if selection_mode == SelectionMode.TABLES and v:
+            raise ValueError("selected_columns should not be provided when selection_mode is 'tables'")
+        return v
+
+class DatasetUnificationPreviewRequest(BaseModel):
+    """Request schema for preview endpoint"""
+    selection_mode: SelectionMode = Field(..., description="Whether to select entire tables or specific columns")
+    selected_tables: Optional[List[int]] = Field(None, description="List of table IDs (when selection_mode='tables')")
+    selected_columns: Optional[List[int]] = Field(None, description="List of column IDs (when selection_mode='columns')")
+    auto_include_mapped_columns: bool = Field(True, description="Automatically include related mapped columns/tables")
+    apply_value_mappings: bool = Field(True, description="Apply value mappings to standardize values")
+    
+    @validator('selected_tables')
+    def validate_tables_selection(cls, v, values):
+        selection_mode = values.get('selection_mode')
+        if selection_mode == SelectionMode.TABLES and not v:
+            raise ValueError("selected_tables is required when selection_mode is 'tables'")
+        if selection_mode == SelectionMode.COLUMNS and v:
+            raise ValueError("selected_tables should not be provided when selection_mode is 'columns'")
+        return v
+    
+    @validator('selected_columns')
+    def validate_columns_selection(cls, v, values):
+        selection_mode = values.get('selection_mode')
+        if selection_mode == SelectionMode.COLUMNS and not v:
+            raise ValueError("selected_columns is required when selection_mode is 'columns'")
+        if selection_mode == SelectionMode.TABLES and v:
+            raise ValueError("selected_columns should not be provided when selection_mode is 'tables'")
+        return v
 
 class SelectedTableInfo(BaseModel):
     table_id: int
@@ -102,11 +160,15 @@ class MappingInfo(BaseModel):
 
 class DatasetUnificationPreview(BaseModel):
     """Preview of what will be created before actual dataset creation"""
+    selection_mode: SelectionMode
     selected_tables: List[SelectedTableInfo]
+    selected_columns_info: Optional[List[Dict[str, Any]]] = None  # For column-based selection
     unified_columns: List[Dict[str, Any]]
     mapping_groups: List[MappingInfo]
     value_mappings_count: int
     estimated_columns_count: int
+    additional_tables_included: List[int] = []  # Tables auto-included due to mappings
+    additional_columns_included: List[int] = []  # Columns auto-included due to mappings
 
 # Response Schemas
 class DatasetColumnResponse(BaseModel):

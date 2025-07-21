@@ -116,7 +116,362 @@ class DataUnificationService:
             'additional_tables': list(additional_table_ids)
         }
 
+    async def get_unified_columns_from_selected_columns(self, selected_column_ids: List[int], auto_include_mapped_columns: bool = True) -> Dict[str, Any]:
+        """
+        Get unified structure based on specific selected columns.
+        Only includes the mapped columns within groups, not all columns from tables.
+        """
+        # Get information about selected columns
+        columns_query = select(
+            ExternalColumn.id,
+            ExternalColumn.column_name,
+            ExternalColumn.data_type,
+            ExternalColumn.table_id,
+            ExternalTables.table_name,
+            ExternalSchema.schema_name
+        ).join(
+            ExternalTables, ExternalColumn.table_id == ExternalTables.id
+        ).join(
+            ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+        ).where(
+            ExternalColumn.id.in_(selected_column_ids)
+        )
+        
+        columns_result = await self.db.execute(columns_query)
+        selected_columns = columns_result.fetchall()
+        
+        # Get all column mappings for these columns
+        mappings_query = select(
+            ColumnMapping.group_id,
+            ColumnMapping.column_id,
+            ColumnGroup.name,
+            ColumnGroup.description,
+            ColumnGroup.semantic_domain_id,
+            ColumnGroup.data_dictionary_term_id
+        ).join(
+            ColumnGroup, ColumnMapping.group_id == ColumnGroup.id
+        ).where(
+            ColumnMapping.column_id.in_(selected_column_ids)
+        )
+        
+        mappings_result = await self.db.execute(mappings_query)
+        mappings = mappings_result.fetchall()
+        
+        # Get all group IDs that have selected columns
+        relevant_group_ids = set(mapping.group_id for mapping in mappings)
+        mapped_column_ids = set(mapping.column_id for mapping in mappings)
+        
+        # Get additional mapped columns from the same groups (if auto_include_mapped_columns is True)
+        additional_column_ids = set()
+        if auto_include_mapped_columns and relevant_group_ids:
+            additional_mappings_query = select(
+                ColumnMapping.column_id,
+                ColumnMapping.group_id,
+                ExternalColumn.table_id,
+                ExternalColumn.column_name,
+                ExternalColumn.data_type,
+                ExternalTables.table_name,
+                ExternalSchema.schema_name
+            ).join(
+                ExternalColumn, ColumnMapping.column_id == ExternalColumn.id
+            ).join(
+                ExternalTables, ExternalColumn.table_id == ExternalTables.id
+            ).join(
+                ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+            ).where(
+                and_(
+                    ColumnMapping.group_id.in_(relevant_group_ids),
+                    ~ColumnMapping.column_id.in_(selected_column_ids)
+                )
+            )
+            
+            additional_mappings_result = await self.db.execute(additional_mappings_query)
+            additional_mappings = additional_mappings_result.fetchall()
+            
+            for mapping in additional_mappings:
+                additional_column_ids.add(mapping.column_id)
+        
+        # Get all mappings for final column set
+        final_column_ids = set(selected_column_ids) | additional_column_ids
+        
+        if relevant_group_ids:
+            all_group_mappings_query = select(
+                ColumnMapping.column_id,
+                ColumnMapping.group_id,
+                ExternalColumn.table_id,
+                ExternalColumn.column_name,
+                ExternalColumn.data_type,
+                ExternalTables.table_name,
+                ExternalSchema.schema_name
+            ).join(
+                ExternalColumn, ColumnMapping.column_id == ExternalColumn.id
+            ).join(
+                ExternalTables, ExternalColumn.table_id == ExternalTables.id
+            ).join(
+                ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+            ).where(
+                ColumnMapping.column_id.in_(final_column_ids)
+            )
+            
+            all_mappings_result = await self.db.execute(all_group_mappings_query)
+            all_mappings = all_mappings_result.fetchall()
+        else:
+            all_mappings = []
+        
+        # Organize by groups
+        mapping_groups = {}
+        table_ids = set()
+        
+        for mapping in all_mappings:
+            group_id = mapping.group_id
+            if group_id not in mapping_groups:
+                mapping_groups[group_id] = {
+                    'group_id': group_id,
+                    'columns': [],
+                    'tables': set()
+                }
+            
+            mapping_groups[group_id]['columns'].append({
+                'column_id': mapping.column_id,
+                'column_name': mapping.column_name,
+                'data_type': mapping.data_type,
+                'table_id': mapping.table_id,
+                'table_name': mapping.table_name,
+                'schema_name': mapping.schema_name
+            })
+            mapping_groups[group_id]['tables'].add(mapping.table_id)
+            table_ids.add(mapping.table_id)
+        
+        # Add unmapped selected columns
+        for col in selected_columns:
+            if col.id not in mapped_column_ids:
+                table_ids.add(col.table_id)
+        
+        return {
+            'column_ids': list(final_column_ids),
+            'table_ids': list(table_ids),
+            'mapping_groups': list(mapping_groups.values()),
+            'selected_column_ids': selected_column_ids,
+            'additional_column_ids': list(additional_column_ids)
+        }
+
     async def generate_unified_columns(self, unified_tables_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate the unified column structure for the dataset (original table-based method)"""
+        unified_columns = []
+        processed_column_ids = set()
+        
+        # Process mapped columns first
+        for group in unified_tables_info['mapping_groups']:
+            group_id = group['group_id']
+            
+            # Get group information
+            group_query = select(
+                ColumnGroup.name,
+                ColumnGroup.description,
+                DataDictionary.display_name,
+                DataDictionary.data_type,
+                DataDictionary.description.label('dict_description')
+            ).outerjoin(
+                DataDictionary, ColumnGroup.data_dictionary_term_id == DataDictionary.id
+            ).where(
+                ColumnGroup.id == group_id
+            )
+            
+            group_result = await self.db.execute(group_query)
+            group_info = group_result.first()
+            
+            # Create unified column for this group
+            unified_column = {
+                'name': group_info.display_name or group_info.name,
+                'description': group_info.dict_description or group_info.description,
+                'data_type': group_info.data_type or 'string',
+                'source_type': 'mapped',
+                'group_id': group_id,
+                'source_columns': [],
+                'transformation_rules': []
+            }
+            
+            # Add all columns from this group
+            for col in group['columns']:
+                unified_column['source_columns'].append({
+                    'column_id': col['column_id'],
+                    'column_name': col['column_name'],
+                    'table_name': col['table_name'],
+                    'schema_name': col['schema_name'],
+                    'data_type': col['data_type']
+                })
+                processed_column_ids.add(col['column_id'])
+            
+            unified_columns.append(unified_column)
+        
+        # Process unmapped columns
+        all_table_ids = unified_tables_info['table_ids']
+        unmapped_columns_query = select(
+            ExternalColumn.id,
+            ExternalColumn.column_name,
+            ExternalColumn.data_type,
+            ExternalColumn.description,
+            ExternalColumn.table_id,
+            ExternalTables.table_name,
+            ExternalSchema.schema_name
+        ).join(
+            ExternalTables, ExternalColumn.table_id == ExternalTables.id
+        ).join(
+            ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+        ).where(
+            and_(
+                ExternalColumn.table_id.in_(all_table_ids),
+                ~ExternalColumn.id.in_(processed_column_ids)
+            )
+        ).order_by(
+            ExternalColumn.table_id,
+            ExternalColumn.column_position
+        )
+        
+        unmapped_result = await self.db.execute(unmapped_columns_query)
+        unmapped_columns = unmapped_result.fetchall()
+        
+        for col in unmapped_columns:
+            # Handle name conflicts for unmapped columns
+            base_name = col.column_name
+            column_name = base_name
+            counter = 1
+            
+            # Check if this column name already exists in unified_columns
+            existing_names = {uc['name'] for uc in unified_columns}
+            while column_name in existing_names:
+                column_name = f"{base_name}_{col.table_name}"
+                if column_name in existing_names:
+                    column_name = f"{base_name}_{col.table_name}_{counter}"
+                    counter += 1
+            
+            unified_column = {
+                'name': column_name,
+                'description': col.description,
+                'data_type': col.data_type,
+                'source_type': 'individual',
+                'group_id': None,
+                'source_columns': [{
+                    'column_id': col.id,
+                    'column_name': col.column_name,
+                    'table_name': col.table_name,
+                    'schema_name': col.schema_name,
+                    'data_type': col.data_type
+                }],
+                'transformation_rules': []
+            }
+            unified_columns.append(unified_column)
+        
+        return unified_columns
+
+    async def generate_unified_columns_from_selected_columns(self, unified_columns_info: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Generate the unified column structure for the dataset based on selected columns"""
+        unified_columns = []
+        processed_column_ids = set()
+        
+        # Process mapped columns first
+        for group in unified_columns_info['mapping_groups']:
+            group_id = group['group_id']
+            
+            # Get group information
+            group_query = select(
+                ColumnGroup.name,
+                ColumnGroup.description,
+                DataDictionary.display_name,
+                DataDictionary.data_type,
+                DataDictionary.description.label('dict_description')
+            ).outerjoin(
+                DataDictionary, ColumnGroup.data_dictionary_term_id == DataDictionary.id
+            ).where(
+                ColumnGroup.id == group_id
+            )
+            
+            group_result = await self.db.execute(group_query)
+            group_info = group_result.first()
+            
+            # Create unified column for this group
+            unified_column = {
+                'name': group_info.display_name or group_info.name,
+                'description': group_info.dict_description or group_info.description,
+                'data_type': group_info.data_type or 'string',
+                'source_type': 'mapped',
+                'group_id': group_id,
+                'source_columns': [],
+                'transformation_rules': []
+            }
+            
+            # Add all columns from this group
+            for col in group['columns']:
+                unified_column['source_columns'].append({
+                    'column_id': col['column_id'],
+                    'column_name': col['column_name'],
+                    'table_name': col['table_name'],
+                    'schema_name': col['schema_name'],
+                    'data_type': col['data_type']
+                })
+                processed_column_ids.add(col['column_id'])
+            
+            unified_columns.append(unified_column)
+        
+        # Process unmapped columns (only those that were originally selected)
+        selected_column_ids = unified_columns_info.get('selected_column_ids', [])
+        unmapped_selected_ids = set(selected_column_ids) - processed_column_ids
+        
+        if unmapped_selected_ids:
+            unmapped_columns_query = select(
+                ExternalColumn.id,
+                ExternalColumn.column_name,
+                ExternalColumn.data_type,
+                ExternalColumn.description,
+                ExternalColumn.table_id,
+                ExternalTables.table_name,
+                ExternalSchema.schema_name
+            ).join(
+                ExternalTables, ExternalColumn.table_id == ExternalTables.id
+            ).join(
+                ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+            ).where(
+                ExternalColumn.id.in_(unmapped_selected_ids)
+            ).order_by(
+                ExternalColumn.table_id,
+                ExternalColumn.column_position
+            )
+            
+            unmapped_result = await self.db.execute(unmapped_columns_query)
+            unmapped_columns = unmapped_result.fetchall()
+            
+            for col in unmapped_columns:
+                # Handle name conflicts for unmapped columns
+                base_name = col.column_name
+                column_name = base_name
+                counter = 1
+                
+                # Check if this column name already exists in unified_columns
+                existing_names = {uc['name'] for uc in unified_columns}
+                while column_name in existing_names:
+                    column_name = f"{base_name}_{col.table_name}"
+                    if column_name in existing_names:
+                        column_name = f"{base_name}_{col.table_name}_{counter}"
+                        counter += 1
+                
+                unified_column = {
+                    'name': column_name,
+                    'description': col.description,
+                    'data_type': col.data_type,
+                    'source_type': 'individual',
+                    'group_id': None,
+                    'source_columns': [{
+                        'column_id': col.id,
+                        'column_name': col.column_name,
+                        'table_name': col.table_name,
+                        'schema_name': col.schema_name,
+                        'data_type': col.data_type
+                    }],
+                    'transformation_rules': []
+                }
+                unified_columns.append(unified_column)
+        
+        return unified_columns
         """Generate the unified column structure for the dataset"""
         unified_columns = []
         processed_column_ids = set()

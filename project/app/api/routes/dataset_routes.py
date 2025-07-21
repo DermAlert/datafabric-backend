@@ -13,6 +13,7 @@ from ..schemas.dataset_schemas import (
     DatasetResponse,
     DatasetUnifiedCreate,
     DatasetUnificationPreview,
+    DatasetUnificationPreviewRequest,
     SearchDataset
 )
 from ..schemas.search import SearchResult
@@ -29,13 +30,32 @@ async def create_unified_dataset(
     # current_user = Depends(get_current_user),
 ):
     """
-    Create a unified dataset from multiple tables with automatic column mapping.
+    Create a unified dataset from multiple tables or specific columns with automatic column mapping.
     
-    This endpoint automatically:
+    This endpoint supports two selection modes:
+    
+    **Table-based selection (selection_mode = "tables"):**
+    - Specify selected_tables with table IDs
+    - Automatically includes all columns from selected tables
+    - If auto_include_mapped_columns=true, includes entire tables that have mapped columns
+    
+    **Column-based selection (selection_mode = "columns"):**
+    - Specify selected_columns with specific column IDs
+    - Only includes the specified columns in the dataset
+    - If auto_include_mapped_columns=true, includes only other mapped columns from the same groups, not entire tables
+    
+    The endpoint automatically:
     - Identifies columns with existing mappings
-    - Includes all columns from mapping groups
+    - Applies column group mappings for semantic equivalence
     - Applies value mappings for data standardization
-    - Creates unified columns based on semantic equivalence
+    - Creates unified columns based on selected approach
+    
+    **Parameters:**
+    - selection_mode: "tables" or "columns"
+    - selected_tables: List of table IDs (required when selection_mode="tables")
+    - selected_columns: List of column IDs (required when selection_mode="columns")
+    - auto_include_mapped_columns: Whether to include related mapped columns/tables
+    - apply_value_mappings: Whether to apply value standardization mappings
     """
     try:
         service = DatasetService(db)
@@ -50,22 +70,27 @@ async def create_unified_dataset(
 
 @router.post("/unified/preview", response_model=DatasetUnificationPreview)
 async def preview_unified_dataset(
-    selected_table_ids: List[int],
+    preview_request: DatasetUnificationPreviewRequest,
     db: AsyncSession = Depends(get_db),
     # current_user = Depends(get_current_user),
 ):
     """
-    Preview what will be created when unifying the selected tables.
+    Preview what will be created when unifying the selected tables or columns.
+    
+    Supports both selection modes:
+    - **Tables mode**: Shows all columns from selected tables and any auto-included tables
+    - **Columns mode**: Shows only specified columns and any auto-included mapped columns
     
     Shows:
-    - Selected tables and their columns
+    - Selected tables/columns and their information
     - Existing column mappings that will be applied
     - Value mappings that will be used
     - Estimated unified columns count
+    - Auto-included tables/columns due to mappings
     """
     try:
         service = DatasetService(db)
-        return await service.get_unification_preview(selected_table_ids)
+        return await service.get_unification_preview_enhanced(preview_request)
     except HTTPException:
         raise
     except Exception as e:
