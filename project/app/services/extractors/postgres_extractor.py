@@ -155,82 +155,117 @@ class PostgresExtractor:
         try:
             conn = await self._get_connection()
             
-            # Get column information
-            column_query = """
+            # First, get the actual table name from pg_class (handles case sensitivity)
+            actual_table_query = """
             SELECT 
-                c.column_name,
-                c.data_type,
-                c.is_nullable = 'YES' AS is_nullable,
-                c.ordinal_position AS column_position,
-                c.character_maximum_length AS max_length,
-                c.numeric_precision,
-                c.numeric_scale,
-                c.column_default AS default_value,
-                pg_catalog.col_description(format('%s.%s', c.table_schema, c.table_name)::regclass::oid, c.ordinal_position) AS description,
-                format_type(a.atttypid, a.atttypmod) AS full_data_type
+                c.relname as actual_table_name
             FROM 
-                information_schema.columns c
+                pg_class c
             JOIN 
-                pg_namespace n ON n.nspname = c.table_schema
-            JOIN 
-                pg_class cl ON cl.relnamespace = n.oid AND cl.relname = c.table_name
-            JOIN 
-                pg_attribute a ON a.attrelid = cl.oid AND a.attname = c.column_name AND a.attnum > 0
+                pg_namespace n ON n.oid = c.relnamespace
             WHERE 
-                c.table_schema = $1
-                AND c.table_name = $2
-            ORDER BY 
-                c.ordinal_position
+                n.nspname = $1
+                AND (c.relname = $2 OR c.relname = lower($2))
+                AND c.relkind IN ('r', 'v', 'f')  -- regular table, view, foreign table
+            LIMIT 1
             """
             
-            column_rows = await conn.fetch(column_query, schema_name, table_name)
+            actual_table_result = await conn.fetchrow(actual_table_query, schema_name, table_name)
+            if not actual_table_result:
+                print(f"DEBUG: Table {schema_name}.{table_name} not found in pg_class")
+                return []
+            
+            actual_table_name = actual_table_result['actual_table_name']
+            print(f"DEBUG: Using actual table name: {actual_table_name} for requested: {table_name}")
+            
+            # Get column information using a more direct approach with pg_attribute
+            column_query = """
+            SELECT 
+                a.attname as column_name,
+                format_type(a.atttypid, a.atttypmod) as data_type,
+                NOT a.attnotnull as is_nullable,
+                a.attnum as column_position,
+                CASE 
+                    WHEN t.typname = 'varchar' THEN a.atttypmod - 4
+                    WHEN t.typname = 'char' THEN a.atttypmod - 4
+                    ELSE NULL
+                END as max_length,
+                CASE 
+                    WHEN t.typname IN ('numeric', 'decimal') THEN ((a.atttypmod - 4) >> 16) & 65535
+                    ELSE NULL
+                END as numeric_precision,
+                CASE 
+                    WHEN t.typname IN ('numeric', 'decimal') THEN (a.atttypmod - 4) & 65535
+                    ELSE NULL
+                END as numeric_scale,
+                pg_get_expr(ad.adbin, ad.adrelid) as default_value,
+                col_description(c.oid, a.attnum) as description,
+                format_type(a.atttypid, a.atttypmod) as full_data_type
+            FROM 
+                pg_attribute a
+            JOIN 
+                pg_class c ON c.oid = a.attrelid
+            JOIN 
+                pg_namespace n ON n.oid = c.relnamespace
+            JOIN 
+                pg_type t ON t.oid = a.atttypid
+            LEFT JOIN 
+                pg_attrdef ad ON ad.adrelid = c.oid AND ad.adnum = a.attnum
+            WHERE 
+                n.nspname = $1
+                AND c.relname = $2
+                AND a.attnum > 0
+                AND NOT a.attisdropped
+            ORDER BY 
+                a.attnum
+            """
+            
+            column_rows = await conn.fetch(column_query, schema_name, actual_table_name)
 
             print("DEBUG: Column Rows:", column_rows)
             
-            # Get primary key information
+            # Get primary key information using pg_constraint
             pk_query = """
             SELECT 
-                c.column_name
+                a.attname as column_name
             FROM 
-                information_schema.table_constraints tc
+                pg_constraint con
             JOIN 
-                information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
-                AND tc.table_schema = ccu.table_schema
+                pg_class c ON c.oid = con.conrelid
             JOIN 
-                information_schema.columns c ON c.table_schema = tc.table_schema
-                AND c.table_name = tc.table_name
-                AND c.column_name = ccu.column_name
+                pg_namespace n ON n.oid = c.relnamespace
+            JOIN 
+                pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(con.conkey)
             WHERE 
-                tc.constraint_type = 'PRIMARY KEY'
-                AND tc.table_schema = $1
-                AND tc.table_name = $2
+                con.contype = 'p'
+                AND n.nspname = $1
+                AND c.relname = $2
             """
             
-            pk_rows = await conn.fetch(pk_query, schema_name, table_name)
+            pk_rows = await conn.fetch(pk_query, schema_name, actual_table_name)
             pk_columns = set(row["column_name"] for row in pk_rows)
 
             print("DEBUG: Primary Key Columns:", pk_columns)
             
-            # Get unique constraint information
+            # Get unique constraint information using pg_constraint
             unique_query = """
             SELECT 
-                c.column_name
+                a.attname as column_name
             FROM 
-                information_schema.table_constraints tc
+                pg_constraint con
             JOIN 
-                information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
-                AND tc.table_schema = ccu.table_schema
+                pg_class c ON c.oid = con.conrelid
             JOIN 
-                information_schema.columns c ON c.table_schema = tc.table_schema
-                AND c.table_name = tc.table_name
-                AND c.column_name = ccu.column_name
+                pg_namespace n ON n.oid = c.relnamespace
+            JOIN 
+                pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(con.conkey)
             WHERE 
-                tc.constraint_type = 'UNIQUE'
-                AND tc.table_schema = $1
-                AND tc.table_name = $2
+                con.contype = 'u'
+                AND n.nspname = $1
+                AND c.relname = $2
             """
             
-            unique_rows = await conn.fetch(unique_query, schema_name, table_name)
+            unique_rows = await conn.fetch(unique_query, schema_name, actual_table_name)
             unique_columns = set(row["column_name"] for row in unique_rows)
 
             print("DEBUG: Unique Columns:", unique_columns)
@@ -252,7 +287,7 @@ class PostgresExtractor:
                 AND t.relname = $2
             """
 
-            index_rows = await conn.fetch(index_query, schema_name, table_name)
+            index_rows = await conn.fetch(index_query, schema_name, actual_table_name)
             indexed_columns = set(row["column_name"] for row in index_rows)
 
             print("DEBUG: Indexed Columns:", indexed_columns)
@@ -261,22 +296,25 @@ class PostgresExtractor:
             for row in column_rows:
                 column_name = row["column_name"]
                 
-                # Get basic statistics
-                stats_query = """
-                SELECT
-                    n_distinct,
-                    most_common_vals::text,
-                    most_common_freqs::text,
-                    histogram_bounds::text
-                FROM
-                    pg_stats
-                WHERE
-                    schemaname = $1
-                    AND tablename = $2
-                    AND attname = $3
-                """
-                
-                stats = await conn.fetchrow(stats_query, schema_name, table_name, column_name)
+                # Get basic statistics - use try/catch to be more tolerant
+                try:
+                    stats_query = """
+                    SELECT
+                        n_distinct,
+                        most_common_vals::text,
+                        most_common_freqs::text,
+                        histogram_bounds::text
+                    FROM
+                        pg_stats
+                    WHERE
+                        schemaname = $1
+                        AND tablename = $2
+                        AND attname = $3
+                    """
+                    
+                    stats = await conn.fetchrow(stats_query, schema_name, actual_table_name, column_name)
+                except:
+                    stats = None
                 
                 statistics = {}
                 if stats:
@@ -294,26 +332,60 @@ class PostgresExtractor:
                     if stats["histogram_bounds"]:
                         statistics["histogram_bounds"] = stats["histogram_bounds"]
                 
-                # Get sample values 
-                sample_query = f"""
-                SELECT {column_name}
-                FROM {schema_name}.{table_name}
-                ORDER BY random()
-                LIMIT 5
-                """
-                
+                # Get sample values - more robust approach
                 try:
+                    # Try to get sample values with proper quoting
+                    sample_query = f"""
+                    SELECT "{column_name}"
+                    FROM "{schema_name}"."{actual_table_name}"
+                    TABLESAMPLE BERNOULLI(10)
+                    LIMIT 5
+                    """
+                    
                     sample_rows = await conn.fetch(sample_query)
-                    sample_values = [row[0] for row in sample_rows]
+                    if not sample_rows:
+                        # Fallback to regular random sampling
+                        sample_query = f"""
+                        SELECT "{column_name}"
+                        FROM "{schema_name}"."{actual_table_name}"
+                        ORDER BY random()
+                        LIMIT 5
+                        """
+                        sample_rows = await conn.fetch(sample_query)
+                    
+                    sample_values = [row[0] for row in sample_rows if sample_rows]
                     # Convert any complex types to string
                     sample_values = [str(val) if val is not None else None for val in sample_values]
-                except:
+                except Exception as e:
+                    print(f"DEBUG: Error getting sample values for {column_name}: {str(e)}")
                     sample_values = []
+                
+                # Normalize data type to match information_schema format
+                data_type = row["data_type"]
+                if "(" in data_type:
+                    data_type = data_type.split("(")[0]
+                
+                # Map PostgreSQL types to information_schema equivalents
+                type_mapping = {
+                    "int4": "integer",
+                    "int8": "bigint",
+                    "int2": "smallint",
+                    "float4": "real",
+                    "float8": "double precision",
+                    "bool": "boolean",
+                    "text": "text",
+                    "varchar": "character varying",
+                    "bpchar": "character",
+                    "timestamp": "timestamp without time zone",
+                    "timestamptz": "timestamp with time zone"
+                }
+                
+                normalized_data_type = type_mapping.get(data_type, data_type)
                 
                 columns.append({
                     "column_name": column_name,
                     "external_reference": f"{self.database}.{schema_name}.{table_name}.{column_name}",
-                    "data_type": row["data_type"],
+                    "data_type": normalized_data_type,
                     "is_nullable": row["is_nullable"],
                     "column_position": row["column_position"],
                     "max_length": row["max_length"],
@@ -327,7 +399,8 @@ class PostgresExtractor:
                     "statistics": statistics,
                     "sample_values": sample_values,
                     "properties": {
-                        "full_data_type": row["full_data_type"]
+                        "full_data_type": row["full_data_type"],
+                        "original_pg_type": row["data_type"]
                     }
                 })
             
@@ -353,11 +426,41 @@ class PostgresExtractor:
         try:
             conn = await self._get_connection()
             
+            # First, get the actual table name from pg_class (handles case sensitivity)
+            actual_table_query = """
+            SELECT 
+                c.relname as actual_table_name
+            FROM 
+                pg_class c
+            JOIN 
+                pg_namespace n ON n.oid = c.relnamespace
+            WHERE 
+                n.nspname = $1
+                AND (c.relname = $2 OR c.relname = lower($2))
+                AND c.relkind IN ('r', 'v', 'f')  -- regular table, view, foreign table
+            LIMIT 1
+            """
+            
+            actual_table_result = await conn.fetchrow(actual_table_query, schema_name, table_name)
+            if not actual_table_result:
+                return {
+                    "schema_name": schema_name,
+                    "table_name": table_name,
+                    "columns": [],
+                    "data": [],
+                    "total_rows": 0,
+                    "fetched_rows": 0,
+                    "offset": offset,
+                    "error": f"Table {schema_name}.{table_name} not found"
+                }
+            
+            actual_table_name = actual_table_result['actual_table_name']
+            
             # Get column information first
             columns = await self.extract_columns(schema_name, table_name)
             
-            # Build query
-            query = f'SELECT * FROM "{schema_name}"."{table_name}"'
+            # Build query using actual table name
+            query = f'SELECT * FROM "{schema_name}"."{actual_table_name}"'
             
             # Add LIMIT and OFFSET if specified
             if limit is not None:
@@ -378,7 +481,7 @@ class PostgresExtractor:
                 data.append(row_dict)
             
             # Get total row count
-            count_query = f'SELECT COUNT(*) as total FROM "{schema_name}"."{table_name}"'
+            count_query = f'SELECT COUNT(*) as total FROM "{schema_name}"."{actual_table_name}"'
             count_result = await conn.fetchrow(count_query)
             total_rows = count_result['total'] if count_result else 0
             
@@ -418,9 +521,31 @@ class PostgresExtractor:
             Dict containing chunk data
         """
         try:
-            # Get total row count first
+            # Get the actual table name first
             conn = await self._get_connection()
-            count_query = f'SELECT COUNT(*) as total FROM "{schema_name}"."{table_name}"'
+            
+            actual_table_query = """
+            SELECT 
+                c.relname as actual_table_name
+            FROM 
+                pg_class c
+            JOIN 
+                pg_namespace n ON n.oid = c.relnamespace
+            WHERE 
+                n.nspname = $1
+                AND (c.relname = $2 OR c.relname = lower($2))
+                AND c.relkind IN ('r', 'v', 'f')  -- regular table, view, foreign table
+            LIMIT 1
+            """
+            
+            actual_table_result = await conn.fetchrow(actual_table_query, schema_name, table_name)
+            if not actual_table_result:
+                return []
+            
+            actual_table_name = actual_table_result['actual_table_name']
+            
+            # Get total row count first
+            count_query = f'SELECT COUNT(*) as total FROM "{schema_name}"."{actual_table_name}"'
             count_result = await conn.fetchrow(count_query)
             total_rows = count_result['total'] if count_result else 0
             

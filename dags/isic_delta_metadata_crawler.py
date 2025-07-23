@@ -58,7 +58,7 @@ RETRY_DELAY = 10
 MAX_LIMIT = 10000
 
 # Download limits for testing
-MAX_IMAGES_PER_COLLECTION = None  # Set to None for unlimited, or specify a number (e.g., 100) for testing
+MAX_IMAGES_PER_COLLECTION = 10  # Set to None for unlimited, or specify a number (e.g., 100) for testing
 
 def get_minio_client():
     """Get MinIO client instance"""

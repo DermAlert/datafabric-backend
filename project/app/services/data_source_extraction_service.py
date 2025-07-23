@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .extractors.postgres_extractor import PostgresExtractor
 from ..database.metadata.metadata import ExternalTables, ExternalSchema, ExternalColumn
 from ..database.core.core import DataConnection, ConnectionType
+from .image_service import ImageService
 
 logger = logging.getLogger(__name__)
 
@@ -407,8 +408,8 @@ class DataSourceExtractionService:
         # Check if Delta Lake is involved (requires smaller batches due to Spark overhead)
         has_deltalake = connection_types and any('delta' in ct.lower() for ct in connection_types)
         if has_deltalake:
-            base_batch_size = 500  # Much smaller for Delta Lake to avoid Spark memory issues
-            logger.info("Delta Lake detected - using smaller batch size for memory optimization")
+            base_batch_size = 1000  # Increased from 500 - better balance between memory and performance
+            logger.info("Delta Lake detected - using optimized batch size for memory and performance balance")
         
         # Adjust based on table count (more tables = smaller batches)
         if table_count > 10:
@@ -842,7 +843,7 @@ class DataSourceExtractionService:
         """Process a batch of data and apply column and value mappings"""
         try:
             table_data = batch_data["data"]
-            table_name = batch_data["table_name"]
+            table_name = batch_data.get("table_name", "unknown_table")
             table_id = batch_data.get("table_id")
             
             if not table_data:
@@ -856,21 +857,32 @@ class DataSourceExtractionService:
                 # Apply column mappings
                 if column_mappings:
                     for col, value in row.items():
-                        # Try table-specific mapping first
-                        table_col_key = f"{table_name}.{col}"
-                        if table_col_key in column_mappings:
-                            mapped_col = column_mappings[table_col_key]
+                        # Skip base64 columns for now, handle them separately
+                        if col.endswith('_base64'):
+                            # For base64 columns, try to map the base column name
+                            base_col = col[:-7]  # Remove '_base64' suffix
+                            table_col_key = f"{table_name}.{base_col}"
+                            if table_col_key in column_mappings:
+                                mapped_col = f"{column_mappings[table_col_key]}_base64"
+                            else:
+                                mapped_col = f"{column_mappings.get(base_col, base_col)}_base64"
+                            mapped_row[mapped_col] = value
                         else:
-                            # Fallback to column name only
-                            mapped_col = column_mappings.get(col, col)
-                        mapped_row[mapped_col] = value
+                            # Try table-specific mapping first
+                            table_col_key = f"{table_name}.{col}"
+                            if table_col_key in column_mappings:
+                                mapped_col = column_mappings[table_col_key]
+                            else:
+                                # Fallback to column name only
+                                mapped_col = column_mappings.get(col, col)
+                            mapped_row[mapped_col] = value
                 else:
                     mapped_row = row.copy()
                 
-                # Apply value mappings
+                # Apply value mappings (skip base64 columns)
                 if value_mappings:
                     for col, value in mapped_row.items():
-                        if col in value_mappings and str(value) in value_mappings[col]:
+                        if not col.endswith('_base64') and col in value_mappings and str(value) in value_mappings[col]:
                             mapped_row[col] = value_mappings[col][str(value)]
                 
                 # Add source tracking info
@@ -1145,7 +1157,8 @@ class DataSourceExtractionService:
         """Extract Delta Lake data with offset for batch processing"""
         try:
             from pyspark.sql import SparkSession
-            from pyspark.sql.functions import monotonically_increasing_id
+            from pyspark.sql.functions import row_number, col
+            from pyspark.sql.window import Window
             
             # Get connection parameters
             params = connection.connection_params
@@ -1160,17 +1173,9 @@ class DataSourceExtractionService:
                 "spark.hadoop.fs.s3a.path.style.access": "true",
                 "spark.hadoop.fs.s3a.impl": "org.apache.hadoop.fs.s3a.S3AFileSystem",
                 # Memory optimization settings
-                # "spark.executor.memory": "512m",
-                # "spark.driver.memory": "256m",
-                # "spark.executor.memoryFraction": "0.6",
-                # "spark.sql.adaptive.enabled": "true",
-                # "spark.sql.adaptive.coalescePartitions.enabled": "true",
-                # "spark.sql.adaptive.coalescePartitions.minPartitionSize": "1MB",
-                # "spark.sql.adaptive.advisoryPartitionSizeInBytes": "64MB",
-                # "spark.serializer": "org.apache.spark.serializer.KryoSerializer",
-                # "spark.kryo.unsafe": "false",
-                # "spark.sql.execution.arrow.pyspark.enabled": "true",
-                # "spark.sql.execution.arrow.maxRecordsPerBatch": str(min(limit, 1000))
+                "spark.sql.adaptive.enabled": "true",
+                "spark.sql.adaptive.coalescePartitions.enabled": "true",
+                "spark.sql.adaptive.advisoryPartitionSizeInBytes": "64MB"
             }
             
             # Initialize Spark session with optimized configuration
@@ -1190,19 +1195,35 @@ class DataSourceExtractionService:
             # Read Delta table
             df = spark.read.format("delta").load(delta_path)
             
-            # Add row numbers for consistent ordering and offset
-            df_with_row_number = df.withColumn("row_number", monotonically_increasing_id())
-            
-            # Apply offset and limit using row numbers for consistent pagination
-            df_paginated = df_with_row_number.filter(
-                (df_with_row_number.row_number >= offset) & 
-                (df_with_row_number.row_number < offset + limit)
-            ).drop("row_number")
+            # Use proper row_number() with Window for sequential numbering
+            # Order by the first column to ensure consistent ordering
+            if df.columns:
+                # Create a window specification ordered by the first column (or multiple columns for better consistency)
+                window_spec = Window.orderBy(df.columns[0])
+                
+                # If there are multiple columns, use them for more stable ordering
+                if len(df.columns) > 1:
+                    # Add additional columns for more stable sorting
+                    additional_cols = [col(c) for c in df.columns[1:min(3, len(df.columns))]]  # Use up to 3 columns
+                    window_spec = Window.orderBy(df.columns[0], *additional_cols)
+                
+                df_with_row_number = df.withColumn("row_number", row_number().over(window_spec))
+                
+                # Apply offset and limit using sequential row numbers
+                df_paginated = df_with_row_number.filter(
+                    (col("row_number") > offset) & 
+                    (col("row_number") <= offset + limit)
+                ).drop("row_number")
+            else:
+                # Fallback if no columns available
+                logger.warning("No columns found in Delta table, using simple limit/offset")
+                df_paginated = df.limit(offset + limit).collect()[offset:]
+                df_paginated = spark.createDataFrame(df_paginated, df.schema) if df_paginated else df.limit(0)
             
             # Cache the result to avoid recomputation
             df_paginated.cache()
             
-            # Get column information (exclude the temporary row_number column)
+            # Get column information
             columns = []
             for field in df.schema.fields:
                 columns.append({
@@ -1211,7 +1232,7 @@ class DataSourceExtractionService:
                     "nullable": field.nullable
                 })
             
-            # Convert to list of dictionaries in smaller chunks to avoid memory issues
+            # Convert to list of dictionaries with better memory management
             logger.info(f"Converting Delta data to Python objects (limit: {limit})")
             
             # Collect data with memory management
@@ -1220,6 +1241,7 @@ class DataSourceExtractionService:
                 pandas_df = df_paginated.toPandas()
                 data = pandas_df.to_dict('records')
                 pandas_df = None  # Free memory
+                logger.debug(f"Successfully used Pandas conversion for {len(data)} rows")
             except Exception as pandas_error:
                 logger.warning(f"Failed to use Pandas conversion, falling back to collect(): {pandas_error}")
                 # Fallback to collect() but with smaller chunks
@@ -1270,3 +1292,408 @@ class DataSourceExtractionService:
                     spark.catalog.clearCache()
             except Exception as cleanup_error:
                 logger.warning(f"Error during Spark cleanup: {cleanup_error}")
+
+    async def extract_data_from_tables_with_images(
+        self, 
+        table_ids: List[int], 
+        limit_per_table: Optional[int] = None,
+        process_images: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Extract real data from multiple tables with image processing support.
+        
+        Args:
+            table_ids: List of table IDs to extract data from
+            limit_per_table: Maximum rows per table (None for all data)
+            process_images: Whether to process image columns and download images
+        
+        Returns:
+            Dict containing extracted data from all tables with images processed
+        """
+        try:
+            # First extract regular data
+            extraction_results = await self.extract_data_from_tables(table_ids, limit_per_table)
+            
+            if not process_images:
+                return extraction_results
+            
+            # Initialize image service
+            image_service = ImageService(self.db)
+            
+            # Process each table's data for images
+            for table_id, table_data in extraction_results.get("tables", {}).items():
+                try:
+                    # Get all column IDs for this table
+                    columns_query = select(ExternalColumn.id, ExternalColumn.column_name).where(
+                        ExternalColumn.table_id == table_id
+                    )
+                    columns_result = await self.db.execute(columns_query)
+                    columns_data = columns_result.fetchall()
+                    
+                    column_ids = [col.id for col in columns_data]
+                    
+                    # Get image columns info
+                    image_columns_info = await image_service.get_image_columns_info(column_ids)
+                    
+                    if not image_columns_info:
+                        logger.debug(f"No image columns found for table {table_id}")
+                        continue
+                    
+                    logger.info(f"Found {len(image_columns_info)} image columns for table {table_id}")
+                    
+                    # Convert table data to DataFrame
+                    df = pd.DataFrame(table_data["data"])
+                    
+                    if df.empty:
+                        logger.warning(f"No data to process for table {table_id}")
+                        continue
+                    
+                    # Process image columns
+                    df_with_images = await image_service.process_image_columns_in_dataframe(
+                        df, image_columns_info
+                    )
+                    
+                    # Update extraction results with processed data
+                    table_data["data"] = df_with_images.to_dict('records')
+                    
+                    # Update columns info to include base64 columns
+                    # original_columns = table_data["columns"]
+                    # for img_col_info in image_columns_info:
+                    #     base64_column_name = f"{img_col_info['column_name']}_base64"
+                    #     if base64_column_name in df_with_images.columns:
+                    #         original_columns.append({
+                    #             "name": base64_column_name,
+                    #             "type": "text",
+                    #             "is_image_base64": True,
+                    #             "source_image_column": img_col_info['column_name']
+                    #         })
+                    
+                    table_data["has_processed_images"] = True
+                    table_data["processed_image_columns"] = len(image_columns_info)
+                    
+                    logger.info(f"Successfully processed images for table {table_id}")
+                    
+                except Exception as e:
+                    logger.error(f"Error processing images for table {table_id}: {e}")
+                    # Continue with other tables even if one fails
+                    if "tables" in extraction_results and str(table_id) in extraction_results["tables"]:
+                        extraction_results["tables"][str(table_id)]["image_processing_error"] = str(e)
+            
+            # Add image processing summary
+            extraction_results["image_processing"] = {
+                "enabled": process_images,
+                "tables_with_images": len([
+                    t for t in extraction_results.get("tables", {}).values() 
+                    if t.get("has_processed_images", False)
+                ]),
+                "total_image_columns": sum([
+                    t.get("processed_image_columns", 0) 
+                    for t in extraction_results.get("tables", {}).values()
+                ])
+            }
+            
+            return extraction_results
+            
+        except Exception as e:
+            logger.error(f"Failed to extract data with images from tables: {e}")
+            raise
+
+    async def extract_and_unify_data_with_incremental_delta_save_with_images(
+        self, 
+        table_ids: List[int], 
+        column_mappings: Dict[str, str] = None,
+        value_mappings: Dict[str, Dict[str, str]] = None,
+        limit_per_table: Optional[int] = None,
+        batch_size: int = 1000,
+        minio_service=None,
+        dataset_id: int = None,
+        bucket_name: str = None,
+        specific_column_ids: Optional[List[int]] = None,
+        process_images: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Extract data from multiple sources with image processing and save incrementally to Delta Lake.
+        This version includes image processing capabilities for is_image_path columns.
+        
+        Args:
+            table_ids: List of table IDs
+            column_mappings: Dictionary of column name mappings
+            value_mappings: Dictionary of value mappings
+            limit_per_table: Limit rows per table (None for all data)
+            batch_size: Number of rows to process per batch
+            minio_service: MinIO service instance for Delta Lake operations
+            dataset_id: Dataset ID for tracking
+            bucket_name: MinIO bucket name
+            specific_column_ids: Optional list of specific column IDs to extract (for column-mode)
+            process_images: Whether to process image columns
+        
+        Returns:
+            Dict with processing summary including image processing info
+        """
+        try:
+            logger.info(f"Starting incremental batch extraction with image processing for {len(table_ids)} tables with batch size {batch_size}")
+            
+            if not minio_service or not dataset_id or not bucket_name:
+                raise ValueError("minio_service, dataset_id, and bucket_name are required for incremental save")
+            
+            # Initialize image service
+            image_service = ImageService(self.db) if process_images else None
+            
+            # Get image columns info for all relevant tables
+            image_columns_info = {}
+            total_image_columns = 0
+            
+            if process_images:
+                logger.info("Identifying image columns...")
+                for table_id in table_ids:
+                    # Get all column IDs for this table
+                    columns_query = select(ExternalColumn.id, ExternalColumn.column_name).where(
+                        ExternalColumn.table_id == table_id
+                    )
+                    columns_result = await self.db.execute(columns_query)
+                    columns_data = columns_result.fetchall()
+                    
+                    table_column_ids = [col.id for col in columns_data]
+                    
+                    # Filter by specific columns if in column mode
+                    if specific_column_ids:
+                        table_column_ids = [col_id for col_id in table_column_ids if col_id in specific_column_ids]
+                    
+                    # Get image columns info for this table
+                    table_image_info = await image_service.get_image_columns_info(table_column_ids)
+                    
+                    if table_image_info:
+                        image_columns_info[table_id] = table_image_info
+                        total_image_columns += len(table_image_info)
+                        logger.info(f"Table {table_id}: found {len(table_image_info)} image columns")
+                
+                logger.info(f"Total image columns found: {total_image_columns}")
+            
+            # Get all unified columns to ensure consistent DataFrame structure
+            all_unified_columns = set()
+            
+            if specific_column_ids:
+                # Column-mode: only include specified columns
+                logger.info(f"Using column-mode: extracting only {len(specific_column_ids)} specific columns")
+                
+                # Get information about specific columns
+                for table_id in table_ids:
+                    table_info = await self._get_table_info(table_id)
+                    if table_info:
+                        table_name = table_info["table_name"]
+                        columns = table_info["columns"]
+                        
+                        for col in columns:
+                            # Only include this column if it's in the specific_column_ids list
+                            if col["id"] in specific_column_ids:
+                                col_name = col["column_name"]
+                                
+                                # Apply column mapping to determine unified column name
+                                if column_mappings:
+                                    table_col_key = f"{table_name}.{col_name}"
+                                    if table_col_key in column_mappings:
+                                        unified_col = column_mappings[table_col_key]
+                                    else:
+                                        unified_col = column_mappings.get(col_name, col_name)
+                                else:
+                                    unified_col = col_name
+                                
+                                all_unified_columns.add(unified_col)
+                                
+                                # Add base64 column for image columns
+                                # if process_images and table_id in image_columns_info:
+                                #     for img_info in image_columns_info[table_id]:
+                                #         if img_info['column_name'] == col_name:
+                                #             all_unified_columns.add(f"{unified_col}_base64")
+                                #             logger.debug(f"Adding base64 column for image: {unified_col}_base64")
+                                
+                                logger.debug(f"Including column {col_name} from table {table_name} as {unified_col}")
+            else:
+                # Table-mode: include all columns from selected tables
+                logger.info(f"Using table-mode: extracting all columns from {len(table_ids)} tables")
+                
+                # First pass: determine all possible columns
+                for table_id in table_ids:
+                    table_info = await self._get_table_info(table_id)
+                    if table_info:
+                        table_name = table_info["table_name"]
+                        columns = table_info["columns"]
+                        
+                        for col in columns:
+                            col_name = col["column_name"]
+                            
+                            # Apply column mapping to determine unified column name
+                            if column_mappings:
+                                table_col_key = f"{table_name}.{col_name}"
+                                if table_col_key in column_mappings:
+                                    unified_col = column_mappings[table_col_key]
+                                else:
+                                    unified_col = column_mappings.get(col_name, col_name)
+                            else:
+                                unified_col = col_name
+                            
+                            all_unified_columns.add(unified_col)
+                            
+                            # # Add base64 column for image columns
+                            # if process_images and table_id in image_columns_info:
+                            #     for img_info in image_columns_info[table_id]:
+                            #         if img_info['column_name'] == col_name:
+                            #             all_unified_columns.add(f"{unified_col}_base64")
+                            #             logger.debug(f"Adding base64 column for image: {unified_col}_base64")
+            
+            # Add source tracking columns
+            all_unified_columns.update(['_source_table', '_source_table_id'])
+            
+            # Initialize Delta table (create empty table first)
+            await minio_service.initialize_incremental_delta_table(
+                dataset_id, 
+                bucket_name, 
+                list(all_unified_columns)
+            )
+            
+            # Process each table in batches and save incrementally
+            total_processed_rows = 0
+            batch_count = 0
+            total_images_processed = 0
+            
+            for table_id in table_ids:
+                logger.info(f"Processing table {table_id} in incremental batches...")
+                
+                # Get specific columns for this table if in column-mode
+                table_specific_columns = None
+                if specific_column_ids:
+                    # Get columns that belong to this table
+                    table_info = await self._get_table_info(table_id)
+                    if table_info:
+                        table_specific_columns = [
+                            col["id"] for col in table_info["columns"] 
+                            if col["id"] in specific_column_ids
+                        ]
+                        logger.info(f"Table {table_id}: filtering to {len(table_specific_columns)} specific columns")
+                
+                table_rows_processed = 0
+                offset = 0
+                
+                while True:
+                    # Extract batch data for current table
+                    batch_data = await self._extract_table_batch(
+                        table_id, 
+                        offset, 
+                        batch_size, 
+                        limit_per_table,
+                        specific_column_ids=table_specific_columns
+                    )
+                    
+                    if not batch_data or not batch_data.get("data"):
+                        logger.info(f"No more data for table {table_id} at offset {offset}")
+                        break
+                    
+                    # Convert to DataFrame
+                    batch_df = pd.DataFrame(batch_data["data"])
+                    
+                    # Process images for this batch if applicable
+                    if process_images and table_id in image_columns_info and not batch_df.empty:
+                        logger.debug(f"Processing images for batch {batch_count} from table {table_id}")
+                        try:
+                            # Get destination MinIO client for copying images
+                            destination_minio_client = minio_service.minio_client if minio_service else None
+                            
+                            batch_df = await image_service.process_image_columns_in_dataframe(
+                                batch_df, 
+                                image_columns_info[table_id],
+                                destination_minio_client=destination_minio_client,
+                                destination_bucket=bucket_name,
+                                save_images_to_destination=True  # Enable copying images to dataset bucket
+                            )
+                            
+                            # Count processed images
+                            for img_info in image_columns_info[table_id]:
+                                base64_col = f"{img_info['column_name']}_base64"
+                                if base64_col in batch_df.columns:
+                                    images_in_batch = len([img for img in batch_df[base64_col] if img])
+                                    total_images_processed += images_in_batch
+                                    logger.debug(f"Processed {images_in_batch} images for column {img_info['column_name']}")
+                        
+                        except Exception as e:
+                            logger.error(f"Error processing images for batch {batch_count}: {e}")
+                            # Continue without image processing
+                    
+                    # Convert back to the expected format for _process_batch_with_mappings
+                    batch_data_for_mapping = {
+                        "data": batch_df.to_dict('records'),
+                        "columns": batch_data.get("columns", []),
+                        "table_name": batch_data.get("table_name", f"table_{table_id}"),
+                        "table_id": table_id
+                    }
+                    
+                    # Process batch and apply mappings (now includes image columns)
+                    batch_df = await self._process_batch_with_mappings(
+                        batch_data_for_mapping,
+                        column_mappings,
+                        value_mappings,
+                        all_unified_columns
+                    )
+                    
+                    # Save batch directly to Delta Lake
+                    if not batch_df.empty:
+                        # Validate DataFrame before saving
+                        logger.debug(f"Batch {batch_count} DataFrame info - Shape: {batch_df.shape}, Columns: {list(batch_df.columns)}")
+                        
+                        # Check for any issues that might cause Spark problems
+                        validation_issues = []
+                        
+                        # Check for completely empty columns
+                        for col in batch_df.columns:
+                            if batch_df[col].isna().all():
+                                validation_issues.append(f"Column {col} is completely empty")
+                                # Fill with empty string to avoid Spark issues
+                                batch_df[col] = ""
+                        
+                        if validation_issues:
+                            logger.warning(f"Fixed validation issues in batch {batch_count}: {validation_issues}")
+                        
+                        await minio_service.append_batch_to_delta_table(
+                            dataset_id,
+                            bucket_name,
+                            batch_df,
+                            batch_count
+                        )
+                        
+                        batch_rows = len(batch_df)
+                        table_rows_processed += batch_rows
+                        total_processed_rows += batch_rows
+                        batch_count += 1
+                        
+                        logger.info(f"Saved batch {batch_count} to Delta Lake from table {table_id}: {batch_rows} rows (total from table: {table_rows_processed}, overall total: {total_processed_rows})")
+                    
+                    offset += batch_size
+                    
+                    # Check if we've reached the limit for this table
+                    if limit_per_table and table_rows_processed >= limit_per_table:
+                        logger.info(f"Reached limit of {limit_per_table} rows for table {table_id}")
+                        break
+                    
+                    # Check if batch was smaller than batch_size (end of data)
+                    if len(batch_data["data"]) < batch_size:
+                        logger.info(f"Reached end of data for table {table_id}")
+                        break
+            
+            # Finalize Delta table (optimize, vacuum, etc.)
+            await minio_service.finalize_incremental_delta_table(dataset_id, bucket_name)
+            
+            logger.info(f"Incremental batch extraction with images completed: {total_processed_rows} total rows from {len(table_ids)} tables saved in {batch_count} batches")
+            logger.info(f"Total images processed: {total_images_processed}")
+            
+            return {
+                "total_rows_processed": total_processed_rows,
+                "total_batches": batch_count,
+                "total_tables": len(table_ids),
+                "total_images_processed": total_images_processed,
+                "image_columns_count": total_image_columns,
+                "image_processing_enabled": process_images,
+                "success": True
+            }
+            
+        except Exception as e:
+            logger.error(f"Error in incremental batch extraction with images and Delta save: {e}")
+            raise

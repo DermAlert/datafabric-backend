@@ -203,8 +203,8 @@ class DatasetService:
                     else:
                         logger.info("Table mode: extracting all columns from selected tables")
                     
-                    # Use incremental extraction that saves each batch directly to Delta Lake
-                    extraction_result = await extraction_service.extract_and_unify_data_with_incremental_delta_save(
+                    # Use incremental extraction that saves each batch directly to Delta Lake WITH IMAGE PROCESSING
+                    extraction_result = await extraction_service.extract_and_unify_data_with_incremental_delta_save_with_images(
                         table_ids_to_extract,
                         column_mappings=column_mappings,
                         value_mappings=column_value_mappings,
@@ -213,7 +213,8 @@ class DatasetService:
                         minio_service=minio_service,
                         dataset_id=dataset.id,
                         bucket_name=bucket_name,
-                        specific_column_ids=specific_column_ids  # Pass specific columns for column-mode
+                        specific_column_ids=specific_column_ids,  # Pass specific columns for column-mode
+                        process_images=True  # Enable image processing
                     )
                     
                     logger.info(f"Incremental extraction completed: {extraction_result['total_rows_processed']} rows in {extraction_result['total_batches']} batches")
