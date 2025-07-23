@@ -129,16 +129,17 @@ class ValueMappingResponse(ValueMappingBase):
         "from_attributes": True
     }
 
-# Complex Response Schemas
-class ColumnGroupWithMappingsResponse(ColumnGroupResponse):
-    column_mappings: List[ColumnMappingResponse] = []
-    value_mappings: List[ValueMappingResponse] = []
-
+# Complex Response Schemas with Details
 class ColumnMappingWithDetailsResponse(ColumnMappingResponse):
     column_name: Optional[str] = None
-    table_name: Optional[str] = None
-    schema_name: Optional[str] = None
-    data_type: Optional[str] = None
+
+class ValueMappingWithDetailsResponse(ValueMappingResponse):
+    source_column_name: Optional[str] = None
+
+# Complex Response Schemas
+class ColumnGroupWithMappingsResponse(ColumnGroupResponse):
+    column_mappings: List[ColumnMappingWithDetailsResponse] = []
+    value_mappings: List[ValueMappingWithDetailsResponse] = []
 
 # Bulk operations
 class BulkColumnMappingCreate(BaseModel):
