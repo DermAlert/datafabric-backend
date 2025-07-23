@@ -28,6 +28,7 @@ from ..schemas.equivalence_schemas import (
     ValueMappingCreate,
     ValueMappingUpdate,
     ValueMappingResponse,
+    ValueMappingWithDetailsResponse,
     BulkColumnMappingCreate,
     BulkValueMappingCreate,
     EquivalenceSearchRequest,
@@ -564,19 +565,41 @@ async def get_column_group(
                 detail=f"Grupo de colunas com ID {group_id} não encontrado"
             )
 
-        # Buscar mapeamentos de colunas
+        # Buscar mapeamentos de colunas com detalhes
         column_mappings_result = await db.execute(
-            select(equivalence.ColumnMapping)
+            select(
+                equivalence.ColumnMapping,
+                metadata.ExternalColumn.column_name
+            )
+            .join(metadata.ExternalColumn, equivalence.ColumnMapping.column_id == metadata.ExternalColumn.id)
             .where(equivalence.ColumnMapping.group_id == group_id)
         )
-        column_mappings = column_mappings_result.scalars().all()
+        
+        column_mappings = []
+        for row in column_mappings_result.all():
+            mapping, column_name = row
+            column_mappings.append(ColumnMappingWithDetailsResponse(
+                **mapping.__dict__,
+                column_name=column_name
+            ))
 
-        # Buscar mapeamentos de valores
+        # Buscar mapeamentos de valores com detalhes
         value_mappings_result = await db.execute(
-            select(equivalence.ValueMapping)
+            select(
+                equivalence.ValueMapping,
+                metadata.ExternalColumn.column_name
+            )
+            .join(metadata.ExternalColumn, equivalence.ValueMapping.source_column_id == metadata.ExternalColumn.id)
             .where(equivalence.ValueMapping.group_id == group_id)
         )
-        value_mappings = value_mappings_result.scalars().all()
+        
+        value_mappings = []
+        for row in value_mappings_result.all():
+            mapping, column_name = row
+            value_mappings.append(ValueMappingWithDetailsResponse(
+                **mapping.__dict__,
+                source_column_name=column_name
+            ))
 
         return ColumnGroupWithMappingsResponse(
             **group.__dict__,
@@ -908,14 +931,17 @@ async def delete_column_mapping(
             detail=f"Erro ao remover mapeamento: {str(e)}"
         )
 
-@router.post("/column-mappings/search", response_model=SearchResult[ColumnMappingResponse])
+@router.post("/column-mappings/search", response_model=SearchResult[ColumnMappingWithDetailsResponse])
 async def search_column_mappings(
     search: SearchColumnMapping,
     db: AsyncSession = Depends(get_db),
 ):
     """Search column mappings with pagination and filters"""
     try:
-        query = select(equivalence.ColumnMapping)
+        query = select(
+            equivalence.ColumnMapping,
+            metadata.ExternalColumn.column_name
+        ).join(metadata.ExternalColumn, equivalence.ColumnMapping.column_id == metadata.ExternalColumn.id)
         
         # Apply filters
         if search.group_id is not None:
@@ -927,9 +953,17 @@ async def search_column_mappings(
         # Get total count if requested
         total = 0
         if search.pagination.query_total:
-            count_result = await db.execute(
-                select(func.count()).select_from(query.subquery())
+            count_query = select(func.count()).select_from(
+                select(equivalence.ColumnMapping.id)
+                .join(metadata.ExternalColumn, equivalence.ColumnMapping.column_id == metadata.ExternalColumn.id)
             )
+            
+            if search.group_id is not None:
+                count_query = count_query.where(equivalence.ColumnMapping.group_id == search.group_id)
+            if search.column_id is not None:
+                count_query = count_query.where(equivalence.ColumnMapping.column_id == search.column_id)
+                
+            count_result = await db.execute(count_query)
             total = count_result.scalar()
         
         # Apply pagination
@@ -941,7 +975,14 @@ async def search_column_mappings(
         query = query.order_by(equivalence.ColumnMapping.id)
         
         result = await db.execute(query)
-        mappings = result.scalars().all()
+        
+        mappings = []
+        for row in result.all():
+            mapping, column_name = row
+            mappings.append(ColumnMappingWithDetailsResponse(
+                **mapping.__dict__,
+                column_name=column_name
+            ))
         
         # If query_total is false, set total to the count of returned items
         if not search.pagination.query_total:
@@ -959,7 +1000,7 @@ async def search_column_mappings(
 
 # ==================== VALUE MAPPINGS ====================
 
-@router.get("/column-groups/{group_id}/value-mappings", response_model=List[ValueMappingResponse])
+@router.get("/column-groups/{group_id}/value-mappings", response_model=List[ValueMappingWithDetailsResponse])
 async def list_value_mappings(
     group_id: int,
     source_column_id: Optional[int] = Query(None, description="Filtrar por coluna de origem"),
@@ -968,15 +1009,25 @@ async def list_value_mappings(
 ):
     """Lista mapeamentos de valores para um grupo."""
     try:
-        query = select(equivalence.ValueMapping).where(
-            equivalence.ValueMapping.group_id == group_id
-        )
+        query = select(
+            equivalence.ValueMapping,
+            metadata.ExternalColumn.column_name
+        ).join(metadata.ExternalColumn, equivalence.ValueMapping.source_column_id == metadata.ExternalColumn.id)\
+        .where(equivalence.ValueMapping.group_id == group_id)
         
         if source_column_id:
             query = query.where(equivalence.ValueMapping.source_column_id == source_column_id)
             
         result = await db.execute(query)
-        mappings = result.scalars().all()
+        
+        mappings = []
+        for row in result.all():
+            mapping, column_name = row
+            mappings.append(ValueMappingWithDetailsResponse(
+                **mapping.__dict__,
+                source_column_name=column_name
+            ))
+        
         return mappings
     except Exception as e:
         raise HTTPException(
@@ -1129,14 +1180,17 @@ async def delete_value_mapping(
 
 # ==================== VALUE MAPPINGS ====================
 
-@router.post("/value-mappings/search", response_model=SearchResult[ValueMappingResponse])
+@router.post("/value-mappings/search", response_model=SearchResult[ValueMappingWithDetailsResponse])
 async def search_value_mappings(
     search: SearchValueMapping,
     db: AsyncSession = Depends(get_db),
 ):
     """Search value mappings with pagination and filters"""
     try:
-        query = select(equivalence.ValueMapping)
+        query = select(
+            equivalence.ValueMapping,
+            metadata.ExternalColumn.column_name
+        ).join(metadata.ExternalColumn, equivalence.ValueMapping.source_column_id == metadata.ExternalColumn.id)
         
         # Apply filters
         if search.group_id is not None:
@@ -1151,9 +1205,19 @@ async def search_value_mappings(
         # Get total count if requested
         total = 0
         if search.pagination.query_total:
-            count_result = await db.execute(
-                select(func.count()).select_from(query.subquery())
+            count_query = select(func.count()).select_from(
+                select(equivalence.ValueMapping.id)
+                .join(metadata.ExternalColumn, equivalence.ValueMapping.source_column_id == metadata.ExternalColumn.id)
             )
+            
+            if search.group_id is not None:
+                count_query = count_query.where(equivalence.ValueMapping.group_id == search.group_id)
+            if search.source_column_id is not None:
+                count_query = count_query.where(equivalence.ValueMapping.source_column_id == search.source_column_id)
+            if search.source_value:
+                count_query = count_query.where(equivalence.ValueMapping.source_value.ilike(f"%{search.source_value}%"))
+                
+            count_result = await db.execute(count_query)
             total = count_result.scalar()
         
         # Apply pagination
@@ -1165,7 +1229,14 @@ async def search_value_mappings(
         query = query.order_by(equivalence.ValueMapping.id)
         
         result = await db.execute(query)
-        mappings = result.scalars().all()
+        
+        mappings = []
+        for row in result.all():
+            mapping, column_name = row
+            mappings.append(ValueMappingWithDetailsResponse(
+                **mapping.__dict__,
+                source_column_name=column_name
+            ))
         
         # If query_total is false, set total to the count of returned items
         if not search.pagination.query_total:
