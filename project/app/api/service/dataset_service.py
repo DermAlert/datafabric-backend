@@ -16,7 +16,7 @@ from ...database.equivalence.equivalence import ColumnMapping, ValueMapping, Col
 from ...database.storage.storage import DatasetStorage
 from ..schemas.dataset_schemas import (
     DatasetCreate, DatasetUpdate, DatasetResponse, DatasetUnifiedCreate,
-    DatasetUnificationPreview, SearchDataset, SelectedTableInfo, MappingInfo
+    DatasetUnificationPreview, DatasetUnificationPreviewRequest, SearchDataset, SelectedTableInfo, MappingInfo, SelectionMode
 )
 from ..schemas.search import SearchResult
 from .data_unification_service import DataUnificationService
@@ -33,6 +33,15 @@ class DatasetService:
             'secret_key': os.getenv('MINIO_SECRET_KEY', 'minio123'),
             'secure': os.getenv('MINIO_SECURE', 'false').lower() == 'true'
         }
+        
+        # Configuration for batch processing
+        self.extraction_config = {
+            'default_batch_size': int(os.getenv('EXTRACTION_BATCH_SIZE', '2000')),  # Reduced from 5000
+            'delta_batch_size': int(os.getenv('DELTA_BATCH_SIZE', '1000')),  # Smaller batches for Delta Lake
+            'max_memory_usage_mb': int(os.getenv('MAX_MEMORY_USAGE_MB', '256')),  # Reduced from 512
+            'spark_executor_memory': os.getenv('SPARK_EXECUTOR_MEMORY', '1g'),
+            'spark_driver_memory': os.getenv('SPARK_DRIVER_MEMORY', '512m')
+        }
 
     async def create_unified_dataset(self, dataset_data: DatasetUnifiedCreate) -> DatasetResponse:
         """Create a dataset with automatic column mapping unification"""
@@ -40,22 +49,53 @@ class DatasetService:
             # Initialize unification service
             unification_service = DataUnificationService(self.db)
             
-            # 1. Validate compatibility
-            validation = await unification_service.validate_unification_compatibility(dataset_data.selected_tables)
-            if not validation['valid']:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Unification validation failed: {validation['errors']}"
+            # Determine what to validate based on selection mode
+            if dataset_data.selection_mode.value == 'tables':
+                if not dataset_data.selected_tables:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="selected_tables is required when selection_mode is 'tables'"
+                    )
+                
+                # 1. Validate compatibility for table-based selection
+                validation = await unification_service.validate_unification_compatibility(dataset_data.selected_tables)
+                if not validation['valid']:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Unification validation failed: {validation['errors']}"
+                    )
+                
+                # 2. Get unified tables with mappings (table-based approach)
+                unified_tables_info = await unification_service.get_unified_tables_with_mappings(
+                    dataset_data.selected_tables,
+                    dataset_data.auto_include_mapped_columns
                 )
-            
-            # 2. Get unified tables with mappings
-            unified_tables_info = await unification_service.get_unified_tables_with_mappings(
-                dataset_data.selected_tables,
-                dataset_data.auto_include_mapped_columns
-            )
-            
-            # 3. Generate unified columns
-            unified_columns = await unification_service.generate_unified_columns(unified_tables_info)
+                
+                # 3. Generate unified columns from tables
+                unified_columns = await unification_service.generate_unified_columns(unified_tables_info)
+                
+            else:  # selection_mode == 'columns'
+                if not dataset_data.selected_columns:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="selected_columns is required when selection_mode is 'columns'"
+                    )
+                
+                # 1. Get unified structure from selected columns (column-based approach)
+                unified_columns_info = await unification_service.get_unified_columns_from_selected_columns(
+                    dataset_data.selected_columns,
+                    dataset_data.auto_include_mapped_columns
+                )
+                
+                # 2. Generate unified columns from selected columns
+                unified_columns = await unification_service.generate_unified_columns_from_selected_columns(unified_columns_info)
+                
+                # 3. Create tables info structure for compatibility with the rest of the code
+                unified_tables_info = {
+                    'table_ids': unified_columns_info['table_ids'],
+                    'mapping_groups': unified_columns_info['mapping_groups'],
+                    'additional_tables': []  # Not applicable for column-based selection
+                }
             
             # 4. Get value mappings if requested
             value_mappings = {}
@@ -132,16 +172,56 @@ class DatasetService:
                             if col_mappings:
                                 column_value_mappings[col['name']] = col_mappings
                     
-                    # Extract and unify REAL DATA with mappings applied
+                    # Extract and unify REAL DATA with mappings applied using INCREMENTAL SAVE
                     table_ids_to_extract = unified_tables_info['table_ids']
-                    logger.info(f"Extracting and unifying real data from {len(table_ids_to_extract)} tables (original: {len(dataset_data.selected_tables)}, auto-included: {len(unified_tables_info.get('additional_tables', []))}) with mappings...")
-                    unified_data_df = await extraction_service.extract_and_unify_data(
+                    
+                    # Use smaller batch size for Delta Lake operations
+                    batch_size = self.extraction_config['delta_batch_size']
+                    logger.info(f"Extracting and unifying real data from {len(table_ids_to_extract)} tables with INCREMENTAL DELTA SAVE using batch size {batch_size}...")
+                    
+                    # Determine specific columns if in column mode
+                    specific_column_ids = None
+                    if dataset_data.selection_mode.value == 'columns':
+                        # Debug: Log the unified_columns_info structure
+                        logger.info(f"Unified columns info keys: {list(unified_columns_info.keys())}")
+                        logger.info(f"Original selected columns: {dataset_data.selected_columns}")
+                        
+                        # Get all column IDs that should be extracted (selected + mapped additional)
+                        specific_column_ids = []
+                        if 'column_ids' in unified_columns_info:
+                            specific_column_ids = unified_columns_info['column_ids']
+                            logger.info(f"Using column_ids from unified_columns_info: {specific_column_ids}")
+                        else:
+                            # Fallback: extract from unified_columns source_columns
+                            logger.info("Fallback: extracting column IDs from unified_columns source_columns")
+                            for col in unified_columns:
+                                for source in col.get('source_columns', []):
+                                    if source.get('column_id'):
+                                        specific_column_ids.append(source['column_id'])
+                        
+                        logger.info(f"Column mode: extracting only {len(specific_column_ids)} specific columns: {specific_column_ids}")
+                    else:
+                        logger.info("Table mode: extracting all columns from selected tables")
+                    
+                    # Use incremental extraction that saves each batch directly to Delta Lake WITH IMAGE PROCESSING
+                    extraction_result = await extraction_service.extract_and_unify_data_with_incremental_delta_save_with_images(
                         table_ids_to_extract,
                         column_mappings=column_mappings,
                         value_mappings=column_value_mappings,
-                        limit_per_table=10000  # Limit to prevent memory issues in demo
+                        limit_per_table=None,  # Extract all data using optimized batch processing
+                        batch_size=batch_size,
+                        minio_service=minio_service,
+                        dataset_id=dataset.id,
+                        bucket_name=bucket_name,
+                        specific_column_ids=specific_column_ids,  # Pass specific columns for column-mode
+                        process_images=True  # Enable image processing
                     )
-                    logger.info(f"Unified DataFrame created with {len(unified_data_df)} rows and {len(unified_data_df.columns)} columns")
+                    
+                    logger.info(f"Incremental extraction completed: {extraction_result['total_rows_processed']} rows in {extraction_result['total_batches']} batches")
+                    
+                    # Create dummy DataFrame for metadata export (actual data is already in Delta Lake)
+                    import pandas as pd
+                    unified_data_df = pd.DataFrame()  # Empty DataFrame since data is already saved incrementally
                     
                     # Prepare metadata for export
                     dataset_metadata = {
@@ -172,14 +252,13 @@ class DatasetService:
                         "filter_condition": None
                     } for i, table_id in enumerate(unified_tables_info['table_ids'])]
                     
-                    # Export metadata AND unified real data to Delta Lake
-                    delta_path = await minio_service.export_dataset_with_real_data_to_delta(
+                    # Export metadata (data was already saved incrementally to Delta Lake)
+                    delta_path = await minio_service.export_dataset_metadata_to_delta(
                         dataset.id,
                         bucket_name,
                         dataset_metadata,
                         columns_metadata,
-                        sources_metadata,
-                        unified_data_df  # Pass the unified DataFrame
+                        sources_metadata
                     )
                     
                     # Update dataset properties with export information
@@ -187,7 +266,11 @@ class DatasetService:
                         'minio_bucket': bucket_name,
                         'delta_path': delta_path,
                         'export_timestamp': datetime.now().isoformat(),
-                        'export_status': 'completed'
+                        'export_status': 'completed',
+                        'extraction_method': 'incremental_batch',
+                        'total_rows_processed': extraction_result['total_rows_processed'],
+                        'total_batches': extraction_result['total_batches'],
+                        'batch_size': batch_size
                     })
                     
                     # Validate export
@@ -325,6 +408,162 @@ class DatasetService:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Error generating unification preview: {str(e)}"
+            )
+
+    async def get_unification_preview_enhanced(self, preview_request: DatasetUnificationPreviewRequest) -> DatasetUnificationPreview:
+        """Get enhanced preview supporting both table and column selection modes"""
+        try:
+            unification_service = DataUnificationService(self.db)
+            
+            if preview_request.selection_mode == SelectionMode.TABLES:
+                # Table-based preview
+                unified_tables_info = await unification_service.get_unified_tables_with_mappings(
+                    preview_request.selected_tables,
+                    preview_request.auto_include_mapped_columns
+                )
+                unified_columns = await unification_service.generate_unified_columns(unified_tables_info)
+                
+                # Get table information
+                tables_query = select(
+                    ExternalTables.id,
+                    ExternalTables.table_name,
+                    ExternalSchema.schema_name,
+                    ExternalTables.connection_id
+                ).join(
+                    ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+                ).where(
+                    ExternalTables.id.in_(unified_tables_info['table_ids'])
+                )
+                
+                tables_result = await self.db.execute(tables_query)
+                tables_data = tables_result.fetchall()
+                
+                # Build selected tables info
+                selected_tables = []
+                for table_data in tables_data:
+                    columns_in_table = [
+                        col_info['column_id'] for col in unified_columns 
+                        for col_info in col['source_columns'] 
+                        if col_info.get('table_id') == table_data.id
+                    ]
+                    
+                    selected_tables.append(SelectedTableInfo(
+                        table_id=table_data.id,
+                        table_name=table_data.table_name,
+                        schema_name=table_data.schema_name,
+                        connection_name=f"Connection_{table_data.connection_id}",
+                        selected_columns=columns_in_table
+                    ))
+                
+                additional_tables_included = unified_tables_info.get('additional_tables', [])
+                additional_columns_included = []
+                selected_columns_info = None
+                
+            else:  # Column-based preview
+                unified_columns_info = await unification_service.get_unified_columns_from_selected_columns(
+                    preview_request.selected_columns,
+                    preview_request.auto_include_mapped_columns
+                )
+                unified_columns = await unification_service.generate_unified_columns_from_selected_columns(unified_columns_info)
+                
+                # Get column information for preview
+                columns_query = select(
+                    ExternalColumn.id,
+                    ExternalColumn.column_name,
+                    ExternalColumn.data_type,
+                    ExternalColumn.table_id,
+                    ExternalTables.table_name,
+                    ExternalSchema.schema_name,
+                    ExternalTables.connection_id
+                ).join(
+                    ExternalTables, ExternalColumn.table_id == ExternalTables.id
+                ).join(
+                    ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+                ).where(
+                    ExternalColumn.id.in_(unified_columns_info['column_ids'])
+                )
+                
+                columns_result = await self.db.execute(columns_query)
+                columns_data = columns_result.fetchall()
+                
+                # Build selected tables info (group by table)
+                tables_dict = {}
+                for col_data in columns_data:
+                    if col_data.table_id not in tables_dict:
+                        tables_dict[col_data.table_id] = {
+                            'table_id': col_data.table_id,
+                            'table_name': col_data.table_name,
+                            'schema_name': col_data.schema_name,
+                            'connection_name': f"Connection_{col_data.connection_id}",
+                            'selected_columns': []
+                        }
+                    tables_dict[col_data.table_id]['selected_columns'].append(col_data.id)
+                
+                selected_tables = [SelectedTableInfo(**table_info) for table_info in tables_dict.values()]
+                
+                # Build selected columns info
+                selected_columns_info = [
+                    {
+                        'column_id': col_data.id,
+                        'column_name': col_data.column_name,
+                        'data_type': col_data.data_type,
+                        'table_name': col_data.table_name,
+                        'schema_name': col_data.schema_name,
+                        'is_originally_selected': col_data.id in preview_request.selected_columns
+                    }
+                    for col_data in columns_data
+                ]
+                
+                unified_tables_info = {
+                    'mapping_groups': unified_columns_info['mapping_groups']
+                }
+                
+                additional_tables_included = []
+                additional_columns_included = unified_columns_info.get('additional_column_ids', [])
+            
+            # Get value mappings count
+            group_ids = [group['group_id'] for group in unified_tables_info['mapping_groups']]
+            value_mappings = await unification_service.get_value_mappings_for_groups(group_ids)
+            value_mappings_count = sum(len(mappings) for mappings in value_mappings.values())
+            
+            # Build mapping info
+            mapping_groups = []
+            for group in unified_tables_info['mapping_groups']:
+                mapping_groups.append(MappingInfo(
+                    group_id=group['group_id'],
+                    group_name=f"Group_{group['group_id']}",
+                    mapped_columns=[col['column_id'] for col in group['columns']],
+                    standard_column_name=f"unified_column_{group['group_id']}",
+                    data_type='string'
+                ))
+            
+            # Convert unified columns to the expected format
+            unified_columns_response = []
+            for col in unified_columns:
+                unified_columns_response.append({
+                    'name': col['name'],
+                    'type': col['source_type'],
+                    'source_columns': [src['column_id'] for src in col['source_columns']],
+                    'data_type': col['data_type'],
+                    'group_id': col.get('group_id')
+                })
+            
+            return DatasetUnificationPreview(
+                selection_mode=preview_request.selection_mode,
+                selected_tables=selected_tables,
+                selected_columns_info=selected_columns_info,
+                unified_columns=unified_columns_response,
+                mapping_groups=mapping_groups,
+                value_mappings_count=value_mappings_count,
+                estimated_columns_count=len(unified_columns),
+                additional_tables_included=additional_tables_included,
+                additional_columns_included=additional_columns_included
+            )
+            
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Error generating enhanced unification preview: {str(e)}"
             )
 
     async def _create_unified_columns_enhanced(self, dataset_id: int, unified_columns: List[Dict[str, Any]], value_mappings: Dict[int, List[Dict[str, Any]]]):
