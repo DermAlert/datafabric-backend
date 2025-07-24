@@ -43,7 +43,7 @@ class DeltaExtractor:
                 "properties": {
                     "spark_version": spark.version,
                     "delta_extensions": spark.conf.get("spark.sql.extensions", ""),
-                    "s3a_endpoint": self.connection_params.get('s3a_endpoint', 'http://minio:9000')
+                    "s3a_endpoint": self.connection_params.get('s3a_endpoint', 'http://localhost:9000')
                 }
             })
             

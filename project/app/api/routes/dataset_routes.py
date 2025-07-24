@@ -14,10 +14,14 @@ from ..schemas.dataset_schemas import (
     DatasetUnifiedCreate,
     DatasetUnificationPreview,
     DatasetUnificationPreviewRequest,
-    SearchDataset
+    SearchDataset,
+    DatasetImageResponse,
+    SearchDatasetImages,
+    DatasetImageStats
 )
 from ..schemas.search import SearchResult
 from ..service.dataset_service import DatasetService
+from ...services.dataset_image_service import DatasetImageService
 
 router = APIRouter()
 
@@ -100,24 +104,24 @@ async def preview_unified_dataset(
         )
 
 # ==================== STANDARD DATASET OPERATIONS ====================
-
-@router.post("/", response_model=DatasetResponse, status_code=status.HTTP_201_CREATED)
-async def create_dataset(
-    dataset_data: DatasetCreate,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """Create a standard dataset with manual configuration."""
-    try:
-        service = DatasetService(db)
-        return await service.create(dataset_data)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating dataset: {str(e)}"
-        )
+## deprecated
+# @router.post("/", response_model=DatasetResponse, status_code=status.HTTP_201_CREATED) ## deprecated
+# async def create_dataset(
+#     dataset_data: DatasetCreate,
+#     db: AsyncSession = Depends(get_db),
+#     # current_user = Depends(get_current_user),
+# ):
+#     """Create a standard dataset with manual configuration."""
+#     try:
+#         service = DatasetService(db)
+#         return await service.create(dataset_data)
+#     except HTTPException:
+#         raise
+#     except Exception as e:
+#         raise HTTPException(
+#             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+#             detail=f"Error creating dataset: {str(e)}"
+#        )
 
 @router.get("/{dataset_id}", response_model=DatasetResponse)
 async def get_dataset(
@@ -192,390 +196,145 @@ async def search_datasets(
             detail=f"Error searching datasets: {str(e)}"
         )
 
-# ==================== DATASET COLUMNS ====================
+# ==================== DATASET IMAGES OPERATIONS ====================
 
-@router.get("/{dataset_id}/columns", response_model=List[dict])
-async def get_dataset_columns(
+@router.post("/{dataset_id}/images", response_model=SearchResult[DatasetImageResponse])
+async def get_dataset_images(
     dataset_id: int,
+    search: SearchDatasetImages,
     db: AsyncSession = Depends(get_db),
     # current_user = Depends(get_current_user),
 ):
-    """Get all columns for a dataset."""
+    """Get paginated list of dataset images with presigned URLs."""
     try:
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        return dataset.columns
+        service = DatasetImageService(db)
+        return await service.get_dataset_images_paginated(dataset_id, search)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error retrieving dataset columns: {str(e)}"
+            detail=f"Error retrieving dataset images: {str(e)}"
         )
 
-@router.get("/{dataset_id}/sources", response_model=List[dict])
-async def get_dataset_sources(
+@router.get("/{dataset_id}/images/{image_path:path}", response_model=DatasetImageResponse)
+async def get_single_dataset_image(
     dataset_id: int,
+    image_path: str,
     db: AsyncSession = Depends(get_db),
     # current_user = Depends(get_current_user),
 ):
-    """Get all source tables for a dataset."""
+    """Get presigned URL for a specific dataset image."""
     try:
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        return dataset.sources
+        service = DatasetImageService(db)
+        return await service.get_single_image_presigned_url(dataset_id, image_path)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error retrieving dataset sources: {str(e)}"
+            detail=f"Error retrieving image: {str(e)}"
         )
 
-# ==================== UTILITY ENDPOINTS ====================
+# ==================== DATASET IMAGES OPERATIONS ====================
 
-@router.get("/{dataset_id}/sql", response_model=dict)
-async def get_dataset_sql(
+@router.post("/{dataset_id}/images", response_model=SearchResult[DatasetImageResponse])
+async def get_dataset_images_paginated(
     dataset_id: int,
+    search_params: SearchDatasetImages,
     db: AsyncSession = Depends(get_db),
     # current_user = Depends(get_current_user),
 ):
-    """Generate SQL query for the dataset."""
+    """
+    Get paginated list of dataset images with presigned URLs.
+    
+    This endpoint provides paginated access to images stored in a dataset's MinIO bucket.
+    For each image, it returns:
+    - Image metadata (name, size, creation date, etc.)
+    - Presigned URL for direct access (valid for 1 hour)
+    - Content type and other file information
+    
+    **Requirements:**
+    - Dataset must be stored in MinIO (storage_type = 'copy_to_minio')
+    - Images should be stored in the 'images/' folder within the dataset bucket
+    
+    **Search Parameters:**
+    - page: Page number (default: 1)
+    - size: Items per page (default: 20, max: 100)
+    - image_name: Filter by image name (partial match)
+    - content_type: Filter by content type
+    - date_from: Filter images created after this date
+    - date_to: Filter images created before this date
+    """
     try:
-        # This would generate the SQL query based on the dataset configuration
-        # For now, returning a placeholder
-        return {
-            "sql": f"-- Generated SQL for dataset {dataset_id}\n-- This would contain the actual query based on sources and mappings",
-            "estimated_rows": 0,
-            "complexity": "medium"
-        }
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error generating SQL: {str(e)}"
-        )
-
-@router.post("/{dataset_id}/validate", response_model=dict)
-async def validate_dataset(
-    dataset_id: int,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """Validate dataset configuration."""
-    try:
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        
-        # Basic validation
-        validation_results = {
-            "valid": True,
-            "errors": [],
-            "warnings": [],
-            "source_tables_count": len(dataset.sources),
-            "columns_count": len(dataset.columns)
-        }
-        
-        # Check if dataset has sources
-        if not dataset.sources:
-            validation_results["valid"] = False
-            validation_results["errors"].append("Dataset must have at least one source table")
-        
-        # Check if dataset has columns
-        if not dataset.columns:
-            validation_results["valid"] = False
-            validation_results["errors"].append("Dataset must have at least one column")
-        
-        return validation_results
-        
+        image_service = DatasetImageService(db)
+        return await image_service.get_dataset_images_paginated(dataset_id, search_params)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error validating dataset: {str(e)}"
+            detail=f"Error retrieving dataset images: {str(e)}"
         )
 
-# ==================== MINIO INTEGRATION ENDPOINTS ====================
-
-@router.post("/{dataset_id}/export-to-minio", response_model=dict)
-async def export_dataset_to_minio(
+@router.get("/{dataset_id}/images/{image_path:path}", response_model=DatasetImageResponse)
+async def get_dataset_image(
     dataset_id: int,
+    image_path: str,
     db: AsyncSession = Depends(get_db),
     # current_user = Depends(get_current_user),
 ):
-    """Export dataset metadata to MinIO with Delta Lake format."""
+    """
+    Get presigned URL for a specific dataset image.
+    
+    This endpoint provides direct access to a specific image within a dataset.
+    Returns a presigned URL that allows direct download/viewing of the image.
+    
+    **Parameters:**
+    - dataset_id: The ID of the dataset
+    - image_path: The full path to the image within the bucket (e.g., 'images/photo.jpg')
+    
+    **Requirements:**
+    - Dataset must be stored in MinIO (storage_type = 'copy_to_minio')
+    - Image must exist in the dataset's bucket
+    """
     try:
-        from app.services.dataset_minio_service import DatasetMinioService
-        import os
-        
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        
-        # Check if dataset already has MinIO export
-        if dataset.properties.get('minio_bucket'):
-            return {
-                "message": "Dataset already exported to MinIO",
-                "bucket_name": dataset.properties.get('minio_bucket'),
-                "delta_path": dataset.properties.get('delta_path'),
-                "export_timestamp": dataset.properties.get('export_timestamp')
-            }
-        
-        # Initialize MinIO service
-        minio_config = {
-            'endpoint': os.getenv('MINIO_ENDPOINT', 'localhost:9000'),
-            'access_key': os.getenv('MINIO_ACCESS_KEY', 'minio'),
-            'secret_key': os.getenv('MINIO_SECRET_KEY', 'minio123'),
-            'secure': os.getenv('MINIO_SECURE', 'false').lower() == 'true'
-        }
-        
-        minio_service = DatasetMinioService(minio_config)
-        await minio_service.initialize()
-        
-        try:
-            # Create bucket and export metadata
-            bucket_name = await minio_service.create_dataset_bucket(dataset.id, dataset.name)
-            
-            # Prepare metadata
-            dataset_metadata = {
-                "name": dataset.name,
-                "description": dataset.description,
-                "storage_type": dataset.storage_type,
-                "refresh_type": dataset.refresh_type,
-                "status": dataset.status,
-                "version": dataset.version,
-                "properties": dataset.properties
-            }
-            
-            delta_path = await minio_service.export_dataset_metadata_to_delta(
-                dataset.id,
-                bucket_name,
-                dataset_metadata,
-                dataset.columns,
-                dataset.sources
-            )
-            
-            # Update dataset properties
-            from sqlalchemy import update
-            stmt = update(Dataset).where(Dataset.id == dataset_id).values(
-                properties=Dataset.properties.op('||')({
-                    'minio_bucket': bucket_name,
-                    'delta_path': delta_path,
-                    'export_timestamp': datetime.now().isoformat(),
-                    'export_status': 'completed'
-                })
-            )
-            await db.execute(stmt)
-            await db.commit()
-            
-            return {
-                "message": "Dataset exported to MinIO successfully",
-                "bucket_name": bucket_name,
-                "delta_path": delta_path,
-                "export_timestamp": datetime.now().isoformat()
-            }
-            
-        finally:
-            minio_service.close()
-            
+        image_service = DatasetImageService(db)
+        return await image_service.get_single_image_presigned_url(dataset_id, image_path)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error exporting dataset to MinIO: {str(e)}"
+            detail=f"Error retrieving dataset image: {str(e)}"
         )
 
-@router.get("/{dataset_id}/minio-status", response_model=dict)
-async def get_dataset_minio_status(
+@router.get("/{dataset_id}/images/stats", response_model=DatasetImageStats)
+async def get_dataset_image_stats(
     dataset_id: int,
     db: AsyncSession = Depends(get_db),
     # current_user = Depends(get_current_user),
 ):
-    """Get MinIO export status for a dataset."""
+    """
+    Get statistics about dataset images.
+    
+    This endpoint provides comprehensive statistics about all images in a dataset:
+    - Total number of images
+    - Total size in bytes
+    - Distribution by content type
+    - Upload date range (oldest and latest)
+    - Average file size
+    
+    **Requirements:**
+    - Dataset must be stored in MinIO (storage_type = 'copy_to_minio')
+    """
     try:
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        
-        if not dataset.properties.get('minio_bucket'):
-            return {
-                "exported": False,
-                "message": "Dataset not exported to MinIO"
-            }
-        
-        return {
-            "exported": True,
-            "bucket_name": dataset.properties.get('minio_bucket'),
-            "delta_path": dataset.properties.get('delta_path'),
-            "export_timestamp": dataset.properties.get('export_timestamp'),
-            "export_status": dataset.properties.get('export_status', 'unknown')
-        }
-        
+        image_service = DatasetImageService(db)
+        return await image_service.get_dataset_image_stats(dataset_id)
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error getting MinIO status: {str(e)}"
-        )
-
-@router.post("/{dataset_id}/validate-minio-export", response_model=dict)
-async def validate_dataset_minio_export(
-    dataset_id: int,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """Validate MinIO export for a dataset."""
-    try:
-        from app.services.dataset_minio_service import DatasetMinioService
-        import os
-        
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        
-        bucket_name = dataset.properties.get('minio_bucket')
-        if not bucket_name:
-            return {
-                "valid": False,
-                "error": "Dataset not exported to MinIO"
-            }
-        
-        # Initialize MinIO service
-        minio_config = {
-            'endpoint': os.getenv('MINIO_ENDPOINT', 'localhost:9000'),
-            'access_key': os.getenv('MINIO_ACCESS_KEY', 'minio'),
-            'secret_key': os.getenv('MINIO_SECRET_KEY', 'minio123'),
-            'secure': os.getenv('MINIO_SECURE', 'false').lower() == 'true'
-        }
-        
-        minio_service = DatasetMinioService(minio_config)
-        await minio_service.initialize()
-        
-        try:
-            validation_result = await minio_service.validate_export(bucket_name, dataset_id)
-            return validation_result
-            
-        finally:
-            minio_service.close()
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error validating MinIO export: {str(e)}"
-        )
-
-@router.get("/{dataset_id}/minio-files", response_model=List[dict])
-async def list_dataset_minio_files(
-    dataset_id: int,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """List all files in the dataset's MinIO bucket."""
-    try:
-        from app.services.dataset_minio_service import DatasetMinioService
-        import os
-        
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        
-        bucket_name = dataset.properties.get('minio_bucket')
-        if not bucket_name:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Dataset not exported to MinIO"
-            )
-        
-        # Initialize MinIO service
-        minio_config = {
-            'endpoint': os.getenv('MINIO_ENDPOINT', 'localhost:9000'),
-            'access_key': os.getenv('MINIO_ACCESS_KEY', 'minio'),
-            'secret_key': os.getenv('MINIO_SECRET_KEY', 'minio123'),
-            'secure': os.getenv('MINIO_SECURE', 'false').lower() == 'true'
-        }
-        
-        minio_service = DatasetMinioService(minio_config)
-        await minio_service.initialize()
-        
-        try:
-            files = await minio_service.list_dataset_files(bucket_name)
-            return files
-            
-        finally:
-            minio_service.close()
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error listing MinIO files: {str(e)}"
-        )
-
-@router.delete("/{dataset_id}/minio-bucket", response_model=dict)
-async def delete_dataset_minio_bucket(
-    dataset_id: int,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """Delete the dataset's MinIO bucket and all its contents."""
-    try:
-        from app.services.dataset_minio_service import DatasetMinioService
-        import os
-        
-        service = DatasetService(db)
-        dataset = await service.get(dataset_id)
-        
-        bucket_name = dataset.properties.get('minio_bucket')
-        if not bucket_name:
-            return {
-                "message": "Dataset not exported to MinIO, nothing to delete"
-            }
-        
-        # Initialize MinIO service
-        minio_config = {
-            'endpoint': os.getenv('MINIO_ENDPOINT', 'localhost:9000'),
-            'access_key': os.getenv('MINIO_ACCESS_KEY', 'minio'),
-            'secret_key': os.getenv('MINIO_SECRET_KEY', 'minio123'),
-            'secure': os.getenv('MINIO_SECURE', 'false').lower() == 'true'
-        }
-        
-        minio_service = DatasetMinioService(minio_config)
-        await minio_service.initialize()
-        
-        try:
-            success = await minio_service.delete_dataset_bucket(bucket_name)
-            
-            if success:
-                # Remove MinIO info from dataset properties
-                from sqlalchemy import update
-                new_properties = dataset.properties.copy()
-                new_properties.pop('minio_bucket', None)
-                new_properties.pop('delta_path', None)
-                new_properties.pop('export_timestamp', None)
-                new_properties.pop('export_status', None)
-                
-                stmt = update(Dataset).where(Dataset.id == dataset_id).values(
-                    properties=new_properties
-                )
-                await db.execute(stmt)
-                await db.commit()
-                
-                return {
-                    "message": f"Bucket {bucket_name} deleted successfully"
-                }
-            else:
-                return {
-                    "message": f"Failed to delete bucket {bucket_name}"
-                }
-            
-        finally:
-            minio_service.close()
-            
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error deleting MinIO bucket: {str(e)}"
+            detail=f"Error retrieving dataset image statistics: {str(e)}"
         )
