@@ -308,33 +308,3 @@ async def get_dataset_image(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving dataset image: {str(e)}"
         )
-
-@router.get("/{dataset_id}/images/stats", response_model=DatasetImageStats)
-async def get_dataset_image_stats(
-    dataset_id: int,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """
-    Get statistics about dataset images.
-    
-    This endpoint provides comprehensive statistics about all images in a dataset:
-    - Total number of images
-    - Total size in bytes
-    - Distribution by content type
-    - Upload date range (oldest and latest)
-    - Average file size
-    
-    **Requirements:**
-    - Dataset must be stored in MinIO (storage_type = 'copy_to_minio')
-    """
-    try:
-        image_service = DatasetImageService(db)
-        return await image_service.get_dataset_image_stats(dataset_id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error retrieving dataset image statistics: {str(e)}"
-        )
