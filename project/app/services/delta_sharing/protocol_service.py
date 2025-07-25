@@ -850,91 +850,6 @@ class DeltaSharingProtocolService:
         except Exception as e:
             logger.error(f"Failed to get dynamic schema for table {table.id}: {e}")
             return None
-    
-    async def _infer_schema_from_parquet_files(self, storage_location: str) -> Optional[str]:
-        """Infer schema from actual parquet files"""
-        if not PYARROW_AVAILABLE:
-            logger.warning("PyArrow not available, cannot infer schema from parquet files")
-            return None
-            
-        try:
-            bucket_name, prefix = self._parse_storage_location(storage_location)
-            
-            # List parquet files
-            response = self.minio_client.list_objects_v2(
-                Bucket=bucket_name,
-                Prefix=prefix
-            )
-            
-            # Find a parquet file to read schema from
-            for obj in response.get('Contents', []):
-                key = obj['Key']
-                if 'part-' in key and '.snappy.parquet' in key and not '_delta_log' in key:
-                    try:
-                        # For MinIO structure, we need the directory name (without /xl.meta)
-                        parquet_path = key.replace('/xl.meta', '') if key.endswith('/xl.meta') else key
-                        
-                        # Try to read parquet metadata using boto3
-                        import json
-                        
-                        # Get the parquet file from MinIO
-                        obj_response = self.minio_client.get_object(Bucket=bucket_name, Key=parquet_path)
-                        parquet_data = obj_response['Body'].read()
-                        
-                        # Read schema from parquet
-                        parquet_file = pq.ParquetFile(pa.BufferReader(parquet_data))
-                        arrow_schema = parquet_file.schema.to_arrow_schema()
-                        
-                        # Convert Arrow schema to Delta Lake schema format
-                        delta_schema = self._convert_arrow_schema_to_delta(arrow_schema)
-                        return json.dumps(delta_schema)
-                        
-                    except Exception as e:
-                        logger.warning(f"Could not read schema from parquet file {parquet_path}: {e}")
-                        continue
-            
-            return None
-            
-        except Exception as e:
-            logger.warning(f"Could not infer schema from parquet files at {storage_location}: {e}")
-            return None
-    
-    def _convert_arrow_schema_to_delta(self, arrow_schema) -> dict:
-        """Convert PyArrow schema to Delta Lake schema format"""
-        import pyarrow as pa
-        
-        def arrow_type_to_delta_type(arrow_type):
-            """Convert Arrow data type to Delta Lake data type"""
-            if pa.types.is_string(arrow_type):
-                return "string"
-            elif pa.types.is_integer(arrow_type):
-                if arrow_type == pa.int64():
-                    return "long"
-                else:
-                    return "integer"
-            elif pa.types.is_floating(arrow_type):
-                if arrow_type == pa.float64():
-                    return "double"
-                else:
-                    return "float"
-            elif pa.types.is_boolean(arrow_type):
-                return "boolean"
-            elif pa.types.is_timestamp(arrow_type):
-                return "timestamp"
-            elif pa.types.is_date(arrow_type):
-                return "date"
-            else:
-                return "string"  # Default fallback
-        
-        fields = []
-        for field in arrow_schema:
-            delta_field = {
-                "name": field.name,
-                "type": arrow_type_to_delta_type(field.type),
-                "nullable": field.nullable,
-                "metadata": {}
-            }
-            fields.append(delta_field)
         
     async def _read_delta_schema(self, storage_location: str) -> Optional[str]:
         """Read schema from Delta Lake transaction log"""
@@ -994,34 +909,6 @@ class DeltaSharingProtocolService:
             logger.warning(f"Could not read Delta schema from {storage_location}: {e}")
             
         return None
-    
-    def _convert_arrow_schema_to_delta(self, arrow_schema) -> dict:
-        """Convert PyArrow schema to Delta Lake schema format"""
-        if not PYARROW_AVAILABLE:
-            return {"type": "struct", "fields": []}
-            
-        def arrow_type_to_delta_type(arrow_type):
-            """Convert Arrow data type to Delta Lake data type"""
-            if pa.types.is_string(arrow_type):
-                return "string"
-            elif pa.types.is_integer(arrow_type):
-                if arrow_type == pa.int64():
-                    return "long"
-                else:
-                    return "integer"
-            elif pa.types.is_floating(arrow_type):
-                if arrow_type == pa.float64():
-                    return "double"
-                else:
-                    return "float"
-            elif pa.types.is_boolean(arrow_type):
-                return "boolean"
-            elif pa.types.is_timestamp(arrow_type):
-                return "timestamp"
-            elif pa.types.is_date(arrow_type):
-                return "date"
-            else:
-                return "string"  # Default fallback
         
         fields = []
         for field in arrow_schema:
