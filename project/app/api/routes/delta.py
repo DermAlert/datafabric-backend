@@ -4,7 +4,7 @@ from app.api.routes import delta
 import pyspark
 from delta import *
 
-s3a_endpoint = "http://minio:9000"
+s3a_endpoint = "http://localhost:9000"
 s3a_access_key = "XZ9o6ak31VXjCdi5vnzP"
 s3a_secret_key = "EtlkvsuwV3knSFOKF33YluEscECavGIgpKRD83Qp"
 

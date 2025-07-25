@@ -24,7 +24,7 @@ async def test_delta_connection(connection_params: Dict[str, Any]) -> Tuple[bool
     """
     try:
         # Extract connection parameters
-        s3a_endpoint = connection_params.get('s3a_endpoint', 'http://minio:9000')
+        s3a_endpoint = connection_params.get('s3a_endpoint', 'http://localhost:9000')
         s3a_access_key = connection_params.get('s3a_access_key')
         s3a_secret_key = connection_params.get('s3a_secret_key')
         bucket_name = connection_params.get('bucket_name', 'test-bucket')
@@ -160,7 +160,7 @@ def get_spark_session(connection_params: Dict[str, Any]) -> pyspark.sql.SparkSes
     Returns:
         Configured Spark session
     """
-    s3a_endpoint = connection_params.get('s3a_endpoint', 'http://minio:9000')
+    s3a_endpoint = connection_params.get('s3a_endpoint', 'http://localhost:9000')
     s3a_access_key = connection_params.get('s3a_access_key')
     s3a_secret_key = connection_params.get('s3a_secret_key')
     app_name = connection_params.get('app_name', 'DeltaLakeApp')

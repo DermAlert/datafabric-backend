@@ -251,8 +251,8 @@ class DatasetMinioService:
                 "join_type": None,
                 "join_condition": None,
                 "filter_condition": None,
-                "created_at": datetime.now(),
-                "updated_at": datetime.now()
+                "data_criacao": datetime.now(),
+                "data_atualizacao": datetime.now()
             }
             metadata_records.append(dataset_record)
             
@@ -276,8 +276,8 @@ class DatasetMinioService:
                     "join_type": None,
                     "join_condition": None,
                     "filter_condition": None,
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now()
+                    "data_criacao": datetime.now(),
+                    "data_atualizacao": datetime.now()
                 }
                 metadata_records.append(col_record)
             
@@ -301,8 +301,8 @@ class DatasetMinioService:
                     "join_type": str(source.get("join_type", "")),
                     "join_condition": str(source.get("join_condition", "")) if source.get("join_condition") else None,
                     "filter_condition": str(source.get("filter_condition", "")) if source.get("filter_condition") else None,
-                    "created_at": datetime.now(),
-                    "updated_at": datetime.now()
+                    "data_criacao": datetime.now(),
+                    "data_atualizacao": datetime.now()
                 }
                 metadata_records.append(source_record)
             
@@ -325,8 +325,8 @@ class DatasetMinioService:
                 StructField("join_type", StringType(), True),
                 StructField("join_condition", StringType(), True),
                 StructField("filter_condition", StringType(), True),
-                StructField("created_at", TimestampType(), False),
-                StructField("updated_at", TimestampType(), False)
+                StructField("data_criacao", TimestampType(), False),
+                StructField("data_atualizacao", TimestampType(), False)
             ])
             
             # Convert to Spark DataFrame with explicit schema

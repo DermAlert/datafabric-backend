@@ -222,3 +222,49 @@ class SearchDataset(BaseModel):
     status: Optional[DatasetStatus] = None
     storage_type: Optional[DatasetStorageType] = None
     organization_id: Optional[int] = None
+
+# Dataset Images Schemas
+class DatasetImageMetadata(BaseModel):
+    """Metadata for a dataset image"""
+    image_id: str
+    image_name: str
+    file_path: str
+    file_size: Optional[int] = None
+    content_type: Optional[str] = None
+    data_criacao: Optional[datetime] = None
+    data_atualizacao: Optional[datetime] = None
+    metadata: Optional[Dict[str, Any]] = None
+
+class DatasetImageResponse(BaseModel):
+    """Response for dataset image with presigned URL"""
+    image_id: str
+    image_name: str
+    presigned_url: str
+    expires_in: int  # seconds
+    metadata: DatasetImageMetadata
+
+class SearchDatasetImages(BaseModel):
+    """Search parameters for dataset images"""
+    page: int = Field(default=1, ge=1)
+    size: int = Field(default=20, ge=1, le=100)
+    image_name: Optional[str] = None
+    content_type: Optional[str] = None
+    date_from: Optional[datetime] = None
+    date_to: Optional[datetime] = None
+
+class DatasetImageStats(BaseModel):
+    """Statistics for dataset images"""
+    total_images: int
+    total_size_bytes: int
+    content_types: Dict[str, int]
+    size_distribution: Dict[str, int]  # small, medium, large
+    date_range: Dict[str, Optional[datetime]]  # earliest, latest
+
+class DatasetImageStats(BaseModel):
+    """Statistics for dataset images"""
+    total_images: int
+    total_size_bytes: int
+    content_types: Dict[str, int]
+    latest_upload: Optional[datetime] = None
+    oldest_upload: Optional[datetime] = None
+    average_file_size: Optional[float] = None
