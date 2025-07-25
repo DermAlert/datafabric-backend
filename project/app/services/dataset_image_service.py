@@ -129,8 +129,8 @@ class DatasetImageService:
                         file_path=image_data['object_name'],
                         file_size=image_data.get('size'),
                         content_type=image_data.get('content_type', 'image/jpeg'),
-                        created_at=image_data.get('last_modified'),
-                        updated_at=image_data.get('last_modified'),
+                        data_criacao=image_data.get('last_modified'),
+                        data_atualizacao=image_data.get('last_modified'),
                         metadata=image_data.get('metadata', {})
                     )
                     
@@ -351,8 +351,8 @@ class DatasetImageService:
                 file_path=image_path,
                 file_size=stat.size,
                 content_type=self._get_content_type_from_extension(image_path),
-                created_at=stat.last_modified,
-                updated_at=stat.last_modified,
+                data_criacao=stat.last_modified,
+                data_atualizacao=stat.last_modified,
                 metadata={}
             )
             

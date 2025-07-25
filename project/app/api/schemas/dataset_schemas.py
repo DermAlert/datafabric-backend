@@ -231,8 +231,8 @@ class DatasetImageMetadata(BaseModel):
     file_path: str
     file_size: Optional[int] = None
     content_type: Optional[str] = None
-    created_at: Optional[datetime] = None
-    updated_at: Optional[datetime] = None
+    data_criacao: Optional[datetime] = None
+    data_atualizacao: Optional[datetime] = None
     metadata: Optional[Dict[str, Any]] = None
 
 class DatasetImageResponse(BaseModel):

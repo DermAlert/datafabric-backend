@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes
+    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes, delta_sharing_management, delta_sharing_protocol
 )
 
 api_router = APIRouter()
@@ -38,5 +38,15 @@ api_router.include_router(
 
 api_router.include_router(
     dataset_routes.router, prefix="/datasets", tags=["Datasets"]
+)
+
+# Delta Sharing Management APIs
+api_router.include_router(
+    delta_sharing_management.router, prefix="/delta-sharing", tags=["Delta Sharing Management"]
+)
+
+# Delta Sharing Protocol APIs (compatible with standard clients)
+api_router.include_router(
+    delta_sharing_protocol.router, prefix="/delta-sharing", tags=["Delta Sharing Protocol"]
 )
 
