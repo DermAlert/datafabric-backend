@@ -1267,15 +1267,24 @@ async def search_unmapped_columns(
         mapped_columns_subquery = select(equivalence.ColumnMapping.column_id)
         
         # Query principal para colunas não mapeadas
+        # Create explicit joins
+        column_table_join = join(
+            metadata.ExternalColumn,
+            metadata.ExternalTables,
+            metadata.ExternalColumn.table_id == metadata.ExternalTables.id
+        )
+        
+        full_join = join(
+            column_table_join,
+            metadata.ExternalSchema,
+            metadata.ExternalTables.schema_id == metadata.ExternalSchema.id
+        )
+        
         query = select(
             metadata.ExternalColumn,
             metadata.ExternalTables.table_name,
             metadata.ExternalSchema.schema_name
-        ).select_from(
-            metadata.ExternalColumn
-            .join(metadata.ExternalTables, metadata.ExternalColumn.table_id == metadata.ExternalTables.id)
-            .join(metadata.ExternalSchema, metadata.ExternalTables.schema_id == metadata.ExternalSchema.id)
-        ).where(
+        ).select_from(full_join).where(
             metadata.ExternalColumn.id.notin_(mapped_columns_subquery)
         )
         
