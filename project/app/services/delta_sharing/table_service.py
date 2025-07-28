@@ -601,7 +601,7 @@ class RecipientService:
             email=recipient.email,
             organization_name=recipient.organization_name,
             authentication_type=recipient.authentication_type,
-            bearer_token=masked_token,
+            bearer_token=recipient.bearer_token,
             token_expiry=recipient.token_expiry,
             is_active=recipient.is_active,
             max_requests_per_hour=recipient.max_requests_per_hour,
