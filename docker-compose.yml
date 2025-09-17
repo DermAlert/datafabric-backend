@@ -53,6 +53,51 @@ services:
     networks:
       - shared-network
 
+  # Microserviço de Sync de Conexões
+  sync-service:
+    build: ./sync-service
+    env_file:
+      - .env
+    volumes:
+      - ./project:/shared/project
+    ports:
+      - 8007:8007
+    depends_on:
+      - postgres-backend
+      - redis
+    extra_hosts:
+      - "localhost:host-gateway"
+    networks:
+      - shared-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8007/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Microserviço de Dataset Unificado
+  dataset-service:
+    build: ./dataset-service
+    env_file:
+      - .env
+    volumes:
+      - ./project:/shared/project
+    ports:
+      - 8006:8006
+    depends_on:
+      - postgres-backend
+      - minio
+      - redis
+    extra_hosts:
+      - "localhost:host-gateway"
+    networks:
+      - shared-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8006/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
   minio:
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     environment:

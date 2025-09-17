@@ -1,15 +1,20 @@
-from fastapi import APIRouter, Depends, status, BackgroundTasks
+from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
+from datetime import datetime
+import logging
 from app.database.database import get_db
 from app.api.schemas.data_connection import (
     DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult, SearchDataConnection
 )
 from app.api.schemas.search import SearchResult
 from app.api.service.data_connection_service import DataConnectionService
+from fastapi import BackgroundTasks
 
 # router = APIRouter(prefix="/data-connections", tags=["data-connections"])
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 @router.post("/", response_model=DataConnectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_data_connection(
@@ -71,7 +76,46 @@ async def test_data_connection(
 @router.post("/{id}/sync", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_metadata_sync(
     id: int,
-    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    return await DataConnectionService(db).sync(id, background_tasks)
+    """
+    Dispara sincronização de metadados via Airflow DAG.
+    O processamento é feito pelo microserviço de sync usando POOLs para controle de concorrência.
+    """
+    from app.services.airflow_client import AirflowClient
+    
+    # Validate connection exists
+    service = DataConnectionService(db)
+    connection = await service.get(id)  # This will raise 404 if not found
+    
+    # Trigger Airflow DAG
+    airflow_client = AirflowClient()
+    
+    dag_run_id = f"sync_{id}_{int(datetime.now().timestamp())}"
+    
+    try:
+        dag_run = await airflow_client.trigger_dag(
+            dag_id="sync_data_connection",
+            dag_run_id=dag_run_id,
+            conf={
+                "connection_id": id,
+                "job_id": dag_run_id,
+                "priority": 1
+            }
+        )
+        
+        return {
+            "message": f"Metadata synchronization for connection '{connection.name}' has been queued",
+            "dag_run_id": dag_run_id,
+            "dag_id": "sync_data_connection",
+            "airflow_url": f"http://localhost:8080/dags/sync_data_connection/grid?dag_run_id={dag_run_id}",
+            "connection_id": id,
+            "status": "queued"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to trigger sync DAG for connection {id}: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to queue sync job: {str(e)}"
+        )

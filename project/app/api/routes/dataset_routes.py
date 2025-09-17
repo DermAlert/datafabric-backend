@@ -3,6 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import update
 from typing import List, Optional
 from datetime import datetime
+import logging
 
 from ...database.database import get_db
 from ...database.core.core import Dataset
@@ -25,9 +26,11 @@ from ...services.dataset_image_service import DatasetImageService
 
 router = APIRouter()
 
+logger = logging.getLogger(__name__)
+
 # ==================== UNIFIED DATASET CREATION ====================
 
-@router.post("/unified", response_model=DatasetResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/unified", status_code=status.HTTP_202_ACCEPTED)
 async def create_unified_dataset(
     dataset_data: DatasetUnifiedCreate,
     db: AsyncSession = Depends(get_db),
@@ -35,6 +38,9 @@ async def create_unified_dataset(
 ):
     """
     Create a unified dataset from multiple tables or specific columns with automatic column mapping.
+    
+    **IMPORTANT:** This endpoint now queues the dataset creation job via Airflow DAG.
+    The actual processing is done by the dataset microservice using POOLs for concurrency control.
     
     This endpoint supports two selection modes:
     
@@ -48,11 +54,12 @@ async def create_unified_dataset(
     - Only includes the specified columns in the dataset
     - If auto_include_mapped_columns=true, includes only other mapped columns from the same groups, not entire tables
     
-    The endpoint automatically:
+    The processing automatically:
     - Identifies columns with existing mappings
     - Applies column group mappings for semantic equivalence
     - Applies value mappings for data standardization
     - Creates unified columns based on selected approach
+    - Saves to MinIO as Delta Lake format
     
     **Parameters:**
     - selection_mode: "tables" or "columns"
@@ -61,15 +68,55 @@ async def create_unified_dataset(
     - auto_include_mapped_columns: Whether to include related mapped columns/tables
     - apply_value_mappings: Whether to apply value standardization mappings
     """
+    from app.services.airflow_client import AirflowClient
+    
     try:
-        service = DatasetService(db)
-        return await service.create_unified_dataset(dataset_data)
+        # Basic validation - let the microservice handle detailed validation
+        if dataset_data.selection_mode.value == 'tables' and not dataset_data.selected_tables:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="selected_tables is required when selection_mode is 'tables'"
+            )
+        elif dataset_data.selection_mode.value == 'columns' and not dataset_data.selected_columns:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="selected_columns is required when selection_mode is 'columns'"
+            )
+        
+        # Trigger Airflow DAG
+        airflow_client = AirflowClient()
+        
+        dag_run_id = f"dataset_{dataset_data.name}_{int(datetime.now().timestamp())}"
+        
+        dag_run = await airflow_client.trigger_dag(
+            dag_id="create_unified_dataset",
+            dag_run_id=dag_run_id,
+            conf={
+                "dataset_data": dataset_data.model_dump(),
+                "job_id": dag_run_id,
+                "priority": 1,
+                "generate_preview": False  # Can be made configurable
+            }
+        )
+        
+        return {
+            "message": f"Dataset creation for '{dataset_data.name}' has been queued",
+            "dag_run_id": dag_run_id,
+            "dag_id": "create_unified_dataset",
+            "airflow_url": f"http://localhost:8080/dags/create_unified_dataset/grid?dag_run_id={dag_run_id}",
+            "dataset_name": dataset_data.name,
+            "selection_mode": dataset_data.selection_mode.value,
+            "status": "queued",
+            "estimated_processing_time": "2-10 minutes depending on data volume"
+        }
+        
     except HTTPException:
         raise
     except Exception as e:
+        logger.error(f"Failed to trigger dataset creation DAG: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error creating unified dataset: {str(e)}"
+            detail=f"Failed to queue dataset creation job: {str(e)}"
         )
 
 @router.post("/unified/preview", response_model=DatasetUnificationPreview)

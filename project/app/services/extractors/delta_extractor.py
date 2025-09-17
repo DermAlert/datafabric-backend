@@ -47,6 +47,7 @@ class DeltaExtractor:
                 }
             })
             
+            print("Catalogo extraido com sucesso")
             return catalogs
             
         except Exception as e:
@@ -124,6 +125,7 @@ class DeltaExtractor:
                     }
                 })
             
+            print("Schemas extraidos com sucesso")
             return schemas
             
         except Exception as e:
@@ -161,6 +163,7 @@ class DeltaExtractor:
                 try:
                     spark.sql(f"USE {schema_name}")
                     tables_df = spark.sql("SHOW TABLES")
+                    print("DEBUG: ", tables_df)
                     
                     for row in tables_df.collect():
                         table_name = row.tableName
@@ -170,6 +173,7 @@ class DeltaExtractor:
                 except Exception as e:
                     logger.warning(f"Could not extract tables from database {schema_name}: {str(e)}")
             
+            print("Tabelas extraidas com sucesso")
             return tables
             
         except Exception as e:
@@ -226,6 +230,7 @@ class DeltaExtractor:
             # Extract column information
             columns = await self._get_columns_info(df, table_name)
             
+            print("Colunas extraidas com sucesso")
             return columns
             
         except Exception as e:
@@ -399,6 +404,7 @@ class DeltaExtractor:
         except Exception as e:
             logger.error(f"Error extracting column info: {str(e)}")
         
+        print("Colunas extraidas com sucesso")
         return columns
     
     async def _search_delta_tables_recursive(self, fs, spark, path, tables: List[Dict[str, Any]], bucket_name: str, max_depth: int = 3, current_depth: int = 0):
