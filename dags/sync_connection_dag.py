@@ -32,7 +32,8 @@ dag = DAG(
     description='Processa sincronização de metadados de conexões de dados via microserviço',
     schedule_interval=None,  # Triggered manually or via API
     catchup=False,
-    max_active_runs=1,
+    max_active_runs=3,  # Permite até 3 DAG runs simultâneos (igual ao sync_pool)
+    max_active_tasks=10,  # Permite múltiplas tarefas ativas por DAG run
     tags=['microservice', 'sync', 'metadata'],
     is_paused_upon_creation=False,  # Start unpaused
     start_date=days_ago(1)  # Ensure start_date is in the past
@@ -87,7 +88,7 @@ def prepare_sync_request(**context):
 validate_params_task = PythonOperator(
     task_id='validate_params',
     python_callable=validate_sync_params,
-    pool='sync_pool',  # Use sync pool for resource management
+    # Não usa pool - validação é rápida
     dag=dag
 )
 
@@ -95,6 +96,7 @@ validate_params_task = PythonOperator(
 prepare_request_task = PythonOperator(
     task_id='prepare_request',
     python_callable=prepare_sync_request,
+    # Não usa pool - preparação é rápida
     dag=dag
 )
 
