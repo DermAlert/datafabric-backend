@@ -2,6 +2,12 @@ FROM python:3.11-slim-bookworm
 
 WORKDIR /app
 
+ENV PYTHONDONTWRITEBYTECODE 1
+ENV PYTHONUNBUFFERED 1
+ENV PYSPARK_HADOOP_VERSION 3
+ENV PYSPARK_PYTHON=python3.11
+ENV PYSPARK_DRIVER_PYTHON=python3.11
+
 RUN apt-get update && apt-get install -y openjdk-17-jdk
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="$JAVA_HOME/bin:$PATH"
@@ -13,9 +19,6 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     && rm -rf /var/lib/apt/lists/*
-
-# Set JAVA_HOME
-ENV JAVA_HOME=/usr/lib/jvm/default-java
 
 # Install poetry
 RUN pip install poetry

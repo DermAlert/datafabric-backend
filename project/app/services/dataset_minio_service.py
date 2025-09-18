@@ -18,7 +18,6 @@ logger = logging.getLogger(__name__)
 from .connectors.minio_connector import test_minio_connection
 from .connectors.delta_connector import test_delta_connection
 
-
 class DatasetMinioService:
     """Service for managing dataset exports to MinIO with Delta Lake metadata"""
     
@@ -66,6 +65,12 @@ class DatasetMinioService:
             endpoint_with_protocol = f"http://{self.minio_config.get('endpoint', 'localhost:9000')}"
             if self.minio_config.get('secure', False):
                 endpoint_with_protocol = f"https://{self.minio_config.get('endpoint', 'localhost:9000')}"
+
+            print("--------------  minio_config  ---------------")
+            print(endpoint_with_protocol)
+            print(self.minio_config.get('access_key'))
+            print(self.minio_config.get('secret_key'))
+            print(self.minio_config.get('secure'))
             
             builder = pyspark.sql.SparkSession.builder \
                 .appName("DatasetMinioService") \
@@ -77,28 +82,12 @@ class DatasetMinioService:
                 .config("spark.hadoop.fs.s3a.path.style.access", "true") \
                 .config("spark.hadoop.fs.s3a.connection.ssl.enabled", str(self.minio_config.get('secure', False)).lower()) \
                 .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-                # .config("spark.hadoop.fs.s3a.fast.upload", "true") \
-                # .config("spark.hadoop.fs.s3a.block.size", "32M") \
-                # .config("spark.hadoop.fs.s3a.multipart.size", "16M") \
-                # .config("spark.hadoop.fs.s3a.multipart.threshold", "32M") \
-                # .config("spark.hadoop.fs.s3a.committer.name", "file") \
-                # .config("spark.sql.adaptive.enabled", "true") \
-                # .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-                # .config("spark.executor.memory", "512m") \
-                # .config("spark.driver.memory", "256m") \
-                # .config("spark.executor.cores", "1") \
-                # .config("spark.executor.instances", "1") \
-                # .config("spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold", "20MB") \
-                # .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-                # .config("spark.sql.execution.arrow.pyspark.enabled", "false")
             
             packages = [
-                "io.delta:delta-spark_2.12:3.2.0",
-                "org.apache.hadoop:hadoop-aws:3.3.4"
+                "org.apache.hadoop:hadoop-aws:3.4.0",
+                "io.delta:delta-spark_2.13:4.0.0",
             ]
-            
-            builder = builder.config("spark.jars.packages", ",".join(packages))
-            spark = configure_spark_with_delta_pip(builder).getOrCreate()
+            spark = configure_spark_with_delta_pip(builder, extra_packages=packages).getOrCreate()
             
             # Set log level to reduce noise
             spark.sparkContext.setLogLevel("WARN")
