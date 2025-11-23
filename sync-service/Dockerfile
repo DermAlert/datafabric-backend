@@ -19,7 +19,7 @@ RUN pip install poetry
 RUN poetry config virtualenvs.create false
 
 # Install basic dependencies first
-RUN pip install fastapi uvicorn sqlalchemy asyncpg httpx pydantic pyspark==4.0.0 delta-spark==4.0.0
+RUN pip install fastapi uvicorn sqlalchemy asyncpg httpx pydantic pyspark==4.0.0 delta-spark==4.0.0 trino>=0.330.0 minio==7.2.15
 
 # Copy service code
 COPY . .

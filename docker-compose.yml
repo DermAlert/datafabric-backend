@@ -169,6 +169,55 @@ services:
     networks:
       - shared-network
 
+  postgres-metastore:
+    image: postgres:15.3
+    environment:
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: metastore_db
+    ports:
+      - "5435:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - shared-network
+    restart: unless-stopped
+
+  hive-metastore:
+    build: ./images/hive-metastore
+    hostname: metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: |
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres-metastore:5432/metastore_db
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=password
+    ports:
+      - "9083:9083"
+    volumes:
+      - ./metastore:/opt/hadoop/etc/hadoop
+    networks:
+      - shared-network
+    depends_on:
+      - postgres-metastore
+    restart: unless-stopped
+
+  trino:
+    image: trinodb/trino:latest
+    platform: linux/amd64 
+    ports:
+      - "8089:8080"
+    volumes:
+      - ./trino:/etc/trino
+    networks:
+      - shared-network
+    depends_on:
+      - minio
+      - hive-metastore
+    restart: unless-stopped
+
   airflow-webserver:
     <<: *airflow-common
     command: webserver
@@ -325,6 +374,7 @@ services:
 volumes:
   airflow_pgdata:
   backend_pgdata:
+  postgres_data:
 
 networks:
   shared-network:

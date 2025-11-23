@@ -16,8 +16,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .connectors.minio_connector import test_minio_connection
-from .connectors.delta_connector import test_delta_connection
-
 class DatasetMinioService:
     """Service for managing dataset exports to MinIO with Delta Lake metadata"""
     

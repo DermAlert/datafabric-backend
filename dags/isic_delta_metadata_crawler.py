@@ -38,8 +38,23 @@ DELTA_BUCKET = "isic-delta"
 IMAGES_BUCKET = "isic-images"
 
 # Delta Lake paths
-COLLECTIONS_DELTA_PATH = "collections/collections"
+COLLECTIONS_DELTA_PATH = "collections"
 IMAGES_METADATA_DELTA_PATH = "images_metadata"
+
+# Schema definitions
+COLLECTIONS_SCHEMA = pa.schema([
+    ('id', pa.int64()),
+    ('name', pa.string()),
+    ('description', pa.string()),
+    ('created', pa.string()),
+    ('updated', pa.string()),
+    ('public', pa.bool_()),
+    ('creator', pa.string()),
+    ('doi', pa.string()),
+    ('license', pa.string()),
+    ('image_count', pa.int64()),
+    ('updated_timestamp', pa.string())
+])
 
 # S3-compatible storage configuration for Delta Lake
 STORAGE_OPTIONS = {
@@ -232,7 +247,7 @@ def fetch_collections(**context):
         else:
             # Delta table doesn't exist, create it with all data
             logger.info("Delta table doesn't exist, creating new table")
-            safe_write_delta_table(new_df, delta_path, mode="overwrite")
+            safe_write_delta_table(new_df, delta_path, mode="overwrite", schema=COLLECTIONS_SCHEMA)
             logger.info(f"Successfully created new Delta table with {len(new_df)} collections")
             
             return {
@@ -527,36 +542,13 @@ def download_images_batch(**context):
 
 def initialize_delta_structure():
     """Initialize Delta Lake directory structure in MinIO"""
-    client = get_minio_client()
-    
     # Ensure buckets exist
     ensure_bucket_exists(DELTA_BUCKET)
     ensure_bucket_exists(IMAGES_BUCKET)
     
-    # Create empty marker files to ensure directories exist
-    try:
-        # Create collections directory structure
-        client.put_object(
-            DELTA_BUCKET,
-            "collections/.keep",
-            io.BytesIO(b""),
-            length=0
-        )
-        
-        # Create images_metadata directory structure
-        client.put_object(
-            DELTA_BUCKET,
-            "images_metadata/.keep",
-            io.BytesIO(b""),
-            length=0
-        )
-        
-        logger.info("Delta Lake directory structure initialized")
-        
-    except Exception as e:
-        logger.warning(f"Could not create directory markers: {str(e)}")
+    logger.info("Buckets initialized")
 
-def safe_write_delta_table(df, table_path, mode="overwrite", max_retries=3):
+def safe_write_delta_table(df, table_path, mode="overwrite", max_retries=3, schema=None):
     """Safely write to Delta table with retry logic and schema evolution"""
     configure_delta_environment()
     
@@ -565,7 +557,7 @@ def safe_write_delta_table(df, table_path, mode="overwrite", max_retries=3):
             logger.info(f"Attempt {attempt + 1}: Writing to Delta table {table_path}")
             
             # Convert DataFrame to Arrow Table first
-            arrow_table = convert_pandas_to_arrow(df)
+            arrow_table = convert_pandas_to_arrow(df, schema=schema)
             
             # Try with schema evolution first
             try:
@@ -707,7 +699,7 @@ def upsert_collections(existing_df, new_df, delta_path):
     # For now, we'll append with the new data since we've detected changes
     if new_collections_count > 0 or updated_count > 0:
         logger.info("Writing updated collections to Delta table")
-        safe_write_delta_table(new_df, delta_path, mode="overwrite")
+        safe_write_delta_table(new_df, delta_path, mode="overwrite", schema=COLLECTIONS_SCHEMA)
     else:
         logger.info("No changes detected, skipping write operation")
     
@@ -778,32 +770,12 @@ def log_processing_summary(**context):
         logger.warning(f"Could not generate processing summary: {str(e)}")
 
 def delta_table_exists(table_path):
-    """Check if a Delta table exists without trying to read it"""
+    """Check if a Delta table exists by trying to load it"""
     try:
         configure_delta_environment()
-        
-        # Parse the S3 path to get bucket and key
-        from urllib.parse import urlparse
-        parsed = urlparse(table_path)
-        bucket = parsed.netloc
-        prefix = parsed.path.lstrip('/')
-        
-        client = get_minio_client()
-        
-        # Check if there are any objects with the Delta table prefix
-        objects = list(client.list_objects(bucket, prefix=prefix, recursive=True))
-        
-        # Look for Delta log files or parquet files
-        for obj in objects:
-            if (obj.object_name.endswith('parquet') or 
-                '_delta_log' in obj.object_name or
-                obj.object_name.endswith('json')):
-                return True
-        
-        return False
-        
-    except Exception as e:
-        logger.debug(f"Error checking if Delta table exists at {table_path}: {str(e)}")
+        DeltaTable(table_path, storage_options=STORAGE_OPTIONS)
+        return True
+    except Exception:
         return False
 
 def safe_write_with_schema_evolution(df, delta_path, mode="overwrite", max_retries=3, partition_by=None):
@@ -880,14 +852,17 @@ def log_dataframe_schema(df, name="DataFrame"):
     for col, dtype in df.dtypes.items():
         logger.info(f"    {col}: {dtype}")
 
-def convert_pandas_to_arrow(df):
+def convert_pandas_to_arrow(df, schema=None):
     """Convert pandas DataFrame to Arrow Table for Delta Lake compatibility"""
     try:
         # Clean the DataFrame first
         df_cleaned = clean_dataframe_for_delta(df)
         
         # Convert to Arrow Table
-        table = pa.Table.from_pandas(df_cleaned)
+        if schema:
+            table = pa.Table.from_pandas(df_cleaned, schema=schema)
+        else:
+            table = pa.Table.from_pandas(df_cleaned)
         return table
         
     except Exception as e:
