@@ -2,35 +2,35 @@
 <?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
 
 <configuration>
-    <!-- <property>
+    <property>
         <name>fs.s3a.path.style.access</name>
         <value>true</value>
-    </property> -->
+    </property>
 
-    <!-- <property>
+    <property>
         <name>fs.s3a.connection.ssl.enabled</name>
         <value>false</value>
-    </property> -->
+    </property>
 
-    <!-- <property>
+    <property>
         <name>fs.s3a.endpoint</name>
         <value>http://minio:9000</value>
     </property>
 
     <property>
         <name>fs.s3a.access.key</name>
-        <value>user</value>
+        <value>minio</value>
     </property>
 
     <property>
         <name>fs.s3a.secret.key</name>
-        <value>password</value>
-    </property> -->
+        <value>minio123</value>
+    </property>
 
-    <!-- <property>
+    <property>
         <name>fs.s3a.path.style.access</name>
         <value>true</value>
-    </property> -->
+    </property>
 
     <property>
         <name>fs.s3a.aws.credentials.provider</name>
@@ -40,5 +40,15 @@
     <property>
         <name>fs.s3a.impl</name>
         <value>org.apache.hadoop.fs.s3a.S3AFileSystem</value>
+    </property>
+
+    <property>
+        <name>hive.metastore.pre.event.listeners</name>
+        <value>org.apache.hadoop.hive.ql.security.authorization.AuthorizationPreEventListener</value>
+    </property>
+
+    <property> 
+        <name>hive.security.metastore.authorization.manager</name> 
+        <value>org.apache.hadoop.hive.ql.security.authorization.StorageBasedAuthorizationProvider</value> 
     </property>
 </configuration>

@@ -63,12 +63,6 @@ class DatasetMinioService:
             endpoint_with_protocol = f"http://{self.minio_config.get('endpoint', 'localhost:9000')}"
             if self.minio_config.get('secure', False):
                 endpoint_with_protocol = f"https://{self.minio_config.get('endpoint', 'localhost:9000')}"
-
-            print("--------------  minio_config  ---------------")
-            print(endpoint_with_protocol)
-            print(self.minio_config.get('access_key'))
-            print(self.minio_config.get('secret_key'))
-            print(self.minio_config.get('secure'))
             
             builder = pyspark.sql.SparkSession.builder \
                 .appName("DatasetMinioService") \
@@ -181,6 +175,32 @@ class DatasetMinioService:
             
         except Exception as e:
             logger.error(f"Failed to export dataset {dataset_id} with real data to Delta Lake: {e}")
+            raise
+
+    async def export_dataset_metadata_only(
+        self, 
+        dataset_id: int, 
+        bucket_name: str, 
+        dataset_metadata: Dict[str, Any],
+        columns_metadata: List[Dict[str, Any]],
+        sources_metadata: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Export only dataset metadata to Delta Lake.
+        Used when data is populated via other means (e.g., Trino CTAS).
+        """
+        try:
+            # Export metadata 
+            await self._export_metadata_to_delta(dataset_id, bucket_name, dataset_metadata, columns_metadata, sources_metadata)
+            
+            # Return the expected data path
+            data_path = f"s3a://{bucket_name}/data/unified_data"
+            
+            logger.info(f"Exported metadata for dataset {dataset_id} to Delta Lake (data populated externally)")
+            return data_path
+            
+        except Exception as e:
+            logger.error(f"Failed to export metadata for dataset {dataset_id}: {e}")
             raise
 
     async def export_dataset_metadata_to_delta(

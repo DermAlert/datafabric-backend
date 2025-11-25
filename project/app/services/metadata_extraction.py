@@ -179,8 +179,6 @@ async def extract_metadata(connection_id: int) -> bool:
                                     col_obj = existing_col_names[col_name]
                                     col_obj.data_type = col_info["data_type"]
                                     col_obj.is_nullable = col_info["is_nullable"]
-                                    col_obj.external_reference = col_info.get("external_reference")
-                                    col_obj.sample_values = col_info.get("sample_values", [])
                                     # Update other fields...
                                 else:
                                     col_obj = metadata.ExternalColumn(
@@ -189,8 +187,6 @@ async def extract_metadata(connection_id: int) -> bool:
                                         data_type=col_info["data_type"],
                                         is_nullable=col_info["is_nullable"],
                                         column_position=col_info["column_position"],
-                                        external_reference=col_info.get("external_reference"),
-                                        sample_values=col_info.get("sample_values", []),
                                         is_primary_key=col_info.get("is_primary_key", False),
                                         properties=col_info.get("properties", {})
                                     )

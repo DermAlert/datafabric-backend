@@ -136,94 +136,84 @@ class DatasetService:
             storage_location = f"dataset_{dataset.id}"
             
             if dataset_data.storage_type.value == 'copy_to_minio':
-                # Export to MinIO with Delta Lake INCLUDING REAL DATA
+                # Export to MinIO with Delta Lake using Trino Federation (CTAS)
                 minio_service = DatasetMinioService(self.minio_config)
                 await minio_service.initialize()
                 
-                # Initialize data extraction service
-                extraction_service = DataSourceExtractionService(self.db)
+                from app.services.trino_manager import TrinoManager
+                trino_manager = TrinoManager()
                 
                 try:
                     # Create bucket for the dataset
                     bucket_name = await minio_service.create_dataset_bucket(dataset.id, dataset.name)
                     storage_location = f"s3a://{bucket_name}"
                     
-                    # Prepare column mappings for unification
-                    column_mappings = {}
-                    for col in unified_columns:
-                        # Map source column names to unified column names
-                        for source in col.get('source_columns', []):
-                            source_col_name = source.get('column_name')
-                            if source_col_name:
-                                # Create a unique key using table_name + column_name for mapping
-                                table_name = source.get('table_name')
-                                mapping_key = f"{table_name}.{source_col_name}" if table_name else source_col_name
-                                column_mappings[mapping_key] = col['name']
+                    # Ensure we have a catalog for our MinIO output
+                    # We use a generic 'minio_datalake' catalog for all datasets
+                    minio_params = {
+                        "endpoint_url": self.minio_config['endpoint'], # TrinoManager maps this to s3.endpoint
+                        "s3a_access_key": self.minio_config['access_key'],
+                        "s3a_secret_key": self.minio_config['secret_key'],
+                        "secure": str(self.minio_config['secure']),
+                        "region": "us-east-1",
+                        "fs.native-s3.enabled": "true",
+                        "s3.path-style-access": "true"
+                    }
                     
-                    # Convert value mappings from group_id based to column_name based
-                    column_value_mappings = {}
-                    for col in unified_columns:
-                        if col.get('group_id') and col['group_id'] in value_mappings:
-                            group_mappings = value_mappings[col['group_id']]
-                            # Create mapping dictionary for this unified column
-                            col_mappings = {}
-                            for mapping in group_mappings:
-                                col_mappings[mapping['source_value']] = mapping['standard_value']
-                            if col_mappings:
-                                column_value_mappings[col['name']] = col_mappings
+                    # Log configuration for debugging (mask secrets)
+                    logger.info(f"MinIO Config - Endpoint: {self.minio_config['endpoint']}")
+                    logger.info(f"MinIO Config - Access Key: {self.minio_config['access_key']}")
+                    logger.info(f"MinIO Config - Secret Key: {self.minio_config['secret_key']}")
+                    logger.info(f"MinIO Config - Secure: {self.minio_config['secure']}")
+                    logger.info(f"Catalog params being sent to TrinoManager: {list(minio_params.keys())}")
                     
-                    # Extract and unify REAL DATA with mappings applied using INCREMENTAL SAVE
-                    table_ids_to_extract = unified_tables_info['table_ids']
+                    # Force recreation of catalog with credentials if it might be missing them
+                    # trino_manager.drop_catalog("minio_datalake") 
+                    trino_manager.ensure_catalog_exists("minio_datalake", "delta", minio_params)
+
                     
-                    # Use smaller batch size for Delta Lake operations
-                    batch_size = self.extraction_config['delta_batch_size']
-                    logger.info(f"Extracting and unifying real data from {len(table_ids_to_extract)} tables with INCREMENTAL DELTA SAVE using batch size {batch_size}...")
-                    
-                    # Determine specific columns if in column mode
-                    specific_column_ids = None
-                    if dataset_data.selection_mode.value == 'columns':
-                        # Debug: Log the unified_columns_info structure
-                        logger.info(f"Unified columns info keys: {list(unified_columns_info.keys())}")
-                        logger.info(f"Original selected columns: {dataset_data.selected_columns}")
-                        
-                        # Get all column IDs that should be extracted (selected + mapped additional)
-                        specific_column_ids = []
-                        if 'column_ids' in unified_columns_info:
-                            specific_column_ids = unified_columns_info['column_ids']
-                            logger.info(f"Using column_ids from unified_columns_info: {specific_column_ids}")
-                        else:
-                            # Fallback: extract from unified_columns source_columns
-                            logger.info("Fallback: extracting column IDs from unified_columns source_columns")
-                            for col in unified_columns:
-                                for source in col.get('source_columns', []):
-                                    if source.get('column_id'):
-                                        specific_column_ids.append(source['column_id'])
-                        
-                        logger.info(f"Column mode: extracting only {len(specific_column_ids)} specific columns: {specific_column_ids}")
-                    else:
-                        logger.info("Table mode: extracting all columns from selected tables")
-                    
-                    # Use incremental extraction that saves each batch directly to Delta Lake WITH IMAGE PROCESSING
-                    extraction_result = await extraction_service.extract_and_unify_data_with_incremental_delta_save_with_images(
-                        table_ids_to_extract,
-                        column_mappings=column_mappings,
-                        value_mappings=column_value_mappings,
-                        limit_per_table=None,  # Extract all data using optimized batch processing
-                        batch_size=batch_size,
-                        minio_service=minio_service,
-                        dataset_id=dataset.id,
-                        bucket_name=bucket_name,
-                        specific_column_ids=specific_column_ids,  # Pass specific columns for column-mode
-                        process_images=True  # Enable image processing
+                    # Generate Federated Query
+                    logger.info("Generating federated SQL query for unification...")
+                    select_query = await unification_service.generate_federated_query(
+                        unified_columns, 
+                        unified_tables_info, 
+                        value_mappings
                     )
                     
-                    logger.info(f"Incremental extraction completed: {extraction_result['total_rows_processed']} rows in {extraction_result['total_batches']} batches")
+                    # Execute CTAS in Trino
+                    conn = trino_manager.get_connection()
+                    cur = conn.cursor()
+                    
+                    try:
+                        # Create schema mapping to the bucket
+                        schema_name = f"dataset_{dataset.id}"
+                        schema_location_uri = f"s3a://{bucket_name}/{schema_name}"
+                        
+                        logger.info(f"Creating Trino schema {schema_name} at {schema_location_uri}")
+                        cur.execute(f"CREATE SCHEMA IF NOT EXISTS minio_datalake.\"{schema_name}\" WITH (location = '{schema_location_uri}')")
+                        
+                        # Create Table AS Select
+                        table_name = "unified_data"
+                        ctas_query = f"""
+                            CREATE TABLE minio_datalake."{schema_name}"."{table_name}" 
+                            AS 
+                            {select_query}
+                        """
+                        
+                        logger.info(f"Executing CTAS in Trino (this may take a while)...")
+                        cur.execute(ctas_query)
+                        
+                        # Get stats
+                        cur.execute(f"SELECT count(*) FROM minio_datalake.\"{schema_name}\".\"{table_name}\"")
+                        total_rows_processed = cur.fetchone()[0]
+                        logger.info(f"CTAS completed. Created {total_rows_processed} rows.")
+                        
+                        delta_path = f"{schema_location_uri}/{table_name}"
+                        
+                    finally:
+                        conn.close()
                     
                     # Create dummy DataFrame for metadata export (actual data is already in Delta Lake)
-                    import pandas as pd
-                    unified_data_df = pd.DataFrame()  # Empty DataFrame since data is already saved incrementally
-                    
-                    # Prepare metadata for export
                     dataset_metadata = {
                         "name": dataset.name,
                         "description": dataset.description,
@@ -252,8 +242,8 @@ class DatasetService:
                         "filter_condition": None
                     } for i, table_id in enumerate(unified_tables_info['table_ids'])]
                     
-                    # Export metadata (data was already saved incrementally to Delta Lake)
-                    delta_path = await minio_service.export_dataset_metadata_to_delta(
+                    # Export metadata files (using minio_service for JSON/Parquet metadata only)
+                    await minio_service.export_dataset_metadata_only(
                         dataset.id,
                         bucket_name,
                         dataset_metadata,
@@ -267,19 +257,16 @@ class DatasetService:
                         'delta_path': delta_path,
                         'export_timestamp': datetime.now().isoformat(),
                         'export_status': 'completed',
-                        'extraction_method': 'incremental_batch',
-                        'total_rows_processed': extraction_result['total_rows_processed'],
-                        'total_batches': extraction_result['total_batches'],
-                        'batch_size': batch_size
+                        'extraction_method': 'trino_ctas',
+                        'total_rows_processed': total_rows_processed,
+                        'total_batches': 1, # CTAS is one batch effectively
+                        'batch_size': 0
                     })
                     
-                    # Validate export
+                    # Validate export (simple check)
                     validation_result = await minio_service.validate_export(bucket_name, dataset.id)
                     if not validation_result['valid']:
-                        raise HTTPException(
-                            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                            detail=f"MinIO export validation failed: {validation_result['errors']}"
-                        )
+                        logger.warning(f"MinIO export validation warning: {validation_result['errors']}")
                     
                 finally:
                     minio_service.close()

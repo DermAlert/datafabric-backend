@@ -6,3 +6,4 @@ venv
 /data
 logs
 project/.venv
+trino/catalog/*

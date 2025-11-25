@@ -4,9 +4,9 @@ from app.api.routes import delta
 import pyspark
 from delta import *
 
-s3a_endpoint = "http://localhost:9000"
-s3a_access_key = "EmbXErTVc1m5sQ1zMtzH"
-s3a_secret_key = "pvDz556mJs8a7zFtvP0ATNB9tVnbJNoFXshwCRaP"
+s3a_endpoint = "http://minio:9000"
+s3a_access_key = "minio"
+s3a_secret_key = "minio123"
 
 builder = pyspark.sql.SparkSession.builder.appName("MyApp") \
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \

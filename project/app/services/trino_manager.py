@@ -44,6 +44,9 @@ class TrinoManager:
         """
         connection_type = connection_type.lower()
         
+        logger.info(f"[TrinoManager] Getting catalog properties for type: {connection_type}")
+        logger.info(f"[TrinoManager] Input params keys: {list(params.keys())}")
+        
         if connection_type in ["postgresql", "postgres"]:
             host = params.get("host", "localhost")
             port = params.get("port", 5432)
@@ -67,22 +70,29 @@ class TrinoManager:
                 "delta.register-table-procedure.enabled": "true",
                 "fs.native-s3.enabled": "true",
                 "s3.region": params.get("region", params.get("aws_region", "us-east-1")),
-                "hive.metastore": "thrift"
+                "hive.metastore": "thrift",
+                "delta.enable-non-concurrent-writes": "true"
             }
             
             # Add S3/MinIO access keys if provided (common for Delta)
             # Trino Delta Lake connector uses s3.* properties for native S3 access
             if "s3a_access_key" in params:
                 props["s3.aws-access-key"] = params["s3a_access_key"]
+                logger.info(f"[TrinoManager] Mapped s3a_access_key -> s3.aws-access-key: {params['s3a_access_key'][:4]}***")
             if "s3a_secret_key" in params:
                 props["s3.aws-secret-key"] = params["s3a_secret_key"]
+                logger.info(f"[TrinoManager] Mapped s3a_secret_key -> s3.aws-secret-key: ***")
             if "endpoint_url" in params:
                  props["s3.endpoint"] = params["endpoint_url"]
+                 logger.info(f"[TrinoManager] Mapped endpoint_url -> s3.endpoint: {params['endpoint_url']}")
             if "s3a_endpoint" in params: # Handling internal naming convention from old extractor
                  props["s3.endpoint"] = params["s3a_endpoint"]
+                 logger.info(f"[TrinoManager] Mapped s3a_endpoint -> s3.endpoint: {params['s3a_endpoint']}")
                  
             # MinIO specific - often needs path style access
             props["s3.path-style-access"] = "true"
+            
+            logger.info(f"[TrinoManager] Final Delta catalog properties keys: {list(props.keys())}")
             
             return props
             
@@ -93,9 +103,10 @@ class TrinoManager:
              user = params.get("username")
              password = params.get("password")
              
-             # MySQL driver might differ in URL format slightly but usually standard JDBC
+             # MySQL connector requires URL without database name
+             # Database is accessed as a schema when querying
              return {
-                "connection-url": f"jdbc:mysql://{host}:{port}/{db}",
+                "connection-url": f"jdbc:mysql://{host}:{port}",
                 "connection-user": user,
                 "connection-password": password
             }

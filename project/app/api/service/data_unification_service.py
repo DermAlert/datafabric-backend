@@ -295,6 +295,7 @@ class DataUnificationService:
             for col in group['columns']:
                 unified_column['source_columns'].append({
                     'column_id': col['column_id'],
+                    'table_id': col['table_id'],
                     'column_name': col['column_name'],
                     'table_name': col['table_name'],
                     'schema_name': col['schema_name'],
@@ -353,6 +354,7 @@ class DataUnificationService:
                 'group_id': None,
                 'source_columns': [{
                     'column_id': col.id,
+                    'table_id': col.table_id,
                     'column_name': col.column_name,
                     'table_name': col.table_name,
                     'schema_name': col.schema_name,
@@ -404,6 +406,7 @@ class DataUnificationService:
             for col in group['columns']:
                 unified_column['source_columns'].append({
                     'column_id': col['column_id'],
+                    'table_id': col['table_id'],
                     'column_name': col['column_name'],
                     'table_name': col['table_name'],
                     'schema_name': col['schema_name'],
@@ -462,6 +465,7 @@ class DataUnificationService:
                     'group_id': None,
                     'source_columns': [{
                         'column_id': col.id,
+                        'table_id': col.table_id,
                         'column_name': col.column_name,
                         'table_name': col.table_name,
                         'schema_name': col.schema_name,
@@ -511,6 +515,7 @@ class DataUnificationService:
             for col in group['columns']:
                 unified_column['source_columns'].append({
                     'column_id': col['column_id'],
+                    'table_id': col['table_id'],
                     'column_name': col['column_name'],
                     'table_name': col['table_name'],
                     'schema_name': col['schema_name'],
@@ -569,6 +574,7 @@ class DataUnificationService:
                 'group_id': None,
                 'source_columns': [{
                     'column_id': col.id,
+                    'table_id': col.table_id,
                     'column_name': col.column_name,
                     'table_name': col.table_name,
                     'schema_name': col.schema_name,
@@ -625,6 +631,146 @@ class DataUnificationService:
             })
         
         return mappings_by_group
+
+    async def generate_federated_query(
+        self, 
+        unified_columns: List[Dict[str, Any]], 
+        unified_tables_info: Dict[str, Any],
+        value_mappings: Dict[int, List[Dict[str, Any]]]
+    ) -> str:
+        """
+        Generate a Trino federated SQL query to unify data from multiple sources.
+        Returns a SELECT query that includes UNION ALL across all sources with correct column mapping and casting.
+        """
+        select_queries = []
+        
+        # We need to get the connection/catalog info for each table to build the fully qualified name
+        # We'll need to fetch table details including connection info
+        table_ids = unified_tables_info['table_ids']
+        
+        tables_query = select(
+            ExternalTables.id,
+            ExternalTables.table_name,
+            ExternalSchema.schema_name,
+            DataConnection.name.label('connection_name')
+        ).join(
+            ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+        ).join(
+            DataConnection, ExternalTables.connection_id == DataConnection.id
+        ).where(
+            ExternalTables.id.in_(table_ids)
+        )
+        
+        tables_result = await self.db.execute(tables_query)
+        tables_data = {row.id: row for row in tables_result.fetchall()}
+        
+        from ...services.trino_manager import TrinoManager
+        trino_manager = TrinoManager()
+        
+        import logging
+        logger = logging.getLogger(__name__)
+        
+        for table_id in table_ids:
+            if table_id not in tables_data:
+                continue
+                
+            table_info = tables_data[table_id]
+            # Sanitize connection name to get catalog name (using same logic as TrinoManager)
+            catalog = trino_manager._sanitize_identifier(table_info.connection_name)
+            schema = table_info.schema_name
+            table = table_info.table_name
+            
+            logger.info(f"Generating query part for table {table_id} ({catalog}.{schema}.{table})")
+            
+            # Build column expressions for this table
+            col_expressions = []
+            
+            for unified_col in unified_columns:
+                unified_name = unified_col['name']
+                target_type = unified_col['data_type']
+                
+                # Find if this table contributes to this unified column
+                # Ensure strict type comparison for table_id
+                source_col = None
+                for src in unified_col['source_columns']:
+                    # Debug log to check what's in src
+                    # logger.info(f"Checking source col: {src.get('column_name')} - Table ID in src: {src.get('table_id')} (type: {type(src.get('table_id'))}) vs Current Table ID: {table_id} (type: {type(table_id)})")
+                    
+                    src_table_id = src.get('table_id')
+                    if src_table_id is not None and int(src_table_id) == int(table_id):
+                        source_col = src
+                        break
+                
+                if source_col:
+                    logger.info(f"  - [MATCH] Table {table_id} HAS column '{unified_name}' -> mapped to source '{source_col['column_name']}'")
+                    
+                    # Handle case sensitivity for column names (Trino is case-insensitive but preserves case in quotes)
+                    # We'll use the exact name from the database metadata
+                    source_expr = f'"{source_col["column_name"]}"'
+                    
+                    # Apply value mappings if they exist and this is a mapped column
+                    if unified_col.get('group_id') and unified_col['group_id'] in value_mappings:
+                        col_mappings = [
+                            m for m in value_mappings[unified_col['group_id']] 
+                            if m['source_column_id'] == source_col['column_id']
+                        ]
+                        
+                        if col_mappings:
+                            whens = []
+                            for m in col_mappings:
+                                # Escape single quotes in values
+                                src_val = m['source_value'].replace("'", "''")
+                                std_val = m['standard_value'].replace("'", "''")
+                                whens.append(f"WHEN {source_expr} = '{src_val}' THEN '{std_val}'")
+                            
+                            if whens:
+                                source_expr = f"CASE {' '.join(whens)} ELSE CAST({source_expr} AS VARCHAR) END"
+                    
+                    # Cast to target type if needed
+                    # Always casting to ensure UNION compatibility
+                    trino_type = self._map_to_trino_type(target_type)
+                    col_expressions.append(f'CAST({source_expr} AS {trino_type}) AS "{unified_name}"')
+                    
+                else:
+                    # Column missing in this source, add NULL casted to correct type
+                    logger.info(f"  - [MISSING] Table {table_id} MISSING column '{unified_name}'. Using NULL.")
+                    trino_type = self._map_to_trino_type(target_type)
+                    col_expressions.append(f'CAST(NULL AS {trino_type}) AS "{unified_name}"')
+            
+            # Add metadata columns
+            col_expressions.append(f"CAST('{table}' AS VARCHAR) AS _source_table")
+            col_expressions.append(f"CAST({table_id} AS INTEGER) AS _source_table_id")
+            
+            select_query = f"""
+                SELECT 
+                    {', '.join(col_expressions)}
+                FROM "{catalog}"."{schema}"."{table}"
+            """
+            select_queries.append(select_query)
+            
+        # Combine all with UNION ALL
+        full_query = "\nUNION ALL\n".join(select_queries)
+        
+        return full_query
+
+    def _map_to_trino_type(self, type_name: str) -> str:
+        """Map application data types to Trino SQL types"""
+        type_map = {
+            'string': 'VARCHAR',
+            'text': 'VARCHAR',
+            'integer': 'INTEGER',
+            'int': 'INTEGER',
+            'bigint': 'BIGINT',
+            'boolean': 'BOOLEAN',
+            'bool': 'BOOLEAN',
+            'float': 'DOUBLE',
+            'double': 'DOUBLE',
+            'decimal': 'DECIMAL',
+            'date': 'DATE',
+            'timestamp': 'TIMESTAMP',
+            'datetime': 'TIMESTAMP'
+        }
+        return type_map.get(type_name.lower(), 'VARCHAR')
 
     async def generate_transformation_sql(self, unified_columns: List[Dict[str, Any]], value_mappings: Dict[int, List[Dict[str, Any]]]) -> str:
         """Generate SQL transformation logic for the unified dataset"""
