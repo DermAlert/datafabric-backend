@@ -131,8 +131,8 @@ class TrinoExtractor:
                                     "type": "table",
                                     "schema": "default",
                                     "table": folder_name,
-                                "location": f"s3://{bucket_name}/{folder_name}"
-                            })
+                                    "location": f"s3a://{bucket_name}/{folder_name}"
+                                })
                         else:
                             # Treat as potential schema, check subfolders
                             logger.info(f"Checking if {folder_name} is a schema...")
@@ -153,7 +153,7 @@ class TrinoExtractor:
                                             "type": "table",
                                             "schema": folder_name,
                                             "table": sub_name,
-                                            "location": f"s3://{bucket_name}/{folder_name}/{sub_name}"
+                                            "location": f"s3a://{bucket_name}/{folder_name}/{sub_name}"
                                         })
                             
                                 if is_schema:
@@ -161,7 +161,7 @@ class TrinoExtractor:
                                     discovered.append({
                                         "type": "schema",
                                         "schema": folder_name,
-                                        "location": f"s3://{bucket_name}/{folder_name}"
+                                        "location": f"s3a://{bucket_name}/{folder_name}"
                                     })
                 except Exception as scan_err:
                     logger.error(f"Error during bucket scan: {scan_err}")
@@ -177,37 +177,50 @@ class TrinoExtractor:
             conn = self._get_connection()
             cur = conn.cursor()
             
+            # Collect all schemas that need to be created (including 'default' for root tables)
+            schemas_to_create = set()
+            for item in items:
+                schemas_to_create.add(item["schema"])
+            
+            # Create all schemas first
+            # Use internal metastore bucket for schema locations (not client's bucket)
+            internal_metastore_bucket = self.trino_manager.internal_metastore_bucket
+            for schema_name in schemas_to_create:
+                try:
+                    # Schema location points to internal metastore bucket
+                    # This keeps client's bucket clean - no files created there
+                    schema_location = f"s3a://{internal_metastore_bucket}/catalogs/{self.catalog}/schemas/{schema_name}/"
+                    query = f"CREATE SCHEMA IF NOT EXISTS \"{self.catalog}\".\"{schema_name}\" WITH (location = '{schema_location}')"
+                    logger.info(f"Creating schema: {query}")
+                    cur.execute(query)
+                except Exception as schema_err:
+                    logger.warning(f"Could not create schema {schema_name}: {schema_err}")
+            
+            # Now register tables
             for item in items:
                 try:
                     if item["type"] == "schema":
-                        schema_name = item["schema"]
-                        location = item["location"]
-                        # Register Schema
-                        query = f"CREATE SCHEMA IF NOT EXISTS \"{self.catalog}\".\"{schema_name}\" WITH (location = '{location}')"
-                        logger.info(f"Executing: {query}")
-                        cur.execute(query)
+                        # Already created above
+                        pass
                         
                     elif item["type"] == "table":
                         schema_name = item["schema"]
                         table_name = item["table"]
                         location = item["location"]
                         
-                        # Ensure schema exists for default
-                        if schema_name == 'default':
-                             # default usually exists, but maybe not explicitly created with location in this catalog context?
-                             # Usually Trino delta catalogs have a default schema.
-                             pass
-                        
                         # Register Table
                         # First check if table exists to avoid error noise
-                        check_query = f"SHOW TABLES FROM \"{self.catalog}\".\"{schema_name}\" LIKE '{table_name}'"
-                        cur.execute(check_query)
-                        if not cur.fetchall():
-                            logger.info(f"Registering table {schema_name}.{table_name} at {location}")
-                            reg_query = f"CALL \"{self.catalog}\".system.register_table(schema_name => '{schema_name}', table_name => '{table_name}', table_location => '{location}')"
-                            cur.execute(reg_query)
-                        else:
-                            logger.debug(f"Table {schema_name}.{table_name} already exists")
+                        try:
+                            check_query = f"SHOW TABLES FROM \"{self.catalog}\".\"{schema_name}\" LIKE '{table_name}'"
+                            cur.execute(check_query)
+                            if not cur.fetchall():
+                                logger.info(f"Registering table {schema_name}.{table_name} at {location}")
+                                reg_query = f"CALL \"{self.catalog}\".system.register_table(schema_name => '{schema_name}', table_name => '{table_name}', table_location => '{location}')"
+                                cur.execute(reg_query)
+                            else:
+                                logger.debug(f"Table {schema_name}.{table_name} already exists")
+                        except Exception as table_err:
+                            logger.error(f"Error registering table {schema_name}.{table_name}: {table_err}")
 
                 except Exception as item_err:
                     logger.error(f"Error registering item {item}: {item_err}")
@@ -349,8 +362,9 @@ class TrinoExtractor:
                     cur.execute(sample_query)
                     samples = cur.fetchall()
                     sample_values = [str(s[0]) for s in samples if s[0] is not None]
-                except Exception:
-                    pass
+                    logger.debug(f"Sample values for {table_name}.{col_name}: {sample_values}")
+                except Exception as e:
+                    logger.warning(f"Could not get sample values for {table_name}.{col_name}: {str(e)}")
 
                 columns.append({
                     "column_name": col_name,

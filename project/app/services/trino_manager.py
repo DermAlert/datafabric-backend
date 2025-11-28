@@ -1,7 +1,9 @@
 import os
 from typing import Dict, Any, Optional
+from urllib.parse import urlparse
 from trino.dbapi import connect
 from trino.auth import BasicAuthentication
+from minio import Minio
 from ..utils.logger import logger
 
 class TrinoManager:
@@ -10,6 +12,38 @@ class TrinoManager:
         self.port = int(os.getenv("TRINO_PORT", 8080))
         self.user = os.getenv("TRINO_USER", "admin")
         self.catalog = "system"  # Start with system catalog to manage others
+        
+        # Internal MinIO/S3 config for storing metastore data
+        # This keeps client buckets clean - no _metastore folder created there
+        self.internal_metastore_bucket = os.getenv("INTERNAL_METASTORE_BUCKET", "datafabric-metastore")
+        self.internal_s3_endpoint = os.getenv("INTERNAL_S3_ENDPOINT", "http://minio:9000")
+        self.internal_s3_access_key = os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio"))
+        self.internal_s3_secret_key = os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123"))
+        
+        # Ensure internal metastore bucket exists
+        self._ensure_internal_metastore_bucket()
+    
+    def _ensure_internal_metastore_bucket(self):
+        """Create the internal metastore bucket if it doesn't exist"""
+        try:
+            parsed = urlparse(self.internal_s3_endpoint)
+            endpoint = parsed.netloc if parsed.netloc else parsed.path
+            secure = parsed.scheme == "https"
+            
+            client = Minio(
+                endpoint=endpoint,
+                access_key=self.internal_s3_access_key,
+                secret_key=self.internal_s3_secret_key,
+                secure=secure
+            )
+            
+            if not client.bucket_exists(self.internal_metastore_bucket):
+                client.make_bucket(self.internal_metastore_bucket)
+                logger.info(f"Created internal metastore bucket: {self.internal_metastore_bucket}")
+            else:
+                logger.debug(f"Internal metastore bucket already exists: {self.internal_metastore_bucket}")
+        except Exception as e:
+            logger.warning(f"Could not ensure internal metastore bucket exists: {e}")
         
     def get_connection(self):
         return connect(
@@ -57,40 +91,50 @@ class TrinoManager:
             return {
                 "connection-url": f"jdbc:postgresql://{host}:{port}/{db}",
                 "connection-user": user,
-                "connection-password": password
+                "connection-password": password,
+                # Enable case-insensitive matching to properly handle mixed-case table names
+                "case-insensitive-name-matching": "true"
             }
             
         elif connection_type in ["deltalake", "delta"]:
-            # Assuming generic Delta connector usage with Hive Metastore or S3
-            # If using the docker-compose hive-metastore:
-            metastore_uri = params.get("hive_metastore_uri", "thrift://hive-metastore:9083")
+            # Use file-based metastore stored in INTERNAL bucket (not client's bucket)
+            # This keeps client Delta Lakes clean - no _metastore folder created there
+            region = params.get("region", params.get("aws_region", "us-east-1"))
+            
+            # Resolve credentials from various possible parameter names
+            access_key = params.get("s3a_access_key") or params.get("access_key") or params.get("aws_access_key_id")
+            secret_key = params.get("s3a_secret_key") or params.get("secret_key") or params.get("aws_secret_access_key")
+            endpoint = params.get("endpoint_url") or params.get("s3a_endpoint") or params.get("endpoint")
+            
+            # Generate a unique metastore path for this catalog in our internal bucket
+            # Using sanitized connection name to isolate each catalog's metadata
+            catalog_name = self._sanitize_identifier(params.get("_connection_name", "default"))
+            internal_metastore_path = f"s3a://{self.internal_metastore_bucket}/catalogs/{catalog_name}/"
+            
+            logger.info(f"[TrinoManager] Using internal metastore at: {internal_metastore_path}")
             
             props = {
-                "hive.metastore.uri": metastore_uri,
+                # Use file-based metastore stored in our INTERNAL bucket
+                "hive.metastore": "file",
+                "hive.metastore.catalog.dir": internal_metastore_path,
                 "delta.register-table-procedure.enabled": "true",
                 "fs.native-s3.enabled": "true",
-                "s3.region": params.get("region", params.get("aws_region", "us-east-1")),
-                "hive.metastore": "thrift",
-                "delta.enable-non-concurrent-writes": "true"
+                "s3.region": region,
+                "delta.enable-non-concurrent-writes": "true",
+                # MinIO specific - often needs path style access
+                "s3.path-style-access": "true",
             }
             
-            # Add S3/MinIO access keys if provided (common for Delta)
-            # Trino Delta Lake connector uses s3.* properties for native S3 access
-            if "s3a_access_key" in params:
-                props["s3.aws-access-key"] = params["s3a_access_key"]
-                logger.info(f"[TrinoManager] Mapped s3a_access_key -> s3.aws-access-key: {params['s3a_access_key'][:4]}***")
-            if "s3a_secret_key" in params:
-                props["s3.aws-secret-key"] = params["s3a_secret_key"]
-                logger.info(f"[TrinoManager] Mapped s3a_secret_key -> s3.aws-secret-key: ***")
-            if "endpoint_url" in params:
-                 props["s3.endpoint"] = params["endpoint_url"]
-                 logger.info(f"[TrinoManager] Mapped endpoint_url -> s3.endpoint: {params['endpoint_url']}")
-            if "s3a_endpoint" in params: # Handling internal naming convention from old extractor
-                 props["s3.endpoint"] = params["s3a_endpoint"]
-                 logger.info(f"[TrinoManager] Mapped s3a_endpoint -> s3.endpoint: {params['s3a_endpoint']}")
-                 
-            # MinIO specific - often needs path style access
-            props["s3.path-style-access"] = "true"
+            # Add S3/MinIO access keys for Trino native S3 access to CLIENT's bucket
+            if access_key:
+                props["s3.aws-access-key"] = access_key
+                logger.info(f"[TrinoManager] Mapped access_key: {access_key[:4]}***")
+            if secret_key:
+                props["s3.aws-secret-key"] = secret_key
+                logger.info(f"[TrinoManager] Mapped secret_key: ***")
+            if endpoint:
+                props["s3.endpoint"] = endpoint
+                logger.info(f"[TrinoManager] Mapped endpoint: {endpoint}")
             
             logger.info(f"[TrinoManager] Final Delta catalog properties keys: {list(props.keys())}")
             
@@ -137,7 +181,9 @@ class TrinoManager:
             logger.error(f"Unsupported connection type for Trino: {connection_type}")
             return False
 
-        properties = self.get_catalog_properties(connection_type, params)
+        # Add connection name to params for metastore path generation
+        params_with_name = {**params, "_connection_name": connection_name}
+        properties = self.get_catalog_properties(connection_type, params_with_name)
         if not properties:
             logger.error(f"Could not generate properties for {connection_type}")
             return False
@@ -150,23 +196,28 @@ class TrinoManager:
             cur.execute(f"SHOW CATALOGS LIKE '{catalog_name}'")
             result = cur.fetchall()
             
-            if not result:
-                logger.info(f"Creating Trino catalog '{catalog_name}' using {connector}")
-                create_query = self.create_catalog_query(catalog_name, connector, properties)
-                logger.debug(f"Executing query: {create_query}")
+            if result:
+                # Catalog exists - drop and recreate to ensure fresh config
+                logger.info(f"Dropping existing catalog '{catalog_name}' to recreate with new config")
                 try:
-                    cur.execute(create_query)
-                    # Verify creation
-                    cur.execute(f"SHOW CATALOGS LIKE '{catalog_name}'")
-                    if not cur.fetchall():
-                         logger.error(f"Failed to create catalog {catalog_name} - Verification failed")
-                         return False
-                except Exception as create_error:
-                    logger.error(f"Failed to create catalog {catalog_name}: {create_error}")
-                    return False
-            else:
-                logger.debug(f"Catalog {catalog_name} already exists")
-                # Optional: We could DROP and RECREATE if params changed, but for now assume persistence
+                    cur.execute(f"DROP CATALOG \"{catalog_name}\"")
+                except Exception as drop_error:
+                    logger.warning(f"Could not drop catalog {catalog_name}: {drop_error}")
+            
+            # Create catalog with current properties
+            logger.info(f"Creating Trino catalog '{catalog_name}' using {connector}")
+            create_query = self.create_catalog_query(catalog_name, connector, properties)
+            logger.debug(f"Executing query: {create_query}")
+            try:
+                cur.execute(create_query)
+                # Verify creation
+                cur.execute(f"SHOW CATALOGS LIKE '{catalog_name}'")
+                if not cur.fetchall():
+                     logger.error(f"Failed to create catalog {catalog_name} - Verification failed")
+                     return False
+            except Exception as create_error:
+                logger.error(f"Failed to create catalog {catalog_name}: {create_error}")
+                return False
                 
             return True
             

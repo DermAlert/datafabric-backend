@@ -179,15 +179,37 @@ async def extract_metadata(connection_id: int) -> bool:
                                     col_obj = existing_col_names[col_name]
                                     col_obj.data_type = col_info["data_type"]
                                     col_obj.is_nullable = col_info["is_nullable"]
-                                    # Update other fields...
+                                    col_obj.column_position = col_info.get("column_position", col_obj.column_position)
+                                    col_obj.external_reference = col_info.get("external_reference")
+                                    col_obj.sample_values = col_info.get("sample_values", [])
+                                    col_obj.max_length = col_info.get("max_length")
+                                    col_obj.numeric_precision = col_info.get("numeric_precision")
+                                    col_obj.numeric_scale = col_info.get("numeric_scale")
+                                    col_obj.is_primary_key = col_info.get("is_primary_key", False)
+                                    col_obj.is_unique = col_info.get("is_unique", False)
+                                    col_obj.is_indexed = col_info.get("is_indexed", False)
+                                    col_obj.default_value = col_info.get("default_value")
+                                    col_obj.description = col_info.get("description")
+                                    col_obj.statistics = col_info.get("statistics", {})
+                                    col_obj.properties = col_info.get("properties", {})
                                 else:
                                     col_obj = metadata.ExternalColumn(
                                         table_id=table_obj.id,
                                         column_name=col_name,
+                                        external_reference=col_info.get("external_reference"),
                                         data_type=col_info["data_type"],
                                         is_nullable=col_info["is_nullable"],
                                         column_position=col_info["column_position"],
+                                        max_length=col_info.get("max_length"),
+                                        numeric_precision=col_info.get("numeric_precision"),
+                                        numeric_scale=col_info.get("numeric_scale"),
                                         is_primary_key=col_info.get("is_primary_key", False),
+                                        is_unique=col_info.get("is_unique", False),
+                                        is_indexed=col_info.get("is_indexed", False),
+                                        default_value=col_info.get("default_value"),
+                                        description=col_info.get("description"),
+                                        statistics=col_info.get("statistics", {}),
+                                        sample_values=col_info.get("sample_values", []),
                                         properties=col_info.get("properties", {})
                                     )
                                     db.add(col_obj)

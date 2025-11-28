@@ -30,7 +30,8 @@ class DistinctValuesService:
         table_name: str,
         column_name: str,
         limit: int = 100,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        catalog_name: Optional[str] = None
     ) -> List[Any]:
         """
         Get distinct values for a column from any supported data source.
@@ -43,6 +44,7 @@ class DistinctValuesService:
             column_name: Column name
             limit: Maximum number of distinct values to return
             search: Optional search term to filter values (case insensitive partial match)
+            catalog_name: Catalog name (required for Delta Lake via Trino)
             
         Returns:
             List of distinct values
@@ -59,7 +61,7 @@ class DistinctValuesService:
             )
         elif connection_type_lower in ["deltalake", "delta"]:
             return await DistinctValuesService._get_delta_distinct_values(
-                connection_params, schema_name, table_name, column_name, limit, search
+                connection_params, schema_name, table_name, column_name, limit, search, catalog_name
             )
         else:
             raise ValueError(f"Unsupported connection type: {connection_type}")
@@ -128,19 +130,22 @@ class DistinctValuesService:
         table_name: str,
         column_name: str,
         limit: int,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        catalog_name: Optional[str] = None
     ) -> List[Any]:
         """Get distinct values from Delta Lake using Trino."""
         try:
-            # Use TrinoExtractor to query distinct values
+            # Use TrinoExtractor to get connection
             extractor = TrinoExtractor(
                 connection_params=connection_params,
                 connection_type="deltalake",
                 connection_name="distinct_values_query"
             )
             
+            # Use provided catalog_name or fall back to extractor's catalog
+            catalog = catalog_name if catalog_name else extractor.catalog
+            
             # Build query for Trino
-            catalog = extractor.catalog
             query = f'SELECT DISTINCT "{column_name}" FROM "{catalog}"."{schema_name}"."{table_name}"'
             
             if search:
@@ -150,6 +155,8 @@ class DistinctValuesService:
                 query += f' WHERE lower(cast("{column_name}" as varchar)) LIKE \'%{safe_search.lower()}%\''
             
             query += f' ORDER BY "{column_name}" LIMIT {limit}'
+            
+            logger.debug(f"Executing Trino query: {query}")
             
             # Execute query using internal connection
             conn = extractor._get_connection()
