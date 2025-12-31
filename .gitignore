@@ -7,3 +7,4 @@ venv
 logs
 project/.venv
 trino/catalog/*
+register_connections.sh

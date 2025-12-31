@@ -42,12 +42,27 @@ services:
     command: poetry run uvicorn app.main:app --reload --workers 1 --host 0.0.0.0 --port 8000
     env_file:
       - .env
+    environment:
+      # Trino configuration
+      - TRINO_HOST=trino
+      - TRINO_PORT=8080
+      - TRINO_USER=admin
+      # Hive Metastore
+      # - USE_EXTERNAL_HMS=true
+      # - HIVE_METASTORE_URI=thrift://hive-metastore:9083
+      # Internal MinIO (for file-based metastore fallback)
+      - INTERNAL_S3_ENDPOINT=http://minio:9000
+      - INTERNAL_S3_ACCESS_KEY=minio
+      - INTERNAL_S3_SECRET_KEY=minio123
+      - INTERNAL_METASTORE_BUCKET=datafabric-metastore
     volumes:
       - ./project:/usr/src/app
     ports:
       - 8004:8000
     depends_on:
       - postgres-backend
+      - trino
+      # - hive-metastore
     extra_hosts:
       - "localhost:host-gateway"  # Mapeia localhost para o host
     networks:
@@ -58,6 +73,18 @@ services:
     build: ./dataset-service
     env_file:
       - .env
+    environment:
+      # Trino configuration
+      - TRINO_HOST=trino
+      - TRINO_PORT=8080
+      - TRINO_USER=admin
+      # Hive Metastore
+      # - USE_EXTERNAL_HMS=true
+      # - HIVE_METASTORE_URI=thrift://hive-metastore:9083
+      # Internal MinIO
+      - INTERNAL_S3_ENDPOINT=http://minio:9000
+      - INTERNAL_S3_ACCESS_KEY=minio
+      - INTERNAL_S3_SECRET_KEY=minio123
     volumes:
       - ./project:/shared/project
     ports:
@@ -66,6 +93,8 @@ services:
       - postgres-backend
       - minio
       - redis
+      - trino
+      # - hive-metastore
     extra_hosts:
       - "localhost:host-gateway"
     networks:
@@ -147,6 +176,57 @@ services:
     networks:
       - shared-network
 
+  # ==========================================================================
+  # Hive Metastore - Central metadata repository for all catalogs
+  # ==========================================================================
+  # postgres-metastore:
+  #   image: postgres:15.3
+  #   environment:
+  #     - POSTGRES_USER=hive
+  #     - POSTGRES_PASSWORD=hive123
+  #     - POSTGRES_DB=metastore
+  #   volumes:
+  #     - metastore_pgdata:/var/lib/postgresql/data
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "pg_isready -U hive -d metastore"]
+  #     interval: 10s
+  #     timeout: 5s
+  #     retries: 5
+  #   networks:
+  #     - shared-network
+
+  # hive-metastore:
+  #   build:
+  #     context: ./hive/images
+  #     dockerfile: Dockerfile
+  #   platform: linux/amd64
+  #   environment:
+  #     - SERVICE_NAME=metastore
+  #     - DB_DRIVER=postgres
+  #     - SERVICE_OPTS=-Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres-metastore:5432/metastore -Djavax.jdo.option.ConnectionUserName=hive -Djavax.jdo.option.ConnectionPassword=hive123
+  #     # S3/MinIO access for internal metastore bucket
+  #     - AWS_ACCESS_KEY_ID=minio
+  #     - AWS_SECRET_ACCESS_KEY=minio123
+  #     - AWS_REGION=us-east-1
+  #   ports:
+  #     - "9083:9083"
+  #   volumes:
+  #     - ./hive/conf:/opt/hive/conf
+  #   depends_on:
+  #     postgres-metastore:
+  #       condition: service_healthy
+  #     minio:
+  #       condition: service_healthy
+  #   healthcheck:
+  #     test: ["CMD-SHELL", "netstat -tlnp | grep 9083 || exit 1"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 5
+  #     start_period: 60s
+  #   networks:
+  #     - shared-network
+  #   restart: unless-stopped
+
   trino:
     image: trinodb/trino:latest
     platform: linux/amd64 
@@ -158,6 +238,7 @@ services:
       - shared-network
     depends_on:
       - minio
+      # - hive-metastore
     restart: unless-stopped
 
   airflow-webserver:
@@ -316,6 +397,7 @@ services:
 volumes:
   airflow_pgdata:
   backend_pgdata:
+  metastore_pgdata:
 
 networks:
   shared-network:

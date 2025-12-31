@@ -59,7 +59,8 @@ async def extract_metadata(connection_id: int) -> bool:
                     extractor = TrinoExtractor(
                         connection_params=connection.connection_params,
                         connection_type=connection_type.name,
-                        connection_name=connection.name
+                        connection_name=connection.name,
+                        connection_id=connection.id  # Pass ID for unique catalog name
                     )
                     
                     # Extract Catalogs (usually just the one we created)

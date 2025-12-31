@@ -1,0 +1,54 @@
+<!-- <?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<?xml-stylesheet type="text/xsl" href="configuration.xsl"?>
+<!--
+   Hive Metastore Configuration
+   Central metastore for all Trino catalogs (S3, Azure, GCS, etc.)
+   
+   NOTE: This HMS stores metadata in PostgreSQL only.
+   Storage credentials (S3, Azure, GCS) are configured per-catalog in Trino.
+-->
+<configuration>
+    <!-- Database Connection -->
+    <property>
+        <name>javax.jdo.option.ConnectionDriverName</name>
+        <value>org.postgresql.Driver</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionURL</name>
+        <value>jdbc:postgresql://postgres-metastore:5432/metastore</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionUserName</name>
+        <value>hive</value>
+    </property>
+    <property>
+        <name>javax.jdo.option.ConnectionPassword</name>
+        <value>hive123</value>
+    </property>
+
+    <!-- Metastore Configuration -->
+    <property>
+        <name>hive.metastore.port</name>
+        <value>9083</value>
+    </property>
+    <property>
+        <name>hive.metastore.event.db.notification.api.auth</name>
+        <value>false</value>
+    </property>
+    
+    <!-- Schema Verification -->
+    <property>
+        <name>datanucleus.schema.autoCreateAll</name>
+        <value>true</value>
+    </property>
+    <property>
+        <name>hive.metastore.schema.verification</name>
+        <value>false</value>
+    </property>
+    
+    <!-- 
+        NOTE: No S3/Azure/GCS credentials here!
+        Each Trino catalog has its own credentials configured via CREATE CATALOG.
+        The HMS only stores metadata (schemas, tables, locations) in PostgreSQL.
+    -->
+</configuration> -->

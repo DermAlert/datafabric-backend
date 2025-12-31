@@ -96,6 +96,21 @@ class DataConnectionService:
         ct = await self.db_service.scalars_first(stmt_ct)
         if not ct:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection type not found")
+        
+        # Debug: log connection params
+        from app.utils.logger import logger
+        logger.info(f"[DataConnectionService] Testing connection id={id}")
+        logger.info(f"[DataConnectionService] Connection type: {ct.name}")
+        logger.info(f"[DataConnectionService] Params keys: {list(obj.connection_params.keys())}")
+        # Mask sensitive values for logging
+        safe_params = {}
+        for k, v in obj.connection_params.items():
+            if 'key' in k.lower() or 'secret' in k.lower() or 'password' in k.lower():
+                safe_params[k] = f"{str(v)[:4]}***" if v else None
+            else:
+                safe_params[k] = v
+        logger.info(f"[DataConnectionService] Params (masked): {safe_params}")
+        
         # Test connection
         success, message, details = await test_connection(
             connection_type=ct.name,

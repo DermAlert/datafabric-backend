@@ -11,12 +11,19 @@ class TrinoExtractor:
     Generic Extractor using Trino for metadata extraction.
     """
     
-    def __init__(self, connection_params: Dict[str, Any], connection_type: str, connection_name: str = "default"):
+    def __init__(self, connection_params: Dict[str, Any], connection_type: str, connection_name: str = "default", connection_id: Optional[int] = None):
         self.connection_params = connection_params
         self.connection_type = connection_type
         self.connection_name = connection_name
+        self.connection_id = connection_id
         self.trino_manager = TrinoManager()
-        self.catalog = self.trino_manager._sanitize_identifier(connection_name)
+        
+        # Generate catalog name with ID for uniqueness
+        if connection_id is not None:
+            self.catalog = self.trino_manager.generate_catalog_name(connection_name, connection_id)
+        else:
+            self.catalog = self.trino_manager._sanitize_identifier(connection_name)
+        
         self._ensure_connection()
 
     def _ensure_connection(self):
@@ -26,7 +33,8 @@ class TrinoExtractor:
         self.trino_manager.ensure_catalog_exists(
             self.connection_name, 
             self.connection_type, 
-            self.connection_params
+            self.connection_params,
+            self.connection_id
         )
 
     def _get_connection(self):
@@ -120,49 +128,59 @@ class TrinoExtractor:
                     logger.info(f"Found {len(top_level)} top-level objects in bucket")
                     
                     for obj in top_level:
-                        if obj.is_dir:
-                            folder_name = obj.object_name.strip('/')
-                            logger.info(f"Inspecting folder: {folder_name}")
-                            
-                            # Check if this folder is itself a table
-                            if has_delta_log(folder_name):
-                                logger.info(f"Found table at root: {folder_name}")
+                        if not obj.is_dir:
+                            # Ignore files at bucket root for discovery purposes
+                            continue
+
+                        folder_name = obj.object_name.strip("/")
+                        if not folder_name:
+                            continue
+
+                        logger.info(f"Inspecting folder: {folder_name}")
+
+                        # If this folder itself contains _delta_log, treat it as a table in "default" schema
+                        if has_delta_log(folder_name):
+                            logger.info(f"Found table at root: {folder_name}")
+                            discovered.append({
+                                "type": "table",
+                                "schema": "default",
+                                "table": folder_name,
+                                "location": f"s3a://{bucket_name}/{folder_name}"
+                            })
+                            continue
+
+                        # Otherwise treat it as a potential schema and inspect its subfolders for tables
+                        logger.info(f"Checking if {folder_name} is a schema...")
+                        sub_objs = client.list_objects(bucket_name, prefix=f"{folder_name}/", recursive=False)
+                        is_schema = False
+
+                        for sub in sub_objs:
+                            if not sub.is_dir:
+                                continue
+
+                            # sub.object_name is like "folder/sub/"
+                            parts = sub.object_name.strip("/").split("/")
+                            sub_name = parts[-1]
+                            full_path = sub.object_name.strip("/")
+
+                            # Check if subfolder is a table
+                            if has_delta_log(full_path):
+                                logger.info(f"Found table in schema {folder_name}: {sub_name}")
+                                is_schema = True
                                 discovered.append({
                                     "type": "table",
-                                    "schema": "default",
-                                    "table": folder_name,
-                                    "location": f"s3a://{bucket_name}/{folder_name}"
+                                    "schema": folder_name,
+                                    "table": sub_name,
+                                    "location": f"s3a://{bucket_name}/{folder_name}/{sub_name}"
                                 })
-                        else:
-                            # Treat as potential schema, check subfolders
-                            logger.info(f"Checking if {folder_name} is a schema...")
-                            sub_objs = client.list_objects(bucket_name, prefix=f"{folder_name}/", recursive=False)
-                            is_schema = False
-                            for sub in sub_objs:
-                                if sub.is_dir:
-                                    # sub.object_name is like "folder/sub/"
-                                    parts = sub.object_name.strip('/').split('/')
-                                    sub_name = parts[-1]
-                                    full_path = sub.object_name
-                                    
-                                    # Check if subfolder is a table
-                                    if has_delta_log(full_path.strip('/')):
-                                        logger.info(f"Found table in schema {folder_name}: {sub_name}")
-                                        is_schema = True
-                                        discovered.append({
-                                            "type": "table",
-                                            "schema": folder_name,
-                                            "table": sub_name,
-                                            "location": f"s3a://{bucket_name}/{folder_name}/{sub_name}"
-                                        })
-                            
-                                if is_schema:
-                                    logger.info(f"Identified schema: {folder_name}")
-                                    discovered.append({
-                                        "type": "schema",
-                                        "schema": folder_name,
-                                        "location": f"s3a://{bucket_name}/{folder_name}"
-                                    })
+
+                        if is_schema:
+                            logger.info(f"Identified schema: {folder_name}")
+                            discovered.append({
+                                "type": "schema",
+                                "schema": folder_name,
+                                "location": f"s3a://{bucket_name}/{folder_name}"
+                            })
                 except Exception as scan_err:
                     logger.error(f"Error during bucket scan: {scan_err}")
                     
@@ -183,13 +201,15 @@ class TrinoExtractor:
                 schemas_to_create.add(item["schema"])
             
             # Create all schemas first
-            # Use internal metastore bucket for schema locations (not client's bucket)
-            internal_metastore_bucket = self.trino_manager.internal_metastore_bucket
             for schema_name in schemas_to_create:
                 try:
-                    # Schema location points to internal metastore bucket
-                    # This keeps client's bucket clean - no files created there
-                    schema_location = f"s3a://{internal_metastore_bucket}/catalogs/{self.catalog}/schemas/{schema_name}/"
+                    # Use a location within the *same* bucket being discovered.
+                    # This avoids pointing schemas to an unrelated/internal bucket that may be
+                    # unreachable for non-MinIO / external S3 endpoints.
+                    if schema_name == "default":
+                        schema_location = f"s3a://{bucket_name}/"
+                    else:
+                        schema_location = f"s3a://{bucket_name}/{schema_name}/"
                     query = f"CREATE SCHEMA IF NOT EXISTS \"{self.catalog}\".\"{schema_name}\" WITH (location = '{schema_location}')"
                     logger.info(f"Creating schema: {query}")
                     cur.execute(query)

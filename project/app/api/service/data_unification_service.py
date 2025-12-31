@@ -851,3 +851,129 @@ class DataUnificationService:
             )
         
         return validation_result
+
+    # ==================== SMART BRONZE ARCHITECTURE ====================
+    
+    async def generate_bronze_ingestion_plan(self, dataset_data) -> List[Dict[str, Any]]:
+        """
+        Generate a Bronze ingestion plan using Smart Bronze architecture.
+        
+        This method:
+        1. Groups tables by their source connection
+        2. Generates optimized SQL with pushdown joins for each group
+        3. Returns a list of ingestion tasks to be executed by Trino
+        
+        Note: This is a bridge method for backwards compatibility with the existing
+        endpoint. For new implementations, use BronzeIngestionService directly.
+        """
+        from collections import defaultdict
+        from ...services.trino_manager import TrinoManager
+        import os
+        
+        trino_manager = TrinoManager()
+        bronze_bucket = os.getenv("BRONZE_BUCKET", "datafabric-bronze")
+        
+        # Get table IDs based on selection mode
+        if hasattr(dataset_data, 'selection_mode'):
+            if dataset_data.selection_mode.value == 'tables':
+                table_ids = dataset_data.selected_tables or []
+            else:
+                # For column-based selection, get unique table IDs from columns
+                column_ids = dataset_data.selected_columns or []
+                if column_ids:
+                    cols_query = select(ExternalColumn.table_id).where(
+                        ExternalColumn.id.in_(column_ids)
+                    ).distinct()
+                    result = await self.db.execute(cols_query)
+                    table_ids = [row[0] for row in result.fetchall()]
+                else:
+                    table_ids = []
+        else:
+            table_ids = []
+        
+        if not table_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No tables selected for Bronze ingestion"
+            )
+        
+        # Fetch table metadata with connection info
+        tables_query = select(
+            ExternalTables.id,
+            ExternalTables.table_name,
+            ExternalTables.connection_id,
+            ExternalSchema.schema_name,
+            DataConnection.name.label('connection_name')
+        ).join(
+            ExternalSchema, ExternalTables.schema_id == ExternalSchema.id
+        ).join(
+            DataConnection, ExternalTables.connection_id == DataConnection.id
+        ).where(
+            ExternalTables.id.in_(table_ids)
+        )
+        
+        tables_result = await self.db.execute(tables_query)
+        tables_data = {row.id: row for row in tables_result.fetchall()}
+        
+        # Group tables by connection
+        connection_groups = defaultdict(list)
+        for table_id, table_info in tables_data.items():
+            connection_groups[table_info.connection_id].append({
+                'table_id': table_id,
+                'table_name': table_info.table_name,
+                'schema_name': table_info.schema_name,
+                'connection_name': table_info.connection_name
+            })
+        
+        # Generate ingestion tasks for each group
+        ingestion_tasks = []
+        group_idx = 0
+        
+        for conn_id, tables in connection_groups.items():
+            group_idx += 1
+            conn_name = tables[0]['connection_name']
+            catalog = trino_manager._sanitize_identifier(conn_name)
+            
+            # For simplicity in this bridge method, we do a simple SELECT per table
+            # The full BronzeIngestionService handles joins properly
+            for table in tables:
+                # Fetch columns for this table
+                cols_query = select(
+                    ExternalColumn.column_name,
+                    ExternalColumn.data_type
+                ).where(
+                    ExternalColumn.table_id == table['table_id']
+                ).order_by(
+                    ExternalColumn.column_position
+                )
+                
+                cols_result = await self.db.execute(cols_query)
+                columns = cols_result.fetchall()
+                
+                # Build SELECT clause
+                col_expressions = [f'"{col.column_name}"' for col in columns]
+                col_expressions.append(f"'{table['table_name']}' AS _source_table")
+                col_expressions.append(f"{table['table_id']} AS _source_table_id")
+                col_expressions.append("CURRENT_TIMESTAMP AS _ingestion_timestamp")
+                
+                # Build the full SQL
+                select_sql = f"""SELECT 
+    {', '.join(col_expressions)}
+FROM "{catalog}"."{table['schema_name']}"."{table['table_name']}"
+"""
+                
+                # Target path in MinIO
+                target_path = f"s3a://{bronze_bucket}/{dataset_data.name}/part_{catalog}_{table['table_name']}/"
+                
+                ingestion_tasks.append({
+                    'group_id': group_idx,
+                    'connection_id': conn_id,
+                    'connection_name': conn_name,
+                    'table_id': table['table_id'],
+                    'table_name': table['table_name'],
+                    'tables_involved': [table['table_name']],
+                    'sql': select_sql,
+                    'target_path': target_path
+                })
+        
+        return ingestion_tasks

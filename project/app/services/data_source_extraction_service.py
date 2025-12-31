@@ -111,7 +111,8 @@ class DataSourceExtractionService:
             extractor = TrinoExtractor(
                 connection_params=connection.connection_params,
                 connection_type=connection_type.name,
-                connection_name=connection.name
+                connection_name=connection.name,
+                connection_id=connection.id
             )
             
             result = await extractor.extract_table_data(
@@ -130,7 +131,8 @@ class DataSourceExtractionService:
             extractor = TrinoExtractor(
                 connection_params=connection.connection_params,
                 connection_type=connection_type.name,
-                connection_name=connection.name
+                connection_name=connection.name,
+                connection_id=connection.id
             )
             
             result = await extractor.extract_table_data(

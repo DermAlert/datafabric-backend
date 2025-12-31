@@ -11,6 +11,8 @@ from app.database.metadata import metadata
 from app.database.storage import storage
 from app.database.workflow import workflow
 from app.database.delta_sharing import delta_sharing
+from app.database.datasets import bronze
+from app.database.metadata import relationships
 
 
 @asynccontextmanager
@@ -35,6 +37,8 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(storage.Base.metadata.create_all)
         await conn.run_sync(workflow.Base.metadata.create_all)
         await conn.run_sync(delta_sharing.Base.metadata.create_all)
+        await conn.run_sync(bronze.Base.metadata.create_all)
+        await conn.run_sync(relationships.Base.metadata.create_all)
 
     print("Database tables created successfully")
 

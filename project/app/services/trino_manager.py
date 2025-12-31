@@ -15,7 +15,7 @@ class TrinoManager:
         
         # Internal MinIO/S3 config for storing metastore data
         # This keeps client buckets clean - no _metastore folder created there
-        self.internal_metastore_bucket = os.getenv("INTERNAL_METASTORE_BUCKET", "datafabric-metastore")
+        self.internal_metastore_bucket = os.getenv("INTERNAL_METASTORE_BUCKET", "datafabric-metastore/")
         self.internal_s3_endpoint = os.getenv("INTERNAL_S3_ENDPOINT", "http://minio:9000")
         self.internal_s3_access_key = os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio"))
         self.internal_s3_secret_key = os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123"))
@@ -91,9 +91,7 @@ class TrinoManager:
             return {
                 "connection-url": f"jdbc:postgresql://{host}:{port}/{db}",
                 "connection-user": user,
-                "connection-password": password,
-                # Enable case-insensitive matching to properly handle mixed-case table names
-                "case-insensitive-name-matching": "true"
+                "connection-password": password
             }
             
         elif connection_type in ["deltalake", "delta"]:
@@ -109,7 +107,7 @@ class TrinoManager:
             # Generate a unique metastore path for this catalog in our internal bucket
             # Using sanitized connection name to isolate each catalog's metadata
             catalog_name = self._sanitize_identifier(params.get("_connection_name", "default"))
-            internal_metastore_path = f"s3a://{self.internal_metastore_bucket}/catalogs/{catalog_name}/"
+            internal_metastore_path = f"s3a://{self.internal_metastore_bucket}/{catalog_name}/"
             
             logger.info(f"[TrinoManager] Using internal metastore at: {internal_metastore_path}")
             
@@ -117,6 +115,8 @@ class TrinoManager:
                 # Use file-based metastore stored in our INTERNAL bucket
                 "hive.metastore": "file",
                 "hive.metastore.catalog.dir": internal_metastore_path,
+                # "hive.metastore": "thrift",
+                # "hive.metastore.uri": "thrift://hive-metastore:9083",
                 "delta.register-table-procedure.enabled": "true",
                 "fs.native-s3.enabled": "true",
                 "s3.region": region,
@@ -158,12 +158,25 @@ class TrinoManager:
         # Add other connectors as needed
         return {}
 
-    def ensure_catalog_exists(self, connection_name: str, connection_type: str, params: Dict[str, Any]) -> bool:
+    def ensure_catalog_exists(self, connection_name: str, connection_type: str, params: Dict[str, Any], connection_id: Optional[int] = None) -> bool:
         """
         Checks if catalog exists, if not creates it.
+        
+        Args:
+            connection_name: Name of the connection
+            connection_type: Type of connection (postgresql, mysql, delta, etc.)
+            params: Connection parameters
+            connection_id: Optional connection ID to ensure unique catalog names
+            
+        Returns:
+            True if catalog was created/exists, False otherwise
         """
-        # Sanitize connection name for Trino identifier
-        catalog_name = self._sanitize_identifier(connection_name)
+        # Generate unique catalog name using connection ID if provided
+        if connection_id is not None:
+            catalog_name = self.generate_catalog_name(connection_name, connection_id)
+        else:
+            # Fallback to old behavior for backwards compatibility
+            catalog_name = self._sanitize_identifier(connection_name)
         
         # Map connection type to Trino connector name
         connector_map = {
@@ -242,15 +255,43 @@ class TrinoManager:
             if 'conn' in locals():
                 conn.close()
 
-    def _sanitize_identifier(self, name: str) -> str:
+    def _sanitize_identifier(self, name: str, connection_id: Optional[int] = None) -> str:
         """
         Sanitizes a string to be used as a Trino identifier.
+        
+        Args:
+            name: Connection name to sanitize
+            connection_id: Optional connection ID to ensure uniqueness
+            
+        Returns:
+            Sanitized identifier, optionally with ID suffix for uniqueness
         """
-        # Replace spaces and special chars with underscores, keep generic enough
         import re
+        # Replace spaces and special chars with underscores
         clean = re.sub(r'[^a-zA-Z0-9_]', '_', name)
-        if not clean: # Empty string or all special chars
+        if not clean:  # Empty string or all special chars
             clean = "conn"
         if not clean[0].isalpha() and clean[0] != '_':
             clean = '_' + clean
+        
+        # Add connection ID suffix to ensure uniqueness
+        if connection_id is not None:
+            clean = f"{clean}_{connection_id}"
+        
         return clean.lower()
+    
+    def generate_catalog_name(self, connection_name: str, connection_id: int) -> str:
+        """
+        Generates a unique catalog name for Trino.
+        
+        This ensures that even if two connections have the same name,
+        they will have different catalog names in Trino.
+        
+        Args:
+            connection_name: Name of the data connection
+            connection_id: Unique ID of the data connection
+            
+        Returns:
+            Unique catalog name (e.g., "mysql_production_5")
+        """
+        return self._sanitize_identifier(connection_name, connection_id)
