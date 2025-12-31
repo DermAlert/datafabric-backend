@@ -32,13 +32,13 @@ api_router.include_router(
     image_path_routes.router, prefix="/image-paths", tags=["Image Path Management"]
 )
 
-api_router.include_router(
-    equivalence.router, prefix="/equivalence", tags=["Equivalence"]
-)
+# api_router.include_router(
+#     equivalence.router, prefix="/equivalence", tags=["Equivalence"]
+# )
 
-api_router.include_router(
-    dataset_routes.router, prefix="/datasets", tags=["Datasets"]
-)
+# api_router.include_router(
+#     dataset_routes.router, prefix="/datasets", tags=["Datasets"]
+# )
 
 # Bronze Layer (Smart Bronze Architecture)
 api_router.include_router(

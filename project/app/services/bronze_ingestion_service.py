@@ -130,6 +130,25 @@ class BronzeIngestionService:
         except Exception as e:
             logger.warning(f"Could not ensure bronze schema exists: {e}")
     
+    def _get_dataset_folder_name(self, dataset_name: str, dataset_id: Optional[int] = None) -> str:
+        """
+        Generate dataset folder name in format: {id}-{name}
+        
+        If dataset_id is not available (during preview), uses placeholder format.
+        
+        Args:
+            dataset_name: Name of the dataset
+            dataset_id: Optional ID of the dataset
+            
+        Returns:
+            Folder name (e.g., "15-melanoma_study" or "{id}-melanoma_study")
+        """
+        if dataset_id is not None:
+            return f"{dataset_id}-{dataset_name}"
+        else:
+            # During preview, ID is not available yet - use placeholder
+            return f"{{id}}-{dataset_name}"
+    
     async def generate_ingestion_plan(
         self, 
         dataset_data: DatasetBronzeCreate
@@ -192,7 +211,9 @@ class BronzeIngestionService:
                 table_metadata
             )
             
-            output_path = f"s3a://{self.bronze_bucket}/{dataset_data.name}/unified/"
+            # Generate dataset folder name (preview mode - no ID yet)
+            dataset_folder = self._get_dataset_folder_name(dataset_data.name)
+            output_path = f"s3a://{self.bronze_bucket}/{dataset_folder}/unified/"
             
             # Build table info for preview
             tables_preview = []
@@ -274,7 +295,9 @@ class BronzeIngestionService:
                         # Multiple tables with relationship
                         group_suffix = f"{conn_name}_joined_{sub_group_idx}"
                     
-                    output_path = f"s3a://{self.bronze_bucket}/{dataset_data.name}/part_{group_suffix}/"
+                    # Generate dataset folder name (preview mode - no ID yet)
+                    dataset_folder = self._get_dataset_folder_name(dataset_data.name)
+                    output_path = f"s3a://{self.bronze_bucket}/{dataset_folder}/part_{group_suffix}/"
                     
                     # Build table info for preview
                     tables_preview = []
@@ -371,12 +394,15 @@ class BronzeIngestionService:
         await self.db.flush()
         
         # Step 2: Create Bronze Config
+        # Use format: {id}-{name} for better organization and uniqueness
+        dataset_folder = self._get_dataset_folder_name(dataset_data.name, dataset.id)
+        
         bronze_config = DatasetBronzeConfig(
             dataset_id=dataset.id,
             name=dataset_data.name,
             description=dataset_data.description,
             bronze_bucket=self.bronze_bucket,
-            bronze_path_prefix=f"{dataset_data.name}/",
+            bronze_path_prefix=f"{dataset_folder}/",
             output_format=dataset_data.output_format.value,
             partition_columns=dataset_data.partition_columns,
             config_snapshot=dataset_data.dict()
@@ -384,7 +410,13 @@ class BronzeIngestionService:
         self.db.add(bronze_config)
         await self.db.flush()
         
-        # Step 3: Execute each ingestion group
+        # Step 3: Update preview paths to use actual dataset ID
+        # The preview was generated with placeholder {id}, now we update with the real ID
+        for group_preview in preview.ingestion_groups:
+            # Replace {id} placeholder with actual dataset ID
+            group_preview.output_path = group_preview.output_path.replace("{id}", str(dataset.id))
+        
+        # Step 4: Execute each ingestion group
         group_results = []
         total_rows = 0
         all_success = True
@@ -447,7 +479,23 @@ class BronzeIngestionService:
                 
                 all_success = False
         
-        # Step 4: Store inter-DB links for Silver layer
+        # Step 5: Copy images to Bronze bucket if there are image columns
+        images_copied = 0
+        if all_success or any(r.status == IngestionStatusEnum.SUCCESS for r in group_results):
+            try:
+                images_copied = await self._copy_images_to_bronze(
+                    dataset.id,
+                    dataset_folder,  # Use dataset_folder (id-name format)
+                    dataset_data.tables,
+                    self.bronze_bucket
+                )
+                if images_copied > 0:
+                    logger.info(f"Copied {images_copied} images to Bronze bucket")
+            except Exception as img_error:
+                logger.warning(f"Failed to copy images to Bronze: {img_error}")
+                # Don't fail the entire ingestion if image copy fails
+        
+        # Step 6: Store inter-DB links for Silver layer
         if dataset_data.inter_db_relationships:
             await self._store_inter_source_links(
                 bronze_config.id,
@@ -455,7 +503,7 @@ class BronzeIngestionService:
                 preview.ingestion_groups
             )
         
-        # Step 5: Update final status
+        # Step 7: Update final status
         if all_success:
             bronze_config.last_ingestion_status = IngestionStatus.SUCCESS
             dataset.status = 'active'
@@ -1199,6 +1247,211 @@ AS
         
         await self.db.flush()
 
+    async def _copy_images_to_bronze(
+        self,
+        dataset_id: int,
+        dataset_folder: str,
+        tables: List[TableColumnSelection],
+        bronze_bucket: str
+    ) -> int:
+        """
+        Copy images from external MinIO to Bronze bucket.
+        
+        Images are organized within the dataset folder:
+        s3://bronze-bucket/{id}-{name}/images/{filename}
+        
+        Example: s3://datafabric-bronze/15-melanoma_study/images/ISIC_7874486.jpg
+        
+        This keeps all dataset data (metadata + images) together in one place.
+        
+        This method:
+        1. Identifies image columns in the selected tables
+        2. Reads the Bronze Delta tables to get image paths
+        3. Downloads images from external MinIO
+        4. Uploads images to Bronze bucket under dataset folder
+        5. Updates Delta tables with new image paths
+        
+        Args:
+            dataset_id: ID of the dataset
+            dataset_folder: Folder name in format "{id}-{name}"
+            tables: List of table selections
+            bronze_bucket: Bronze bucket name
+        
+        Returns:
+            Number of images successfully copied
+        """
+        try:
+            from ..services.image_service import ImageService
+            from minio import Minio
+            
+            # Get all table IDs
+            table_ids = [t.table_id for t in tables]
+            
+            # Find image columns in these tables
+            image_columns_query = select(
+                ExternalColumn.id,
+                ExternalColumn.column_name,
+                ExternalColumn.table_id,
+                ExternalColumn.image_connection_id,
+                ExternalTables.table_name
+            ).join(
+                ExternalTables, ExternalColumn.table_id == ExternalTables.id
+            ).where(
+                and_(
+                    ExternalColumn.table_id.in_(table_ids),
+                    ExternalColumn.is_image_path == True,
+                    ExternalColumn.image_connection_id.isnot(None)
+                )
+            )
+            
+            result = await self.db.execute(image_columns_query)
+            image_columns = result.fetchall()
+            
+            if not image_columns:
+                logger.info("No image columns found in selected tables")
+                return 0
+            
+            logger.info(f"Found {len(image_columns)} image columns to process")
+            
+            # Initialize ImageService
+            image_service = ImageService(self.db)
+            
+            # Create MinIO client for Bronze bucket
+            bronze_minio = Minio(
+                endpoint=os.getenv("INTERNAL_S3_ENDPOINT", "minio:9000").replace("http://", "").replace("https://", ""),
+                access_key=os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio")),
+                secret_key=os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123")),
+                secure=False
+            )
+            
+            # Ensure Bronze bucket exists
+            if not bronze_minio.bucket_exists(bronze_bucket):
+                bronze_minio.make_bucket(bronze_bucket)
+                logger.info(f"Created Bronze bucket: {bronze_bucket}")
+            
+            total_images_copied = 0
+            
+            # Process each image column
+            for img_col in image_columns:
+                try:
+                    column_name = img_col.column_name
+                    table_name = img_col.table_name
+                    image_connection_id = img_col.image_connection_id
+                    
+                    logger.info(f"Processing image column: {table_name}.{column_name}")
+                    
+                    # Read Bronze Delta table using Trino
+                    # Find all tables in Bronze schema that might contain this data
+                    conn = self.trino.get_connection()
+                    cur = conn.cursor()
+                    
+                    # List all tables in Bronze schema
+                    try:
+                        cur.execute(f'SHOW TABLES FROM "{self.bronze_catalog}"."{self.bronze_schema}"')
+                        bronze_tables = [row[0] for row in cur.fetchall()]
+                        logger.debug(f"Found {len(bronze_tables)} tables in Bronze schema")
+                    except Exception as list_error:
+                        logger.warning(f"Could not list Bronze tables: {list_error}")
+                        conn.close()
+                        continue
+                    
+                    # Try to find the table containing this column
+                    image_paths = []
+                    for bronze_table in bronze_tables:
+                        try:
+                            # Check if this table has the image column
+                            query = f"""
+                                SELECT DISTINCT "{column_name}"
+                                FROM "{self.bronze_catalog}"."{self.bronze_schema}"."{bronze_table}"
+                                WHERE "{column_name}" IS NOT NULL
+                                LIMIT 1000
+                            """
+                            cur.execute(query)
+                            paths = cur.fetchall()
+                            if paths:
+                                image_paths.extend(paths)
+                                logger.info(f"Found {len(paths)} image paths in table {bronze_table}")
+                                break  # Found the right table
+                        except Exception as query_error:
+                            # Column doesn't exist in this table, try next
+                            continue
+                    
+                    conn.close()
+                    
+                    if not image_paths:
+                        logger.info(f"No image paths found in {table_name}.{column_name}")
+                        continue
+                    
+                    # Get source MinIO client
+                    source_minio = await image_service._get_minio_client(image_connection_id)
+                    if not source_minio:
+                        logger.error(f"Could not create MinIO client for connection {image_connection_id}")
+                        continue
+                    
+                    # Copy each unique image
+                    for image_path_row in image_paths:
+                        image_path = image_path_row[0]
+                        
+                        try:
+                            # Parse S3 path
+                            if image_path.startswith('s3://'):
+                                path_without_protocol = image_path[5:]
+                                path_parts = path_without_protocol.split('/', 1)
+                                source_bucket = path_parts[0]
+                                source_key = path_parts[1] if len(path_parts) > 1 else ""
+                            else:
+                                # Get bucket from connection
+                                source_bucket = await image_service._get_bucket_from_connection(image_connection_id)
+                                source_key = image_path.strip('/')
+                            
+                            if not source_bucket or not source_key:
+                                logger.warning(f"Invalid image path: {image_path}")
+                                continue
+                            
+                            # Download from source
+                            response = source_minio.get_object(source_bucket, source_key)
+                            image_data = response.read()
+                            response.close()
+                            response.release_conn()
+                            
+                            # Generate destination path
+                            # Format: bronze-bucket/{id}-{name}/images/{filename}
+                            # This keeps images organized within the same dataset folder as metadata
+                            filename = os.path.basename(source_key)
+                            dest_key = f"{dataset_folder}/images/{filename}"
+                            
+                            # Upload to Bronze bucket
+                            from io import BytesIO
+                            bronze_minio.put_object(
+                                bronze_bucket,
+                                dest_key,
+                                BytesIO(image_data),
+                                length=len(image_data),
+                                content_type=image_service._get_mime_type(filename.lower().split('.')[-1])
+                            )
+                            
+                            total_images_copied += 1
+                            
+                            if total_images_copied % 10 == 0:
+                                logger.info(f"Copied {total_images_copied} images so far...")
+                        
+                        except Exception as copy_error:
+                            logger.warning(f"Failed to copy image {image_path}: {copy_error}")
+                            continue
+                
+                except Exception as col_error:
+                    logger.error(f"Error processing image column: {col_error}")
+                    continue
+            
+            logger.info(f"Successfully copied {total_images_copied} images to Bronze bucket")
+            return total_images_copied
+        
+        except Exception as e:
+            logger.error(f"Error copying images to Bronze: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return 0
+    
     # ==================== PRE-DEFINED RELATIONSHIPS METHODS ====================
     
     async def get_applicable_relationships(
