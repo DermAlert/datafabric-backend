@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 import logging
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime
@@ -137,7 +138,7 @@ async def extract_metadata(connection_id: int) -> bool:
                             # Check if table exists
                             stmt_table = select(metadata.ExternalTables).where(
                                 (metadata.ExternalTables.schema_id == schema_obj.id) &
-                                (metadata.ExternalTables.table_name == table_name)
+                                (func.lower(metadata.ExternalTables.table_name) == table_name.lower())
                             )
                             existing_table = (await db.execute(stmt_table)).scalars().first()
                             
@@ -146,6 +147,9 @@ async def extract_metadata(connection_id: int) -> bool:
                                 table_obj.last_scanned = datetime.now()
                                 table_obj.estimated_row_count = table_info.get("estimated_row_count")
                                 table_obj.total_size_bytes = table_info.get("total_size_bytes")
+                                # If extractor now returns canonical/mixed-case names, keep DB in sync
+                                table_obj.table_name = table_name
+                                table_obj.external_reference = table_info.get("external_reference")
                             else:
                                 table_obj = metadata.ExternalTables(
                                     schema_id=schema_obj.id,

@@ -5,6 +5,7 @@ from ...utils.logger import logger
 import urllib3
 from urllib.parse import urlparse
 from minio import Minio
+import re
 
 class TrinoExtractor:
     """
@@ -45,6 +46,35 @@ class TrinoExtractor:
             catalog=self.catalog,
             schema="information_schema",
         )
+
+    @staticmethod
+    def _quote_ident(identifier: str) -> str:
+        """
+        Quote an identifier for Trino using double quotes, escaping internal quotes.
+        This preserves case for mixed-case identifiers.
+        """
+        if identifier is None:
+            raise ValueError("identifier cannot be None")
+        escaped = str(identifier).replace('"', '""')
+        return f"\"{escaped}\""
+
+    _SAFE_UNQUOTED_IDENT_RE = re.compile(r"^[a-z_][a-z0-9_]*$")
+
+    @classmethod
+    def _format_ident(cls, identifier: str) -> str:
+        """
+        Format an identifier for Trino.
+
+        - If it's a simple lower_snake identifier, keep it unquoted so Trino/JDBC
+          connectors can apply case-insensitive-name-matching when enabled.
+        - Otherwise, quote it to preserve case and special chars.
+        """
+        if identifier is None:
+            raise ValueError("identifier cannot be None")
+        ident = str(identifier)
+        if cls._SAFE_UNQUOTED_IDENT_RE.match(ident):
+            return ident
+        return cls._quote_ident(ident)
 
     async def _discover_delta_metadata(self):
         """
@@ -302,21 +332,39 @@ class TrinoExtractor:
         try:
             conn = self._get_connection()
             cur = conn.cursor()
-            
-            # Get tables
-            cur.execute(f"SHOW TABLES FROM \"{self.catalog}\".\"{schema_name}\"")
+
+            # Prefer information_schema.tables because it tends to preserve the canonical
+            # identifier spelling as exposed by Trino (including mixed-case names).
+            # Using SHOW TABLES can yield a normalized (lowercased) name depending on connector,
+            # which then breaks subsequent quoted queries and column discovery.
+            tbl_query = f"""
+                SELECT table_name, table_type
+                FROM information_schema.tables
+                WHERE table_catalog = '{self.catalog}'
+                  AND table_schema = '{schema_name}'
+                ORDER BY table_name
+            """
+            cur.execute(tbl_query)
             rows = cur.fetchall()
             
             tables = []
             for row in rows:
                 table_name = row[0]
-                
-                table_type = "table" # default
+                raw_table_type = row[1] if len(row) > 1 else None
+
+                # Normalize to our internal convention
+                table_type = "view" if str(raw_table_type).lower() == "view" else "table"
                 
                 # Get row count
                 row_count = 0
                 try:
-                    cur.execute(f"SELECT count(*) FROM \"{self.catalog}\".\"{schema_name}\".\"{table_name}\"")
+                    q = (
+                        f"SELECT count(*) FROM "
+                        f"{self._format_ident(self.catalog)}."
+                        f"{self._format_ident(schema_name)}."
+                        f"{self._format_ident(table_name)}"
+                    )
+                    cur.execute(q)
                     count_res = cur.fetchone()
                     if count_res:
                         row_count = count_res[0]
@@ -325,7 +373,11 @@ class TrinoExtractor:
 
                 tables.append({
                     "table_name": table_name,
-                    "external_reference": f"{self.catalog}.{schema_name}.{table_name}",
+                    "external_reference": (
+                        f"{self._quote_ident(self.catalog)}."
+                        f"{self._quote_ident(schema_name)}."
+                        f"{self._quote_ident(table_name)}"
+                    ),
                     "table_type": table_type,
                     "estimated_row_count": row_count,
                     "total_size_bytes": 0,
@@ -350,7 +402,7 @@ class TrinoExtractor:
             cur = conn.cursor()
             
             # Use information_schema.columns for better detail
-            query = f"""
+            query_exact = f"""
                 SELECT 
                     column_name, 
                     data_type, 
@@ -363,8 +415,28 @@ class TrinoExtractor:
                 AND table_name = '{table_name}'
                 ORDER BY ordinal_position
             """
-            cur.execute(query)
+            cur.execute(query_exact)
             rows = cur.fetchall()
+
+            # Fallback: some connectors expose mixed-case names but SHOW TABLES or other callers
+            # may provide a lowercased/normalized name. If exact match returns nothing, retry
+            # case-insensitively to avoid losing column metadata.
+            if not rows:
+                query_ci = f"""
+                    SELECT 
+                        column_name, 
+                        data_type, 
+                        is_nullable, 
+                        ordinal_position,
+                        column_default
+                    FROM information_schema.columns 
+                    WHERE table_catalog = '{self.catalog}' 
+                      AND table_schema = '{schema_name}'
+                      AND lower(table_name) = lower('{table_name}')
+                    ORDER BY ordinal_position
+                """
+                cur.execute(query_ci)
+                rows = cur.fetchall()
             
             columns = []
             for row in rows:
@@ -378,7 +450,14 @@ class TrinoExtractor:
                 sample_values = []
                 try:
                     # Try to get samples
-                    sample_query = f"SELECT DISTINCT \"{col_name}\" FROM \"{self.catalog}\".\"{schema_name}\".\"{table_name}\" WHERE \"{col_name}\" IS NOT NULL LIMIT 5"
+                    sample_query = (
+                        f"SELECT DISTINCT {self._format_ident(col_name)} "
+                        f"FROM {self._format_ident(self.catalog)}."
+                        f"{self._format_ident(schema_name)}."
+                        f"{self._format_ident(table_name)} "
+                        f"WHERE {self._format_ident(col_name)} IS NOT NULL "
+                        f"LIMIT 5"
+                    )
                     cur.execute(sample_query)
                     samples = cur.fetchall()
                     sample_values = [str(s[0]) for s in samples if s[0] is not None]
@@ -423,7 +502,12 @@ class TrinoExtractor:
             conn = self._get_connection()
             cur = conn.cursor()
             
-            query = f"SELECT * FROM \"{self.catalog}\".\"{schema_name}\".\"{table_name}\""
+            query = (
+                f"SELECT * FROM "
+                f"{self._format_ident(self.catalog)}."
+                f"{self._format_ident(schema_name)}."
+                f"{self._format_ident(table_name)}"
+            )
             if limit is not None:
                 query += f" LIMIT {limit}"
             if offset > 0:

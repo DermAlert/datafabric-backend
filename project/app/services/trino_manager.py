@@ -91,7 +91,11 @@ class TrinoManager:
             return {
                 "connection-url": f"jdbc:postgresql://{host}:{port}/{db}",
                 "connection-user": user,
-                "connection-password": password
+                "connection-password": password,
+                # Allow Trino to resolve mixed-case remote identifiers even when queried
+                # using lowercased/unquoted names (common in JDBC sources).
+                # See Trino docs: case-insensitive-name-matching
+                "case-insensitive-name-matching": "true",
             }
             
         elif connection_type in ["deltalake", "delta"]:
@@ -152,7 +156,8 @@ class TrinoManager:
              return {
                 "connection-url": f"jdbc:mysql://{host}:{port}",
                 "connection-user": user,
-                "connection-password": password
+                "connection-password": password,
+                "case-insensitive-name-matching": "true",
             }
 
         # Add other connectors as needed
