@@ -55,6 +55,9 @@ from ..api.schemas.bronze_schemas import (
     IngestionStatusEnum,
     JoinStrategyEnum,
     RelationshipUsagePreview,
+    BronzeVirtualizedRequest,
+    BronzeVirtualizedResponse,
+    BronzeVirtualizedGroupResult,
 )
 from .trino_manager import TrinoManager
 from minio import Minio
@@ -860,7 +863,8 @@ class BronzeIngestionService:
         - Multiple tables with joins (pushdown JOIN)
         - Column aliasing for conflict resolution
         """
-        catalog = self.trino._sanitize_identifier(connection_name)
+        # Use the same catalog name format as TrinoManager (with connection_id suffix)
+        catalog = self.trino.generate_catalog_name(connection_name, connection_id)
         
         # Build table aliases
         table_aliases = {}
@@ -1046,7 +1050,8 @@ FROM {from_clause}
         
         # Build FROM clause with FULL CATALOG PATH
         primary_table = table_metadata[primary_table_id]
-        primary_catalog = self.trino._sanitize_identifier(primary_table['connection_name'])
+        # Use the same catalog name format as TrinoManager (with connection_id suffix)
+        primary_catalog = self.trino.generate_catalog_name(primary_table['connection_name'], primary_table['connection_id'])
         from_clause = f'"{primary_catalog}"."{primary_table["schema_name"]}"."{primary_table["table_name"]}" {table_aliases[primary_table_id]}'
         
         # Build JOIN clauses (cross-database)
@@ -1086,7 +1091,8 @@ FROM {from_clause}
                     continue
                 
                 join_table = table_metadata[join_table_id]
-                join_catalog = self.trino._sanitize_identifier(join_table['connection_name'])
+                # Use the same catalog name format as TrinoManager (with connection_id suffix)
+                join_catalog = self.trino.generate_catalog_name(join_table['connection_name'], join_table['connection_id'])
                 
                 # Get column names for the join condition
                 left_col = await self._get_column_info(rel.left_column_id)
@@ -1674,4 +1680,157 @@ AS
                 ))
         
         return previews
+
+    # ==================== VIRTUALIZED QUERY ====================
+    
+    async def execute_virtualized(
+        self,
+        request: BronzeVirtualizedRequest,
+        limit: int = 1000,
+        offset: int = 0
+    ) -> BronzeVirtualizedResponse:
+        """
+        Execute a virtualized Bronze query without saving to Delta.
+        
+        This method:
+        1. Generates the same SQL as the ingestion plan
+        2. Executes the SQL via Trino
+        3. Returns the data directly as JSON
+        
+        Useful for:
+        - Data exploration/preview with actual data
+        - Light API consumption (small datasets)
+        - Testing queries before materializing
+        
+        Args:
+            request: The virtualized query request (tables, columns, relationships)
+            limit: Maximum rows per group (default 1000)
+            offset: Offset for pagination (default 0)
+            
+        Returns:
+            BronzeVirtualizedResponse with data from each group
+        """
+        start_time = datetime.now()
+        warnings = []
+        
+        # Convert request to internal format for plan generation
+        # We create a "fake" DatasetBronzeCreateRequest just to reuse the plan logic
+        dataset_data = DatasetBronzeCreateRequest(
+            name="__virtualized_query__",
+            tables=request.tables,
+            relationship_ids=request.relationship_ids,
+            enable_federated_joins=request.enable_federated_joins
+        )
+        
+        # Generate the plan (this gives us the SQL for each group)
+        preview = await self.generate_ingestion_plan_simplified(dataset_data)
+        
+        # Execute each group's SQL and collect results
+        group_results = []
+        total_rows = 0
+        
+        for group_preview in preview.ingestion_groups:
+            try:
+                # Modify SQL to add LIMIT/OFFSET
+                select_sql = group_preview.estimated_sql
+                if select_sql:
+                    # Remove trailing semicolon if present
+                    select_sql = select_sql.rstrip(';').strip()
+                    
+                    # Check if query already has LIMIT (case-insensitive)
+                    sql_upper = select_sql.upper()
+                    if ' LIMIT ' not in sql_upper:
+                        # Add LIMIT (required for OFFSET in Trino)
+                        select_sql = f"{select_sql} LIMIT {limit}"
+                        # Only add OFFSET if > 0
+                        if offset > 0:
+                            select_sql = f"{select_sql} OFFSET {offset}"
+                
+                # Execute the query
+                data, columns = await self._execute_virtualized_query(select_sql)
+                
+                group_results.append(BronzeVirtualizedGroupResult(
+                    group_name=group_preview.group_name,
+                    connection_name=group_preview.connection_name,
+                    columns=columns,
+                    data=data,
+                    row_count=len(data),
+                    sql_executed=select_sql
+                ))
+                
+                total_rows += len(data)
+                
+            except Exception as e:
+                logger.error(f"Failed to execute virtualized query for group {group_preview.group_name}: {str(e)}")
+                warnings.append(f"Group {group_preview.group_name} failed: {str(e)}")
+                
+                # Add empty result for failed group
+                group_results.append(BronzeVirtualizedGroupResult(
+                    group_name=group_preview.group_name,
+                    connection_name=group_preview.connection_name,
+                    columns=[],
+                    data=[],
+                    row_count=0,
+                    sql_executed=group_preview.estimated_sql
+                ))
+        
+        # Add warnings from preview
+        warnings.extend(preview.warnings)
+        
+        execution_time = (datetime.now() - start_time).total_seconds()
+        
+        return BronzeVirtualizedResponse(
+            total_tables=preview.total_tables,
+            total_columns=preview.total_columns,
+            groups=group_results,
+            total_rows=total_rows,
+            execution_time_seconds=execution_time,
+            warnings=warnings,
+            message=f"Virtualized query completed. {total_rows} rows returned from {len(group_results)} groups."
+        )
+    
+    async def _execute_virtualized_query(
+        self,
+        select_sql: str
+    ) -> Tuple[List[Dict[str, Any]], List[str]]:
+        """
+        Execute a SELECT query via Trino and return the data.
+        
+        Args:
+            select_sql: The SELECT SQL to execute
+            
+        Returns:
+            Tuple of (data as list of dicts, column names)
+        """
+        try:
+            conn = self.trino.get_connection()
+            cur = conn.cursor()
+            
+            logger.info(f"Executing virtualized query:\n{select_sql}")
+            cur.execute(select_sql)
+            
+            # Get column names from cursor description
+            columns = [desc[0] for desc in cur.description] if cur.description else []
+            
+            # Fetch all rows
+            rows = cur.fetchall()
+            
+            # Convert to list of dicts
+            data = []
+            for row in rows:
+                row_dict = {}
+                for i, col_name in enumerate(columns):
+                    value = row[i]
+                    # Convert non-serializable types to string
+                    if value is not None and not isinstance(value, (str, int, float, bool, list, dict)):
+                        value = str(value)
+                    row_dict[col_name] = value
+                data.append(row_dict)
+            
+            conn.close()
+            return data, columns
+            
+        except Exception as e:
+            logger.error(f"Virtualized query failed: {str(e)}")
+            raise
 

@@ -14,7 +14,7 @@ Key endpoints:
 - GET /bronze/{dataset_id}: Get Bronze configuration for a dataset
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
@@ -39,6 +39,8 @@ from ..schemas.bronze_schemas import (
     IngestionGroupResponse,
     IngestionStatusEnum,
     RelationshipUsagePreview,
+    BronzeVirtualizedRequest,
+    BronzeVirtualizedResponse,
 )
 from ...services.bronze_ingestion_service import BronzeIngestionService
 
@@ -59,13 +61,12 @@ async def preview_bronze_ingestion(
     
     **How it works:**
     1. You specify the tables and columns you want
-    2. The system finds all relationships between those tables (from metadata)
+    2. The system finds all relationships between those tables automatically
     3. Shows the SQL that will be generated for Trino
     
-    **Relationships come from metadata layer:**
-    - Define relationships using `POST /relationships` or `POST /relationships/discover`
-    - Intra-connection relationships → Trino pushdown joins (same DB)
-    - Inter-connection relationships → Stored for Silver layer (different DBs)
+    **Relationships are discovered automatically:**
+    - The system looks up existing relationships in metadata
+    - `relationship_ids` is optional — if not provided, uses all applicable relationships
     
     **What you'll see:**
     - How tables are grouped by connection
@@ -96,12 +97,13 @@ async def execute_bronze_ingestion(
     Execute the Bronze layer ingestion.
     
     **Workflow:**
-    1. Define relationships FIRST using `/relationships` endpoints
-    2. Call this endpoint with just tables/columns
-    3. System uses Trino to extract data with automatic JOINs
+    1. Call this endpoint with tables/columns
+    2. System discovers relationships automatically and uses Trino to extract data
+    
+    **Note:** `relationship_ids` is optional — if not provided, uses all applicable relationships.
     
     **What happens:**
-    1. System looks up relationships between your selected tables
+    1. System looks up relationships between your selected tables automatically
     2. Groups tables by connection (for optimization)
     3. For same-connection tables with relationships → Trino does pushdown JOIN
     4. For different-connection tables → Extracts separately, stores link for Silver
@@ -122,13 +124,6 @@ async def execute_bronze_ingestion(
     
     If tables 1 and 2 are in the same DB with a relationship defined,
     Trino will JOIN them. Table 3 (different DB) will be extracted separately.
-    
-    **Output Structure:**
-    ```
-    /bronze/{dataset_name}/
-      ├── /part_postgres/   (Tables 1+2 joined)
-      └── /part_mysql/      (Table 3)
-    ```
     """
     try:
         service = BronzeIngestionService(db)
@@ -140,6 +135,63 @@ async def execute_bronze_ingestion(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to execute Bronze ingestion: {str(e)}"
+        )
+
+
+@router.post("/virtualized", response_model=BronzeVirtualizedResponse)
+async def execute_virtualized_query(
+    request: BronzeVirtualizedRequest,
+    limit: int = Query(1000, ge=1, le=10000, description="Maximum rows per group"),
+    offset: int = Query(0, ge=0, description="Offset for pagination"),
+    db: AsyncSession = Depends(get_db),
+    # current_user = Depends(get_current_user),
+):
+    """
+    Execute a virtualized Bronze query WITHOUT saving to Delta.
+    
+    This endpoint generates the same SQL as `/ingest` but instead of 
+    materializing the data, it executes the query and returns the results
+    directly as JSON.
+    
+    **Note:** `relationship_ids` is optional — if not provided, uses all applicable relationships automatically.
+    
+    **Use cases:**
+    - Data exploration/preview with actual data
+    - Light API consumption (small to medium datasets)
+    - Testing queries before materializing
+    - Quick data access without storage overhead
+    
+    **Important:**
+    - Data is NOT saved anywhere (purely virtual)
+    - Use `limit` to control response size (default 1000, max 10000)
+    - For large datasets, use `/ingest` to materialize
+    
+    **Example:**
+    ```json
+    {
+      "tables": [
+        {"table_id": 1, "select_all": true},
+        {"table_id": 2, "column_ids": [10, 11, 12]}
+      ]
+    }
+    ```
+    
+    **Response includes:**
+    - Data from each group as JSON
+    - Column names
+    - SQL that was executed
+    - Execution time
+    """
+    try:
+        service = BronzeIngestionService(db)
+        return await service.execute_virtualized(request, limit=limit, offset=offset)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to execute virtualized query: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to execute virtualized query: {str(e)}"
         )
 
 

@@ -332,7 +332,7 @@ class TrinoExtractor:
         try:
             conn = self._get_connection()
             cur = conn.cursor()
-
+            
             # Prefer information_schema.tables because it tends to preserve the canonical
             # identifier spelling as exposed by Trino (including mixed-case names).
             # Using SHOW TABLES can yield a normalized (lowercased) name depending on connector,
@@ -351,7 +351,7 @@ class TrinoExtractor:
             for row in rows:
                 table_name = row[0]
                 raw_table_type = row[1] if len(row) > 1 else None
-
+                
                 # Normalize to our internal convention
                 table_type = "view" if str(raw_table_type).lower() == "view" else "table"
                 
@@ -436,7 +436,7 @@ class TrinoExtractor:
                     ORDER BY ordinal_position
                 """
                 cur.execute(query_ci)
-                rows = cur.fetchall()
+            rows = cur.fetchall()
             
             columns = []
             for row in rows:

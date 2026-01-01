@@ -248,10 +248,10 @@ class DatasetBronzeCreateRequest(BaseModel):
         description="Tables to include in the dataset with their column selections"
     )
     
-    # Relationship filtering (optional)
+    # Relationship filtering (optional - auto-discovered if not provided)
     relationship_ids: Optional[List[int]] = Field(
         None,
-        description="Specific relationship IDs to use. If None, uses all applicable relationships."
+        description="Optional. If not provided, automatically uses all applicable relationships between selected tables."
     )
     
     # Federated joins configuration
@@ -298,4 +298,59 @@ class RelationshipUsagePreview(BaseModel):
     scope: str  # intra_connection or inter_connection
     usage: str  # "pushdown_join" or "silver_layer_link"
     join_type: str
+
+
+# ==================== VIRTUALIZED QUERY ====================
+
+class BronzeVirtualizedRequest(BaseModel):
+    """
+    Request for virtualized Bronze query (without saving to Delta).
+    
+    Same structure as DatasetBronzeCreateRequest but used for 
+    executing queries and returning data directly.
+    """
+    # Table and column selection
+    tables: List[TableColumnSelection] = Field(
+        ..., 
+        min_items=1,
+        description="Tables to include with their column selections"
+    )
+    
+    # Relationship filtering (optional - auto-discovered if not provided)
+    relationship_ids: Optional[List[int]] = Field(
+        None,
+        description="Optional. If not provided, automatically uses all applicable relationships between selected tables."
+    )
+    
+    # Federated joins configuration
+    enable_federated_joins: bool = Field(
+        default=False,
+        description="Enable Trino federated JOINs between different databases."
+    )
+
+
+class BronzeVirtualizedGroupResult(BaseModel):
+    """Result of one virtualized query group"""
+    group_name: str
+    connection_name: str
+    columns: List[str]
+    data: List[Dict[str, Any]]
+    row_count: int
+    sql_executed: Optional[str] = None
+
+
+class BronzeVirtualizedResponse(BaseModel):
+    """
+    Response for virtualized Bronze query.
+    
+    Returns the data directly without saving to Delta/Parquet.
+    Useful for exploration, preview with data, and light API consumption.
+    """
+    total_tables: int
+    total_columns: int
+    groups: List[BronzeVirtualizedGroupResult]
+    total_rows: int
+    execution_time_seconds: float
+    warnings: List[str] = []
+    message: str
 
