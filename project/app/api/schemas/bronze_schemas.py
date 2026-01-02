@@ -106,6 +106,7 @@ class IngestionGroupPreview(BaseModel):
     has_joins: bool
     estimated_sql: Optional[str] = None
     output_path: str
+    column_mappings: Optional[List[Dict[str, Any]]] = None  # Maps external_column_id → bronze_column_name
 
 
 class BronzeIngestionPreview(BaseModel):

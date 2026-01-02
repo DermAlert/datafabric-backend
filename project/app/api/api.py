@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes, delta_sharing_management, delta_sharing_protocol, bronze_routes, relationship_routes
+    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes, delta_sharing_management, delta_sharing_protocol, bronze_routes, relationship_routes, silver_routes
 )
 
 api_router = APIRouter()
@@ -32,9 +32,9 @@ api_router.include_router(
     image_path_routes.router, prefix="/image-paths", tags=["Image Path Management"]
 )
 
-# api_router.include_router(
-#     equivalence.router, prefix="/equivalence", tags=["Equivalence"]
-# )
+api_router.include_router(
+    equivalence.router, prefix="/equivalence", tags=["Equivalence"]
+)
 
 # api_router.include_router(
 #     dataset_routes.router, prefix="/datasets", tags=["Datasets"]
@@ -43,6 +43,11 @@ api_router.include_router(
 # Bronze Layer (Smart Bronze Architecture)
 api_router.include_router(
     bronze_routes.router, prefix="/bronze", tags=["Bronze Layer"]
+)
+
+# Silver Layer (Data Transformation)
+api_router.include_router(
+    silver_routes.router, tags=["Silver Layer"]
 )
 
 # Table Relationships (Metadata)

@@ -222,4 +222,56 @@ class InterSourceLink(AuditMixin, Base):
     description = Column(Text, nullable=True)
 
 
+class BronzeColumnMapping(Base):
+    """
+    Maps external columns to their Bronze output names.
+    
+    This table persists the mapping between:
+    - external_column.id (source metadata)
+    - bronze_column_name (actual column name in Delta Lake)
+    
+    This enables Silver layer to:
+    1. Use ColumnGroup from Equivalence (which references external_column.id)
+    2. Resolve to actual Bronze column names for transformations
+    
+    Example:
+    - external_column_id: 100 (cpf in pacientes table)
+    - bronze_column_name: "cpf" (if unique) or "pacientes_cpf" (if duplicated)
+    """
+    __tablename__ = "bronze_column_mappings"
+    __table_args__ = (
+        UniqueConstraint('ingestion_group_id', 'external_column_id'),
+        {'schema': 'datasets'}
+    )
+
+    id = Column(Integer, primary_key=True)
+    
+    # Which ingestion group this mapping belongs to
+    ingestion_group_id = Column(Integer, ForeignKey('datasets.dataset_ingestion_groups.id', ondelete='CASCADE'), nullable=False)
+    
+    # Source: external column metadata
+    external_column_id = Column(Integer, ForeignKey('metadata.external_columns.id', ondelete='CASCADE'), nullable=False)
+    external_table_id = Column(Integer, ForeignKey('metadata.external_tables.id', ondelete='CASCADE'), nullable=False)
+    
+    # Original names (for reference)
+    original_column_name = Column(String(255), nullable=False)
+    original_table_name = Column(String(255), nullable=False)
+    original_schema_name = Column(String(255), nullable=True)
+    
+    # Target: Bronze Delta Lake column name
+    bronze_column_name = Column(String(255), nullable=False)
+    
+    # Data type info
+    data_type = Column(String(100), nullable=True)
+    
+    # Position in output
+    column_position = Column(Integer, nullable=True)
+    
+    # Flags
+    is_prefixed = Column(Boolean, default=False)  # True if column name was prefixed with table name
+    
+    # Relationship
+    ingestion_group = relationship("DatasetIngestionGroup")
+
+
 

@@ -40,6 +40,7 @@ from ..database.datasets.bronze import (
     InterSourceLink,
     IngestionStatus,
     JoinStrategy,
+    BronzeColumnMapping,
 )
 from ..api.schemas.bronze_schemas import (
     DatasetBronzeCreate,
@@ -207,7 +208,7 @@ class BronzeIngestionService:
             all_table_ids = [t.table_id for t in dataset_data.tables]
             
             # Generate federated SQL
-            sql, group_columns = await self._generate_federated_sql(
+            sql, group_columns, column_mappings = await self._generate_federated_sql(
                 all_table_ids,
                 all_relationships,
                 resolved_columns,
@@ -243,7 +244,8 @@ class BronzeIngestionService:
                 tables=tables_preview,
                 has_joins=len(all_relationships) > 0,
                 estimated_sql=sql,
-                output_path=output_path
+                output_path=output_path,
+                column_mappings=column_mappings
             ))
             
             warnings.append(
@@ -280,7 +282,7 @@ class BronzeIngestionService:
                     sub_relationships = sub_group['relationships']
                     
                     # Generate SQL for this sub-group
-                    sql, group_columns = await self._generate_group_sql(
+                    sql, group_columns, column_mappings = await self._generate_group_sql(
                         conn_id,
                         conn_name,
                         sub_tables,
@@ -322,7 +324,8 @@ class BronzeIngestionService:
                         tables=tables_preview,
                         has_joins=len(sub_relationships) > 0,
                         estimated_sql=sql,
-                        output_path=output_path
+                        output_path=output_path,
+                        column_mappings=column_mappings
                     ))
             
             # Step 5: Process inter-DB relationships (metadata only)
@@ -439,6 +442,13 @@ class BronzeIngestionService:
             )
             self.db.add(ingestion_group)
             await self.db.flush()
+            
+            # Save column mappings for this group
+            if group_preview.column_mappings:
+                await self._save_column_mappings(
+                    ingestion_group.id,
+                    group_preview.column_mappings
+                )
             
             # Execute the SQL via Trino
             try:
@@ -574,6 +584,42 @@ class BronzeIngestionService:
             }
             for row in rows
         }
+    
+    async def _save_column_mappings(
+        self,
+        ingestion_group_id: int,
+        column_mappings: List[Dict[str, Any]]
+    ) -> None:
+        """
+        Save column mappings for an ingestion group.
+        
+        This persists the mapping between external_column.id and the
+        actual column name in the Bronze Delta Lake output.
+        
+        This enables the Silver layer to:
+        1. Use ColumnGroup from Equivalence (which references external_column.id)
+        2. Resolve to actual Bronze column names for transformations
+        """
+        for mapping in column_mappings:
+            if not mapping.get('external_column_id'):
+                continue  # Skip if no column ID
+            
+            bronze_mapping = BronzeColumnMapping(
+                ingestion_group_id=ingestion_group_id,
+                external_column_id=mapping['external_column_id'],
+                external_table_id=mapping['external_table_id'],
+                original_column_name=mapping['original_column_name'],
+                original_table_name=mapping['original_table_name'],
+                original_schema_name=mapping.get('original_schema_name'),
+                bronze_column_name=mapping['bronze_column_name'],
+                data_type=mapping.get('data_type'),
+                column_position=mapping.get('column_position'),
+                is_prefixed=mapping.get('is_prefixed', False)
+            )
+            self.db.add(bronze_mapping)
+        
+        await self.db.flush()
+        logger.info(f"Saved {len(column_mappings)} column mappings for ingestion group {ingestion_group_id}")
     
     def _group_tables_by_connection(
         self,
@@ -854,7 +900,7 @@ class BronzeIngestionService:
         relationships: List[IntraDBRelationship],
         resolved_columns: Dict[int, List[Dict[str, Any]]],
         table_metadata: Dict[int, Dict[str, Any]]
-    ) -> Tuple[str, List[str]]:
+    ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
         """
         Generate SQL for an ingestion group.
         
@@ -862,6 +908,12 @@ class BronzeIngestionService:
         - Single table (simple SELECT)
         - Multiple tables with joins (pushdown JOIN)
         - Column aliasing for conflict resolution
+        
+        Returns:
+            Tuple of (sql, column_names, column_mappings)
+            - sql: The generated SQL query
+            - column_names: List of output column names
+            - column_mappings: List of dicts with mapping info for BronzeColumnMapping
         """
         # Use the same catalog name format as TrinoManager (with connection_id suffix)
         catalog = self.trino.generate_catalog_name(connection_name, connection_id)
@@ -885,6 +937,7 @@ class BronzeIngestionService:
         select_columns = []
         all_column_names = set()
         column_name_counts = defaultdict(int)
+        column_mappings = []  # Track column mappings for persistence
         
         # First pass: count column name occurrences
         for table_id in table_ids:
@@ -892,6 +945,7 @@ class BronzeIngestionService:
                 column_name_counts[col['column_name']] += 1
         
         # Second pass: build SELECT with aliases where needed
+        column_position = 0
         for table_id in table_ids:
             alias = table_aliases[table_id]
             table_info = table_metadata[table_id]
@@ -899,10 +953,12 @@ class BronzeIngestionService:
             for col in resolved_columns.get(table_id, []):
                 col_name = col['column_name']
                 col_data_type = col.get('data_type', '')
+                is_prefixed = False
                 
                 # If column name appears in multiple tables, prefix with table name
                 if column_name_counts[col_name] > 1:
                     output_name = f"{table_info['table_name']}_{col_name}"
+                    is_prefixed = True
                 else:
                     output_name = col_name
                 
@@ -912,6 +968,20 @@ class BronzeIngestionService:
                 
                 select_columns.append(f'{column_expr} AS "{output_name}"')
                 all_column_names.add(output_name)
+                
+                # Track the column mapping
+                column_mappings.append({
+                    'external_column_id': col.get('column_id'),
+                    'external_table_id': table_id,
+                    'original_column_name': col_name,
+                    'original_table_name': table_info['table_name'],
+                    'original_schema_name': table_info.get('schema_name'),
+                    'bronze_column_name': output_name,
+                    'data_type': col_data_type,
+                    'column_position': column_position,
+                    'is_prefixed': is_prefixed
+                })
+                column_position += 1
         
         # Add metadata columns
         select_columns.append(f"'{table_metadata[primary_table_id]['table_name']}' AS _source_table")
@@ -976,7 +1046,7 @@ class BronzeIngestionService:
 FROM {from_clause}
 {chr(10).join(join_clauses)}"""
         
-        return sql.strip(), list(all_column_names)
+        return sql.strip(), list(all_column_names), column_mappings
     
     async def _generate_federated_sql(
         self,
@@ -984,7 +1054,7 @@ FROM {from_clause}
         relationships: List[IntraDBRelationship],
         resolved_columns: Dict[int, List[Dict[str, Any]]],
         table_metadata: Dict[int, Dict[str, Any]]
-    ) -> Tuple[str, List[str]]:
+    ) -> Tuple[str, List[str], List[Dict[str, Any]]]:
         """
         Generate federated SQL that JOINs tables across different databases using Trino.
         
@@ -996,6 +1066,9 @@ FROM {from_clause}
         - Multiple catalogs (different databases)
         - Cross-database JOINs via Trino
         - Column aliasing for conflict resolution
+        
+        Returns:
+            Tuple of (sql, column_names, column_mappings)
         """
         # Build table aliases
         table_aliases = {}
@@ -1016,6 +1089,7 @@ FROM {from_clause}
         select_columns = []
         all_column_names = set()
         column_name_counts = defaultdict(int)
+        column_mappings = []  # Track column mappings for persistence
         
         # First pass: count column name occurrences
         for table_id in table_ids:
@@ -1023,6 +1097,7 @@ FROM {from_clause}
                 column_name_counts[col['column_name']] += 1
         
         # Second pass: build SELECT with aliases where needed
+        column_position = 0
         for table_id in table_ids:
             alias = table_aliases[table_id]
             table_info = table_metadata[table_id]
@@ -1030,10 +1105,12 @@ FROM {from_clause}
             for col in resolved_columns.get(table_id, []):
                 col_name = col['column_name']
                 col_data_type = col.get('data_type', '')
+                is_prefixed = False
                 
                 # If column name appears in multiple tables, prefix with table name
                 if column_name_counts[col_name] > 1:
                     output_name = f"{table_info['table_name']}_{col_name}"
+                    is_prefixed = True
                 else:
                     output_name = col_name
                 
@@ -1043,6 +1120,20 @@ FROM {from_clause}
                 
                 select_columns.append(f'{column_expr} AS "{output_name}"')
                 all_column_names.add(output_name)
+                
+                # Track the column mapping
+                column_mappings.append({
+                    'external_column_id': col.get('column_id'),
+                    'external_table_id': table_id,
+                    'original_column_name': col_name,
+                    'original_table_name': table_info['table_name'],
+                    'original_schema_name': table_info.get('schema_name'),
+                    'bronze_column_name': output_name,
+                    'data_type': col_data_type,
+                    'column_position': column_position,
+                    'is_prefixed': is_prefixed
+                })
+                column_position += 1
         
         # Add metadata columns
         select_columns.append("'federated' AS _source_table")
@@ -1148,7 +1239,7 @@ FROM {from_clause}
 FROM {from_clause}
 {chr(10).join(join_clauses)}"""
         
-        return sql.strip(), list(all_column_names)
+        return sql.strip(), list(all_column_names), column_mappings
     
     async def _execute_trino_ingestion(
         self,

@@ -11,9 +11,24 @@ from .bronze import (
     DatasetIngestionGroup,
     IngestionGroupTable,
     InterSourceLink,
+    BronzeColumnMapping,
+)
+
+from .silver import (
+    NormalizationType,
+    FilterOperator,
+    FilterLogic,
+    TransformStatus,
+    NormalizationRule,
+    SilverFilter,
+    SilverFilterCondition,
+    VirtualizedConfig,
+    TransformConfig,
+    TransformExecution,
 )
 
 __all__ = [
+    # Bronze
     "RelationshipType",
     "JoinStrategy",
     "IngestionStatus",
@@ -22,6 +37,18 @@ __all__ = [
     "DatasetIngestionGroup",
     "IngestionGroupTable",
     "InterSourceLink",
+    "BronzeColumnMapping",
+    # Silver
+    "NormalizationType",
+    "FilterOperator",
+    "FilterLogic",
+    "TransformStatus",
+    "NormalizationRule",
+    "SilverFilter",
+    "SilverFilterCondition",
+    "VirtualizedConfig",
+    "TransformConfig",
+    "TransformExecution",
 ]
 
 
