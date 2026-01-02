@@ -128,14 +128,15 @@ class ImageService:
             raise
     
     async def _get_minio_client(self, connection_id: int) -> Optional[Minio]:
-        """Get MinIO client from connection ID"""
+        """Get MinIO/S3 client from connection ID"""
         try:
             # Get connection details
+            # Accept MinIO, S3, or DeltaLake connections (all use S3 protocol)
             connection_query = select(DataConnection, ConnectionType).join(
                 ConnectionType, DataConnection.connection_type_id == ConnectionType.id
             ).where(
-                DataConnection.id == connection_id,
-                ConnectionType.name.ilike('%minio%')  # Ensure it's a MinIO connection
+                DataConnection.id == connection_id
+                # Accept any connection type that uses S3 protocol
             )
             
             connection_result = await self.db.execute(connection_query)

@@ -1,7 +1,7 @@
 from typing import Dict, Any, List, Tuple, Optional
 import asyncio
 
-from ..connectors.delta_connector import get_spark_session
+from ..extractors.trino_extractor import TrinoExtractor
 from ...utils.logger import logger
 from ...api.schemas.data_visualization_schemas import Filter, Sort
 
@@ -19,98 +19,88 @@ async def visualize_delta_data(
 ) -> Tuple[int, List[List[Any]], List[str]]:
     """
     Get virtualized data from a Delta Lake table with pagination, filtering, and sorting.
-    
-    Args:
-        connection_params: Delta Lake connection parameters
-        schema_name: Schema/database name or bucket path
-        table_name: Table name
-        page: Page number (1-based)
-        page_size: Number of rows per page
-        filters: Filters to apply
-        sort_by: Sort specifications
-        selected_columns: Columns to include (None for all)
-        column_info: Information about table columns
-        
-    Returns:
-        Tuple of (total_count, rows, column_names)
+    Using Trino as the query engine.
     """
-    spark = None
     try:
-        spark = get_spark_session(connection_params)
+        # Use TrinoExtractor to setup connection
+        extractor = TrinoExtractor(
+            connection_params=connection_params,
+            connection_type="deltalake",
+            connection_name="visualization_query"
+        )
         
-        # Determine the table path
-        bucket_name = connection_params.get('bucket_name')
+        # Construct Trino SQL query
+        catalog = extractor.catalog
         
-        if schema_name == bucket_name:
-            # S3 bucket table
-            if table_name == bucket_name:
-                table_path = f"s3a://{bucket_name}/"
-            else:
-                table_path = f"s3a://{bucket_name}/{table_name}"
-        else:
-            # Database table
-            table_path = f"{schema_name}.{table_name}"
-        
-        # Read the Delta table
-        df = spark.read.format("delta").load(table_path)
-        
-        # Select specific columns if requested
+        # Basic Select
+        select_clause = "*"
         if selected_columns:
-            available_columns = df.columns
-            valid_columns = [col for col in selected_columns if col in available_columns]
-            if valid_columns:
-                df = df.select(*valid_columns)
-        
-        column_names = df.columns
+            # Sanitize column names
+            quoted_cols = [f'"{col}"' for col in selected_columns]
+            select_clause = ", ".join(quoted_cols)
+            
+        base_query = f' FROM "{catalog}"."{schema_name}"."{table_name}"'
         
         # Apply filters
+        where_clause = ""
         if filters:
+            conditions = []
             for filter_obj in filters:
-                df = _apply_filter(df, filter_obj)
+                condition = _build_trino_filter(filter_obj)
+                if condition:
+                    conditions.append(condition)
+            
+            if conditions:
+                where_clause = " WHERE " + " AND ".join(conditions)
         
-        # Get total count before pagination
-        total_count = df.count()
+        # Get total count
+        count_query = f'SELECT count(*) {base_query} {where_clause}'
+        
+        conn = extractor._get_connection()
+        cur = conn.cursor()
+        cur.execute(count_query)
+        total_count = cur.fetchone()[0]
+        
+        # Build final data query
+        query = f'SELECT {select_clause} {base_query} {where_clause}'
         
         # Apply sorting
         if sort_by:
+            sort_conditions = []
             for sort_obj in sort_by:
-                if sort_obj.column in column_names:
-                    if sort_obj.direction.lower() == "desc":
-                        df = df.orderBy(df[sort_obj.column].desc())
-                    else:
-                        df = df.orderBy(df[sort_obj.column].asc())
+                direction = "DESC" if sort_obj.direction.lower() == "desc" else "ASC"
+                sort_conditions.append(f'"{sort_obj.column}" {direction}')
+            
+            if sort_conditions:
+                query += " ORDER BY " + ", ".join(sort_conditions)
         
         # Apply pagination
         offset = (page - 1) * page_size
-        paginated_df = df.offset(offset).limit(page_size)
+        query += f" OFFSET {offset} LIMIT {page_size}"
         
-        # Collect data
-        sample_data = paginated_df.collect()
+        # Execute data query
+        cur.execute(query)
+        rows = cur.fetchall()
         
-        # Convert to list of lists
-        rows = []
-        for row in sample_data:
+        # Get column names
+        column_names = [desc[0] for desc in cur.description] if cur.description else []
+        
+        # Convert rows to list of lists and handle types
+        formatted_rows = []
+        for row in rows:
             row_data = []
-            for col in column_names:
-                value = row[col]
-                # Convert complex types to string representation
-                if value is not None and not isinstance(value, (str, int, float, bool)):
-                    value = str(value)
-                row_data.append(value)
-            rows.append(row_data)
-        
-        return total_count, rows, column_names
+            for val in row:
+                if val is not None and not isinstance(val, (str, int, float, bool)):
+                    row_data.append(str(val))
+                else:
+                    row_data.append(val)
+            formatted_rows.append(row_data)
+            
+        return total_count, formatted_rows, column_names
         
     except Exception as e:
         logger.error(f"Error visualizing Delta Lake data from {schema_name}.{table_name}: {str(e)}")
         raise Exception(f"Failed to visualize Delta Lake data: {str(e)}")
-        
-    finally:
-        if spark:
-            try:
-                spark.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping Spark session: {str(e)}")
 
 
 async def execute_delta_query(
@@ -119,95 +109,94 @@ async def execute_delta_query(
     max_rows: int = 1000
 ) -> Tuple[List[List[Any]], List[str]]:
     """
-    Execute a custom Spark SQL query on Delta Lake.
-    
-    Args:
-        connection_params: Delta Lake connection parameters
-        query: Spark SQL query to execute
-        max_rows: Maximum number of rows to return
-        
-    Returns:
-        Tuple of (rows, column_names)
+    Execute a custom SQL query on Delta Lake via Trino.
     """
-    spark = None
     try:
-        spark = get_spark_session(connection_params)
+        # Use TrinoExtractor to setup connection
+        extractor = TrinoExtractor(
+            connection_params=connection_params,
+            connection_type="deltalake",
+            connection_name="custom_query"
+        )
         
-        # Execute the query
-        df = spark.sql(query)
+        # Note: The incoming query might be Spark SQL. Trino SQL is ANSI SQL compliant but might differ slightly.
+        # We assume the user provides Trino-compatible SQL or simple SQL.
+        # If the query assumes a specific catalog name that differs from our dynamic one, this might fail.
+        # ideally we should inject the catalog name.
         
-        # Limit results
-        df_limited = df.limit(max_rows)
+        conn = extractor._get_connection()
+        cur = conn.cursor()
         
-        # Get column names
-        column_names = df.columns
+        # Limit results if not present
+        if "limit" not in query.lower():
+            query += f" LIMIT {max_rows}"
+            
+        cur.execute(query)
+        rows = cur.fetchall()
         
-        # Collect data
-        data = df_limited.collect()
+        column_names = [desc[0] for desc in cur.description] if cur.description else []
         
-        # Convert to list of lists
-        rows = []
-        for row in data:
+        formatted_rows = []
+        for row in rows:
             row_data = []
-            for col in column_names:
-                value = row[col]
-                # Convert complex types to string representation
-                if value is not None and not isinstance(value, (str, int, float, bool)):
-                    value = str(value)
-                row_data.append(value)
-            rows.append(row_data)
-        
-        return rows, column_names
+            for val in row:
+                if val is not None and not isinstance(val, (str, int, float, bool)):
+                    row_data.append(str(val))
+                else:
+                    row_data.append(val)
+            formatted_rows.append(row_data)
+            
+        return formatted_rows, column_names
         
     except Exception as e:
         logger.error(f"Error executing Delta Lake query: {str(e)}")
         raise Exception(f"Failed to execute Delta Lake query: {str(e)}")
-        
-    finally:
-        if spark:
-            try:
-                spark.stop()
-            except Exception as e:
-                logger.warning(f"Error stopping Spark session: {str(e)}")
 
 
-def _apply_filter(df, filter_obj: Filter):
-    """Apply a filter to the DataFrame."""
+def _build_trino_filter(filter_obj: Filter) -> Optional[str]:
+    """Build Trino SQL filter condition."""
     try:
-        column = filter_obj.column
+        column = f'"{filter_obj.column}"'
         operator = filter_obj.operator.lower()
         value = filter_obj.value
         
+        # Helper to format value
+        def fmt_val(v):
+            if isinstance(v, str):
+                return f"'{v}'"
+            return str(v)
+
         if operator == "equals":
-            return df.filter(df[column] == value)
+            return f"{column} = {fmt_val(value)}"
         elif operator == "not_equals":
-            return df.filter(df[column] != value)
+            return f"{column} <> {fmt_val(value)}"
         elif operator == "greater_than":
-            return df.filter(df[column] > value)
+            return f"{column} > {fmt_val(value)}"
         elif operator == "greater_than_equals":
-            return df.filter(df[column] >= value)
+            return f"{column} >= {fmt_val(value)}"
         elif operator == "less_than":
-            return df.filter(df[column] < value)
+            return f"{column} < {fmt_val(value)}"
         elif operator == "less_than_equals":
-            return df.filter(df[column] <= value)
+            return f"{column} <= {fmt_val(value)}"
         elif operator == "contains":
-            return df.filter(df[column].contains(str(value)))
+            return f"CAST({column} AS VARCHAR) LIKE '%{value}%'"
         elif operator == "starts_with":
-            return df.filter(df[column].startswith(str(value)))
+            return f"CAST({column} AS VARCHAR) LIKE '{value}%'"
         elif operator == "ends_with":
-            return df.filter(df[column].endswith(str(value)))
+            return f"CAST({column} AS VARCHAR) LIKE '%{value}'"
         elif operator == "is_null":
-            return df.filter(df[column].isNull())
+            return f"{column} IS NULL"
         elif operator == "is_not_null":
-            return df.filter(df[column].isNotNull())
+            return f"{column} IS NOT NULL"
         elif operator == "in":
             if isinstance(value, list):
-                return df.filter(df[column].isin(value))
+                vals = ", ".join([fmt_val(v) for v in value])
+                return f"{column} IN ({vals})"
             else:
-                return df.filter(df[column].isin([value]))
+                return f"{column} IN ({fmt_val(value)})"
         else:
             logger.warning(f"Unsupported filter operator: {operator}")
-            return df
+            return None
     except Exception as e:
-        logger.error(f"Error applying filter: {str(e)}")
-        return df
+        logger.error(f"Error building filter: {str(e)}")
+        return None

@@ -46,3 +46,8 @@ async def create_schemas():
             await conn.execute(CreateSchema("delta_sharing", if_not_exists=True))
         except Exception as e:
             print(f"Error creating delta_sharing schema: {e}")
+
+        try:
+            await conn.execute(CreateSchema("datasets", if_not_exists=True))
+        except Exception as e:
+            print(f"Error creating datasets schema: {e}")

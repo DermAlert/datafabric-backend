@@ -4,9 +4,9 @@ from app.api.routes import delta
 import pyspark
 from delta import *
 
-s3a_endpoint = "http://localhost:9000"
-s3a_access_key = "XZ9o6ak31VXjCdi5vnzP"
-s3a_secret_key = "EtlkvsuwV3knSFOKF33YluEscECavGIgpKRD83Qp"
+s3a_endpoint = "http://minio:9000"
+s3a_access_key = "minio"
+s3a_secret_key = "minio123"
 
 builder = pyspark.sql.SparkSession.builder.appName("MyApp") \
     .config("spark.sql.extensions", "io.delta.sql.DeltaSparkSessionExtension") \
@@ -82,7 +82,8 @@ async def create_delta_on_minio():
     return [row.asDict() for row in df_male.collect()]
 
 #general minio read delta bucket, input bucket path
-@router.get("/read_delta_minio/{path}")
+#general minio read delta bucket, input bucket path
+@router.get("/read_delta_minio/{path:path}")
 async def read_delta_minio(path: str):
     """
     Read Delta table from MinIO bucket.

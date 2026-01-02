@@ -14,8 +14,9 @@ except ImportError:
     ASYNCPG_AVAILABLE = False
     asyncpg = None
 
+from .extractors.trino_extractor import TrinoExtractor
 from ..utils.logger import logger
-from .connectors.delta_connector import get_spark_session
+# from .connectors.delta_connector import get_spark_session
 
 
 class DistinctValuesService:
@@ -29,7 +30,8 @@ class DistinctValuesService:
         table_name: str,
         column_name: str,
         limit: int = 100,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        catalog_name: Optional[str] = None
     ) -> List[Any]:
         """
         Get distinct values for a column from any supported data source.
@@ -42,6 +44,7 @@ class DistinctValuesService:
             column_name: Column name
             limit: Maximum number of distinct values to return
             search: Optional search term to filter values (case insensitive partial match)
+            catalog_name: Catalog name (required for Delta Lake via Trino)
             
         Returns:
             List of distinct values
@@ -58,7 +61,7 @@ class DistinctValuesService:
             )
         elif connection_type_lower in ["deltalake", "delta"]:
             return await DistinctValuesService._get_delta_distinct_values(
-                connection_params, schema_name, table_name, column_name, limit, search
+                connection_params, schema_name, table_name, column_name, limit, search, catalog_name
             )
         else:
             raise ValueError(f"Unsupported connection type: {connection_type}")
@@ -127,60 +130,51 @@ class DistinctValuesService:
         table_name: str,
         column_name: str,
         limit: int,
-        search: Optional[str] = None
+        search: Optional[str] = None,
+        catalog_name: Optional[str] = None
     ) -> List[Any]:
-        """Get distinct values from Delta Lake."""
-        spark = None
+        """Get distinct values from Delta Lake using Trino."""
         try:
-            # Get Spark session
-            spark = get_spark_session(connection_params)
+            # Use TrinoExtractor to get connection
+            extractor = TrinoExtractor(
+                connection_params=connection_params,
+                connection_type="deltalake",
+                connection_name="distinct_values_query"
+            )
             
-            # Determine table path
-            bucket_name = connection_params.get('bucket_name')
+            # Use provided catalog_name or fall back to extractor's catalog
+            catalog = catalog_name if catalog_name else extractor.catalog
             
-            if schema_name == bucket_name:
-                # S3 bucket table
-                if table_name == bucket_name:
-                    table_path = f"s3a://{bucket_name}/"
-                else:
-                    table_path = f"s3a://{bucket_name}/{table_name}"
-            else:
-                # Database table
-                table_path = f"{schema_name}.{table_name}"
+            # Build query for Trino
+            query = f'SELECT DISTINCT "{column_name}" FROM "{catalog}"."{schema_name}"."{table_name}"'
             
-            # Read Delta table and get distinct values
-            df = spark.read.format("delta").load(table_path)
-            
-            # Apply search filter if provided
             if search:
-                # Add case-insensitive search filter
-                from pyspark.sql.functions import col, lower
-                df = df.filter(lower(col(column_name).cast("string")).contains(search.lower()))
+                # Trino LIKE is case-sensitive, use lower() for case-insensitive
+                # Prevent SQL injection by simple sanitization (basic, improvement needed for prod)
+                safe_search = search.replace("'", "''")
+                query += f' WHERE lower(cast("{column_name}" as varchar)) LIKE \'%{safe_search.lower()}%\''
             
-            # Get distinct values for the column
-            distinct_df = df.select(column_name).distinct().orderBy(column_name).limit(limit)
-            rows = distinct_df.collect()
+            query += f' ORDER BY "{column_name}" LIMIT {limit}'
+            
+            logger.debug(f"Executing Trino query: {query}")
+            
+            # Execute query using internal connection
+            conn = extractor._get_connection()
+            cur = conn.cursor()
+            cur.execute(query)
+            rows = cur.fetchall()
             
             # Extract values
             values = []
             for row in rows:
-                value = row[column_name]
-                # Convert complex types to string representation
-                if value is not None and not isinstance(value, (str, int, float, bool)):
-                    value = str(value)
-                values.append(value)
-            
+                values.append(row[0])
+                
             return values
             
         except Exception as e:
-            logger.error(f"Error fetching distinct values from Delta Lake: {str(e)}")
+            logger.error(f"Error fetching distinct values from Delta Lake via Trino: {str(e)}")
             raise Exception(f"Failed to fetch distinct values from Delta Lake: {str(e)}")
-        finally:
-            if spark:
-                try:
-                    spark.stop()
-                except Exception as e:
-                    logger.warning(f"Error stopping Spark session: {str(e)}")
+
     
     @staticmethod
     async def is_connection_type_supported(connection_type: str) -> bool:

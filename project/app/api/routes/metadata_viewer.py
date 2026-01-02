@@ -389,6 +389,15 @@ async def get_distinct_values_for_column(
                 detail=f"Schema com ID {table.schema_id} não encontrado"
             )
         
+        # Buscar o catalog (para Delta Lake via Trino)
+        catalog = None
+        if schema.catalog_id:
+            catalog_result = await db.execute(
+                select(metadata.ExternalCatalogs)
+                .where(metadata.ExternalCatalogs.id == schema.catalog_id)
+            )
+            catalog = catalog_result.scalars().first()
+        
         # Buscar a conexão
         conn_result = await db.execute(
             select(core.DataConnection)
@@ -430,6 +439,7 @@ async def get_distinct_values_for_column(
         schema_name = schema.schema_name
         table_name = table.table_name
         column_name = column.column_name
+        catalog_name = catalog.catalog_name if catalog else None
         
         values = await DistinctValuesService.get_distinct_values(
             connection_type=conn_type,
@@ -438,7 +448,8 @@ async def get_distinct_values_for_column(
             table_name=table_name,
             column_name=column_name,
             limit=limit,
-            search=search
+            search=search,
+            catalog_name=catalog_name
         )
         
         return {

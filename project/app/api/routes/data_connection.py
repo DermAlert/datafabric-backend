@@ -1,15 +1,20 @@
-from fastapi import APIRouter, Depends, status, BackgroundTasks
+from fastapi import APIRouter, Depends, status, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
+from datetime import datetime
+import logging
 from app.database.database import get_db
 from app.api.schemas.data_connection import (
     DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult, SearchDataConnection
 )
 from app.api.schemas.search import SearchResult
 from app.api.service.data_connection_service import DataConnectionService
+from fastapi import BackgroundTasks
 
 # router = APIRouter(prefix="/data-connections", tags=["data-connections"])
 router = APIRouter()
+
+logger = logging.getLogger(__name__)
 
 @router.post("/", response_model=DataConnectionResponse, status_code=status.HTTP_201_CREATED)
 async def create_data_connection(
@@ -74,4 +79,10 @@ async def trigger_metadata_sync(
     background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
 ):
-    return await DataConnectionService(db).sync(id, background_tasks)
+    """
+    Dispara sincronização de metadados.
+    O processamento é feito em background no próprio serviço.
+    """
+    # Validate connection exists and trigger sync
+    service = DataConnectionService(db)
+    return await service.sync(id, background_tasks)

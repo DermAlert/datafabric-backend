@@ -6,3 +6,5 @@ venv
 /data
 logs
 project/.venv
+trino/catalog/*
+register_connections.sh

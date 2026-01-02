@@ -1,5 +1,6 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 import logging
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime
@@ -10,27 +11,8 @@ from ..database.core import core
 from ..database.metadata import metadata
 from ..utils.logger import logger
 
-# Import specific extractors
-from .extractors.postgres_extractor import PostgresExtractor
-from .extractors.delta_extractor import DeltaExtractor
-# from .extractors.mongodb_extractor import MongoDBExtractor
-# from .extractors.minio_extractor import MinioExtractor
-# from .extractors.mysql_extractor import MySQLExtractor
-# from .extractors.bigquery_extractor import BigQueryExtractor
-
-# Map connection types to their extractors
-EXTRACTORS = {
-    "postgresql": PostgresExtractor,
-    "postgres": PostgresExtractor,
-    "deltalake": DeltaExtractor,
-    "delta": DeltaExtractor,
-    # "mongodb": MongoDBExtractor,
-    # "minio": MinioExtractor,
-    # "s3": MinioExtractor,
-    # "mysql": MySQLExtractor,
-    # "bigquery": BigQueryExtractor,
-    # Add more extractors as needed
-}
+# Import generic Trino extractor
+from .extractors.trino_extractor import TrinoExtractor
 
 async def extract_metadata(connection_id: int) -> bool:
     """
@@ -50,22 +32,14 @@ async def extract_metadata(connection_id: int) -> bool:
                     )
                 )
 
-                # Check if the result is not empty
-                if not result:
-                    logger.error(f"No connection found with ID (result) {connection_id}")
-                    return False
-
-
                 record = result.first()
                 
                 if not record:
-                    logger.error(f"No connection found with ID (record) {connection_id}")
+                    logger.error(f"No connection found with ID {connection_id}")
                     return False
                     
                 connection = record[0]  # DataConnection
-                print("connection", record[0])
                 connection_type = record[1]  # ConnectionType
-                print("connection_type", record[1])
                 
                 # Validate that connection is not of type IMAGE
                 if connection.content_type == 'image':
@@ -77,262 +51,198 @@ async def extract_metadata(connection_id: int) -> bool:
                 
                 # Update connection status
                 connection.sync_status = "running"
-                connection.last_sync_time = datetime.now()
                 await db.commit()
                 
-                # Get the appropriate extractor
-                extractor_class = EXTRACTORS.get(connection_type.name.lower())
-                if not extractor_class:
-                    logger.error(f"No extractor available for connection type {connection_type.name}")
-                    connection.sync_status = "failed"
-                    connection.status = "error"
-                    await db.commit()
-                    return False
+                logger.info(f"Starting metadata extraction for connection {connection.name} ({connection_type.name})")
                 
-                # Initialize extractor
-                extractor = extractor_class(connection.connection_params)
-                
-                # Extract metadata
+                # Use TrinoExtractor for all supported types
                 try:
-                    # Extract catalogs (for sources that support them)
+                    extractor = TrinoExtractor(
+                        connection_params=connection.connection_params,
+                        connection_type=connection_type.name,
+                        connection_name=connection.name,
+                        connection_id=connection.id  # Pass ID for unique catalog name
+                    )
+                    
+                    # Extract Catalogs (usually just the one we created)
                     catalogs = await extractor.extract_catalogs()
+                    
+                    # Map catalog_name -> catalog_id
                     catalog_map = {}
-                    
-                    for catalog_data in catalogs:
-                        catalog = await save_catalog(
-                            db, 
-                            connection_id=connection_id, 
-                            catalog_data=catalog_data
-                        )
-                        catalog_map[catalog_data.get("catalog_name")] = catalog.id
-                    
-                    # Extract schemas
-                    schemas = await extractor.extract_schemas()
-                    schema_map = {}
-                    
-                    for schema_data in schemas:
-                        catalog_id = None
-                        if schema_data.get("catalog_name") and schema_data["catalog_name"] in catalog_map:
-                            catalog_id = catalog_map[schema_data["catalog_name"]]
-                            
-                        schema = await save_schema(
-                            db,
-                            connection_id=connection_id,
-                            catalog_id=catalog_id,
-                            schema_data=schema_data
-                        )
-                        schema_map[schema_data.get("schema_name")] = schema.id
-                    
-                    # Extract tables and columns
-                    success = True
-                    for schema_name, schema_id in schema_map.items():
-                        tables = await extractor.extract_tables(schema_name)
-                        
-                        for table_data in tables:
-                            table = await save_table(
-                                db,
-                                schema_id=schema_id,
-                                connection_id=connection_id,
-                                table_data=table_data
-                            )
-                            
-                            # Extract columns for this table
-                            columns = await extractor.extract_columns(
-                                schema_name=schema_name,
-                                table_name=table_data.get("table_name")
-                            )
 
-                            print(f"Extracted columns for table {table_data.get('table_name')}: {columns}")
+                    for cat_info in catalogs:
+                        cat_name = cat_info["catalog_name"]
+                        stmt_cat = select(metadata.ExternalCatalogs).where(
+                            (metadata.ExternalCatalogs.connection_id == connection.id) &
+                            (metadata.ExternalCatalogs.catalog_name == cat_name)
+                        )
+                        existing_cat = (await db.execute(stmt_cat)).scalars().first()
+                        
+                        if existing_cat:
+                            cat_obj = existing_cat
+                            cat_obj.last_scanned = datetime.now()
+                        else:
+                            cat_obj = metadata.ExternalCatalogs(
+                                connection_id=connection.id,
+                                catalog_name=cat_name,
+                                catalog_type=cat_info.get("catalog_type"),
+                                external_reference=cat_info.get("external_reference"),
+                                properties=cat_info.get("properties", {})
+                            )
+                            db.add(cat_obj)
+                            await db.flush()
+                        
+                        catalog_map[cat_name] = cat_obj.id
+                    
+                    # Extract Schemas
+                    schemas = await extractor.extract_schemas()
+                    logger.info(f"Extracted {len(schemas)} schemas")
+                    
+                    # Store schemas and tables
+                    for schema_info in schemas:
+                        # Store Schema
+                        schema_name = schema_info["schema_name"]
+                        
+                        # Check if schema exists
+                        stmt = select(metadata.ExternalSchema).where(
+                            (metadata.ExternalSchema.connection_id == connection.id) &
+                            (metadata.ExternalSchema.schema_name == schema_name)
+                        )
+                        existing_schema = (await db.execute(stmt)).scalars().first()
+                        
+                        if existing_schema:
+                            schema_obj = existing_schema
+                            schema_obj.last_scanned = datetime.now()
+                        else:
+                            # Look up catalog_id
+                            catalog_name_extracted = schema_info.get("catalog_name")
+                            catalog_id = catalog_map.get(catalog_name_extracted)
                             
-                            for column_data in columns:
-                                await save_column(
-                                    db,
-                                    table_id=table.id,
-                                    column_data=column_data
+                            schema_obj = metadata.ExternalSchema(
+                                connection_id=connection.id,
+                                schema_name=schema_name,
+                                catalog_id=catalog_id,
+                                external_reference=schema_info.get("external_reference"),
+                                properties=schema_info.get("properties", {})
+                            )
+                            db.add(schema_obj)
+                            await db.flush() # Get ID
+                        
+                        # Extract Tables for this schema
+                        tables = await extractor.extract_tables(schema_name)
+                        logger.info(f"Extracted {len(tables)} tables for schema {schema_name}")
+                        
+                        for table_info in tables:
+                            table_name = table_info["table_name"]
+                            
+                            # Check if table exists
+                            stmt_table = select(metadata.ExternalTables).where(
+                                (metadata.ExternalTables.schema_id == schema_obj.id) &
+                                (func.lower(metadata.ExternalTables.table_name) == table_name.lower())
+                            )
+                            existing_table = (await db.execute(stmt_table)).scalars().first()
+                            
+                            if existing_table:
+                                table_obj = existing_table
+                                table_obj.last_scanned = datetime.now()
+                                table_obj.estimated_row_count = table_info.get("estimated_row_count")
+                                table_obj.total_size_bytes = table_info.get("total_size_bytes")
+                                # If extractor now returns canonical/mixed-case names, keep DB in sync
+                                table_obj.table_name = table_name
+                                table_obj.external_reference = table_info.get("external_reference")
+                            else:
+                                table_obj = metadata.ExternalTables(
+                                    schema_id=schema_obj.id,
+                                    connection_id=connection.id,
+                                    table_name=table_name,
+                                    external_reference=table_info.get("external_reference"),
+                                    table_type=table_info.get("table_type", "table"),
+                                    estimated_row_count=table_info.get("estimated_row_count"),
+                                    total_size_bytes=table_info.get("total_size_bytes"),
+                                    description=table_info.get("description"),
+                                    properties=table_info.get("properties", {})
                                 )
-                    
-                    # Update connection status
+                                db.add(table_obj)
+                                await db.flush()
+                            
+                            # Extract Columns
+                            columns = await extractor.extract_columns(schema_name, table_name)
+                            
+                            # Update columns
+                            # For simplicity, we might want to delete existing and recreate, or update
+                            # Here we'll update/insert
+                            existing_col_names = set()
+                            if existing_table:
+                                stmt_cols = select(metadata.ExternalColumn).where(metadata.ExternalColumn.table_id == table_obj.id)
+                                existing_cols = (await db.execute(stmt_cols)).scalars().all()
+                                existing_col_names = {c.column_name: c for c in existing_cols}
+                            
+                            for col_info in columns:
+                                col_name = col_info["column_name"]
+                                
+                                if col_name in existing_col_names:
+                                    col_obj = existing_col_names[col_name]
+                                    col_obj.data_type = col_info["data_type"]
+                                    col_obj.is_nullable = col_info["is_nullable"]
+                                    col_obj.column_position = col_info.get("column_position", col_obj.column_position)
+                                    col_obj.external_reference = col_info.get("external_reference")
+                                    col_obj.sample_values = col_info.get("sample_values", [])
+                                    col_obj.max_length = col_info.get("max_length")
+                                    col_obj.numeric_precision = col_info.get("numeric_precision")
+                                    col_obj.numeric_scale = col_info.get("numeric_scale")
+                                    col_obj.is_primary_key = col_info.get("is_primary_key", False)
+                                    col_obj.is_unique = col_info.get("is_unique", False)
+                                    col_obj.is_indexed = col_info.get("is_indexed", False)
+                                    col_obj.default_value = col_info.get("default_value")
+                                    col_obj.description = col_info.get("description")
+                                    col_obj.statistics = col_info.get("statistics", {})
+                                    col_obj.properties = col_info.get("properties", {})
+                                else:
+                                    col_obj = metadata.ExternalColumn(
+                                        table_id=table_obj.id,
+                                        column_name=col_name,
+                                        external_reference=col_info.get("external_reference"),
+                                        data_type=col_info["data_type"],
+                                        is_nullable=col_info["is_nullable"],
+                                        column_position=col_info["column_position"],
+                                        max_length=col_info.get("max_length"),
+                                        numeric_precision=col_info.get("numeric_precision"),
+                                        numeric_scale=col_info.get("numeric_scale"),
+                                        is_primary_key=col_info.get("is_primary_key", False),
+                                        is_unique=col_info.get("is_unique", False),
+                                        is_indexed=col_info.get("is_indexed", False),
+                                        default_value=col_info.get("default_value"),
+                                        description=col_info.get("description"),
+                                        statistics=col_info.get("statistics", {}),
+                                        sample_values=col_info.get("sample_values", []),
+                                        properties=col_info.get("properties", {})
+                                    )
+                                    db.add(col_obj)
+                            
                     connection.sync_status = "success"
-                    connection.status = "active"
                     connection.last_sync_time = datetime.now()
-                    # Calculate next sync time based on cron expression if provided
-                    # This would require a cron parser library
-                    
+                    connection.status = "active"
                     await db.commit()
+                    logger.info(f"Metadata extraction completed successfully for {connection.name}")
                     return True
                     
-                except Exception as e:
-                    logger.error(f"Error extracting metadata for connection {connection_id}: {str(e)}")
+                except Exception as ext_error:
+                    logger.error(f"Error during extraction logic: {str(ext_error)}")
                     connection.sync_status = "failed"
                     connection.status = "error"
                     await db.commit()
                     return False
-                
+                finally:
+                    if 'extractor' in locals():
+                        await extractor.close()
+
             except Exception as e:
-                logger.error(f"Error in extract_metadata for connection {connection_id}: {str(e)}")
-                await db.rollback()
+                logger.error(f"Database error during metadata extraction: {str(e)}")
+                if 'connection' in locals():
+                     connection.sync_status = "failed"
+                     await db.commit()
                 return False
+                
     except Exception as e:
-        logger.error(f"Failed to create session for metadata extraction: {str(e)}")
+        logger.error(f"Fatal error in extract_metadata: {str(e)}")
         return False
-
-async def save_catalog(
-    db: AsyncSession, 
-    connection_id: int, 
-    catalog_data: Dict[str, Any]
-) -> metadata.ExternalCatalogs:
-    """
-    Save a catalog to the database, update if it already exists.
-    """
-    result = await db.execute(
-        select(metadata.ExternalCatalogs).where(
-            (metadata.ExternalCatalogs.connection_id == connection_id) &
-            (metadata.ExternalCatalogs.catalog_name == catalog_data.get("catalog_name"))
-        )
-    )
-    catalog = result.scalars().first()
-    
-    if catalog:
-        # Update existing catalog
-        for key, value in catalog_data.items():
-            if key != "catalog_id" and hasattr(catalog, key):
-                setattr(catalog, key, value)
-    else:
-        # Create new catalog
-        catalog = metadata.ExternalCatalogs(
-            connection_id=connection_id,
-            catalog_name=catalog_data.get("catalog_name"),
-            catalog_type=catalog_data.get("catalog_type"),
-            external_reference=catalog_data.get("external_reference"),
-            properties=catalog_data.get("properties", {})
-        )
-        db.add(catalog)
-    
-    await db.flush()
-    return catalog
-
-async def save_schema(
-    db: AsyncSession, 
-    connection_id: int, 
-    catalog_id: Optional[int],
-    schema_data: Dict[str, Any]
-) -> metadata.ExternalSchema:
-    """
-    Save a schema to the database, update if it already exists.
-    """
-    result = await db.execute(
-        select(metadata.ExternalSchema).where(
-            (metadata.ExternalSchema.connection_id == connection_id) &
-            (metadata.ExternalSchema.schema_name == schema_data.get("schema_name"))
-        )
-    )
-    schema = result.scalars().first()
-    
-    if schema:
-        # Update existing schema
-        for key, value in schema_data.items():
-            if key not in ["schema_id", "catalog_name"] and hasattr(schema, key):
-                setattr(schema, key, value)
-        
-        schema.catalog_id = catalog_id
-    else:
-        # Create new schema
-        schema = metadata.ExternalSchema(
-            connection_id=connection_id,
-            catalog_id=catalog_id,
-            schema_name=schema_data.get("schema_name"),
-            external_reference=schema_data.get("external_reference"),
-            properties=schema_data.get("properties", {})
-        )
-        db.add(schema)
-    
-    await db.flush()
-    return schema
-
-async def save_table(
-    db: AsyncSession, 
-    schema_id: int,
-    connection_id: int,
-    table_data: Dict[str, Any]
-) -> metadata.ExternalTables:
-    """
-    Save a table to the database, update if it already exists.
-    """
-    result = await db.execute(
-        select(metadata.ExternalTables).where(
-            (metadata.ExternalTables.schema_id == schema_id) &
-            (metadata.ExternalTables.table_name == table_data.get("table_name"))
-        )
-    )
-    table = result.scalars().first()
-    
-    if table:
-        # Update existing table
-        for key, value in table_data.items():
-            if key != "table_id" and hasattr(table, key):
-                setattr(table, key, value)
-    else:
-        # Create new table
-        table = metadata.ExternalTables(
-            schema_id=schema_id,
-            connection_id=connection_id,
-            table_name=table_data.get("table_name"),
-            external_reference=table_data.get("external_reference"),
-            table_type=table_data.get("table_type", "table"),
-            estimated_row_count=table_data.get("estimated_row_count"),
-            total_size_bytes=table_data.get("total_size_bytes"),
-            last_analyzed=table_data.get("last_analyzed"),
-            properties=table_data.get("properties", {}),
-            description=table_data.get("description")
-        )
-        db.add(table)
-    
-    await db.flush()
-    return table
-
-async def save_column(
-    db: AsyncSession, 
-    table_id: int,
-    column_data: Dict[str, Any]
-) -> metadata.ExternalColumn:
-    """
-    Save a column to the database, update if it already exists.
-    """
-    result = await db.execute(
-        select(metadata.ExternalColumn).where(
-            (metadata.ExternalColumn.table_id == table_id) &
-            (metadata.ExternalColumn.column_name == column_data.get("column_name"))
-        )
-    )
-    column = result.scalars().first()
-    
-    if column:
-        # Update existing column
-        for key, value in column_data.items():
-            if key != "column_id" and hasattr(column, key):
-                setattr(column, key, value)
-    else:
-        # Create new column
-        column = metadata.ExternalColumn(
-            table_id=table_id,
-            column_name=column_data.get("column_name"),
-            external_reference=column_data.get("external_reference"),
-            data_type=column_data.get("data_type", "unknown"),
-            is_nullable=column_data.get("is_nullable", True),
-            column_position=column_data.get("column_position", 0),
-            max_length=column_data.get("max_length"),
-            numeric_precision=column_data.get("numeric_precision"),
-            numeric_scale=column_data.get("numeric_scale"),
-            is_primary_key=column_data.get("is_primary_key", False),
-            is_unique=column_data.get("is_unique", False),
-            is_indexed=column_data.get("is_indexed", False),
-            default_value=column_data.get("default_value"),
-            description=column_data.get("description"),
-            statistics=column_data.get("statistics", {}),
-            sample_values=column_data.get("sample_values", []),
-            properties=column_data.get("properties", {})
-        )
-        db.add(column)
-    
-    await db.flush()
-    return column

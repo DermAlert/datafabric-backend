@@ -16,9 +16,6 @@ import logging
 logger = logging.getLogger(__name__)
 
 from .connectors.minio_connector import test_minio_connection
-from .connectors.delta_connector import test_delta_connection
-
-
 class DatasetMinioService:
     """Service for managing dataset exports to MinIO with Delta Lake metadata"""
     
@@ -77,28 +74,12 @@ class DatasetMinioService:
                 .config("spark.hadoop.fs.s3a.path.style.access", "true") \
                 .config("spark.hadoop.fs.s3a.connection.ssl.enabled", str(self.minio_config.get('secure', False)).lower()) \
                 .config("spark.hadoop.fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem") \
-                # .config("spark.hadoop.fs.s3a.fast.upload", "true") \
-                # .config("spark.hadoop.fs.s3a.block.size", "32M") \
-                # .config("spark.hadoop.fs.s3a.multipart.size", "16M") \
-                # .config("spark.hadoop.fs.s3a.multipart.threshold", "32M") \
-                # .config("spark.hadoop.fs.s3a.committer.name", "file") \
-                # .config("spark.sql.adaptive.enabled", "true") \
-                # .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
-                # .config("spark.executor.memory", "512m") \
-                # .config("spark.driver.memory", "256m") \
-                # .config("spark.executor.cores", "1") \
-                # .config("spark.executor.instances", "1") \
-                # .config("spark.sql.adaptive.maxShuffledHashJoinLocalMapThreshold", "20MB") \
-                # .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer") \
-                # .config("spark.sql.execution.arrow.pyspark.enabled", "false")
             
             packages = [
-                "io.delta:delta-spark_2.12:3.2.0",
-                "org.apache.hadoop:hadoop-aws:3.3.4"
+                "org.apache.hadoop:hadoop-aws:3.4.0",
+                "io.delta:delta-spark_2.13:4.0.0",
             ]
-            
-            builder = builder.config("spark.jars.packages", ",".join(packages))
-            spark = configure_spark_with_delta_pip(builder).getOrCreate()
+            spark = configure_spark_with_delta_pip(builder, extra_packages=packages).getOrCreate()
             
             # Set log level to reduce noise
             spark.sparkContext.setLogLevel("WARN")
@@ -194,6 +175,32 @@ class DatasetMinioService:
             
         except Exception as e:
             logger.error(f"Failed to export dataset {dataset_id} with real data to Delta Lake: {e}")
+            raise
+
+    async def export_dataset_metadata_only(
+        self, 
+        dataset_id: int, 
+        bucket_name: str, 
+        dataset_metadata: Dict[str, Any],
+        columns_metadata: List[Dict[str, Any]],
+        sources_metadata: List[Dict[str, Any]]
+    ) -> str:
+        """
+        Export only dataset metadata to Delta Lake.
+        Used when data is populated via other means (e.g., Trino CTAS).
+        """
+        try:
+            # Export metadata 
+            await self._export_metadata_to_delta(dataset_id, bucket_name, dataset_metadata, columns_metadata, sources_metadata)
+            
+            # Return the expected data path
+            data_path = f"s3a://{bucket_name}/data/unified_data"
+            
+            logger.info(f"Exported metadata for dataset {dataset_id} to Delta Lake (data populated externally)")
+            return data_path
+            
+        except Exception as e:
+            logger.error(f"Failed to export metadata for dataset {dataset_id}: {e}")
             raise
 
     async def export_dataset_metadata_to_delta(
