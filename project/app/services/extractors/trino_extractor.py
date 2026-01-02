@@ -436,7 +436,7 @@ class TrinoExtractor:
                     ORDER BY ordinal_position
                 """
                 cur.execute(query_ci)
-            rows = cur.fetchall()
+                rows = cur.fetchall()
             
             columns = []
             for row in rows:
