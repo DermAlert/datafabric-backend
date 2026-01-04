@@ -76,13 +76,13 @@ async def test_data_connection(
 @router.post("/{id}/sync", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_metadata_sync(
     id: int,
-    background_tasks: BackgroundTasks,
+    background_tasks: BackgroundTasks = None,
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Dispara sincronização de metadados.
-    O processamento é feito em background no próprio serviço.
+    Dispara sincronização de metadados via Airflow.
+    
+    Se já existe um sync em andamento (status 'running' ou 'pending'), retorna erro 409.
     """
-    # Validate connection exists and trigger sync
     service = DataConnectionService(db)
     return await service.sync(id, background_tasks)

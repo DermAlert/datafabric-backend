@@ -30,7 +30,7 @@ RUN poetry config virtualenvs.create false
 RUN pip install fastapi uvicorn sqlalchemy asyncpg httpx pandas minio
 
 # Install additional Spark dependencies
-RUN pip install pyspark==4.0.0 delta-spark==4.0.0 trino>=0.330.0
+RUN pip install pyspark==4.0.0 delta-spark==4.0.0 aiotrino>=0.3.0
 
 # Copy service code
 COPY . .

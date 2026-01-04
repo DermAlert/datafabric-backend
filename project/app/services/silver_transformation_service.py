@@ -945,14 +945,19 @@ class SilverTransformationService:
         if offset > 0:
             sql_with_limit += f" OFFSET {offset}"
         
-        # Execute
+        # Execute (async with aiotrino)
         try:
-            conn = self.trino.get_connection()
-            cur = conn.cursor()
-            cur.execute(sql_with_limit)
+            conn = await self.trino.get_connection()
+            cur = await conn.cursor()
+            await cur.execute(sql_with_limit)
             
-            rows = cur.fetchall()
-            result_columns = [desc[0] for desc in cur.description] if cur.description else columns
+            rows = await cur.fetchall()
+            
+            # Get column names from aiotrino cursor using get_description() method
+            result_columns = columns  # Use pre-computed columns as default
+            description = await cur.get_description() if hasattr(cur, 'get_description') else None
+            if description:
+                result_columns = [col.name if hasattr(col, 'name') else (col.get('name') if isinstance(col, dict) else col[0]) for col in description]
             
             data = []
             for row in rows:
@@ -964,7 +969,7 @@ class SilverTransformationService:
                     row_dict[col_name] = value
                 data.append(row_dict)
             
-            conn.close()
+            await conn.close()
             
             execution_time = (datetime.now() - start_time).total_seconds()
             

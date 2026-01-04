@@ -42,6 +42,8 @@ class DataConnectionResponse(DataConnectionBase):
     content_type: ContentType
     status: str
     sync_status: str
+    sync_progress: int = 0  # 0-100 percentage
+    sync_progress_details: Optional[Dict[str, Any]] = None  # {phase, current_item, total_items, message}
     last_sync_time: Optional[datetime] = None
     next_sync_time: Optional[datetime] = None
     

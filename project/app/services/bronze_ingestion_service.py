@@ -109,15 +109,25 @@ class BronzeIngestionService:
         except Exception as e:
             logger.warning(f"Could not ensure bronze bucket exists: {e}")
     
-    def _ensure_bronze_schema(self):
-        """Create the bronze schema in Trino if it doesn't exist"""
+    async def _ensure_bronze_schema_async(self):
+        """Create the bronze schema in Trino if it doesn't exist (async)"""
         try:
-            conn = self.trino.get_connection()
-            cur = conn.cursor()
+            conn = await self.trino.get_connection()
+            cur = await conn.cursor()
+            
+            # First check if bronze catalog exists
+            await cur.execute(f"SHOW CATALOGS LIKE '{self.bronze_catalog}'")
+            catalogs = await cur.fetchall()
+            
+            if not catalogs:
+                logger.error(f"Bronze catalog '{self.bronze_catalog}' does not exist in Trino! "
+                            f"Make sure bronze.properties is configured in trino/catalog/")
+                await conn.close()
+                return
             
             # Check if schema exists
-            cur.execute(f"SHOW SCHEMAS FROM {self.bronze_catalog} LIKE '{self.bronze_schema}'")
-            schemas = cur.fetchall()
+            await cur.execute(f"SHOW SCHEMAS FROM {self.bronze_catalog} LIKE '{self.bronze_schema}'")
+            schemas = await cur.fetchall()
             
             if not schemas:
                 # Create schema with location pointing to bronze bucket
@@ -125,14 +135,28 @@ class BronzeIngestionService:
                     CREATE SCHEMA IF NOT EXISTS {self.bronze_catalog}.{self.bronze_schema}
                     WITH (location = 's3a://{self.bronze_bucket}/')
                 """
-                cur.execute(create_schema_sql)
+                logger.info(f"Creating bronze schema with SQL: {create_schema_sql}")
+                await cur.execute(create_schema_sql)
+                await cur.fetchall()  # Consume result
                 logger.info(f"Created bronze schema: {self.bronze_catalog}.{self.bronze_schema}")
             else:
                 logger.debug(f"Bronze schema already exists: {self.bronze_catalog}.{self.bronze_schema}")
             
-            conn.close()
+            await conn.close()
         except Exception as e:
-            logger.warning(f"Could not ensure bronze schema exists: {e}")
+            logger.error(f"Failed to ensure bronze schema exists: {e}")
+    
+    def _ensure_bronze_schema(self):
+        """Sync wrapper for _ensure_bronze_schema_async (called at init)"""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            # Already in async context - skip sync init, will be done on first use
+            self._bronze_schema_ensured = False
+        except RuntimeError:
+            # No running loop - safe to run
+            asyncio.run(self._ensure_bronze_schema_async())
+            self._bronze_schema_ensured = True
     
     def _get_dataset_folder_name(self, dataset_name: str, dataset_id: Optional[int] = None) -> str:
         """
@@ -1253,6 +1277,11 @@ FROM {from_clause}
         
         Creates a table in the bronze catalog pointing to MinIO.
         """
+        # Ensure bronze schema exists before ingestion
+        if not getattr(self, '_bronze_schema_ensured', False):
+            await self._ensure_bronze_schema_async()
+            self._bronze_schema_ensured = True
+        
         # Extract table name from output path
         # e.g., "s3a://datafabric-bronze/my_dataset/part_postgres/" -> "my_dataset_part_postgres"
         path_parts = output_path.rstrip('/').split('/')
@@ -1274,16 +1303,17 @@ AS
         logger.info(f"Executing Bronze ingestion SQL:\n{create_sql}")
         
         try:
-            conn = self.trino.get_connection()
-            cur = conn.cursor()
-            cur.execute(create_sql)
+            conn = await self.trino.get_connection()
+            cur = await conn.cursor()
+            await cur.execute(create_sql)
+            await cur.fetchall()  # Consume result
             
             # Get row count
-            cur.execute(f'SELECT COUNT(*) FROM "{self.bronze_catalog}"."{self.bronze_schema}"."{table_name}"')
-            result = cur.fetchone()
+            await cur.execute(f'SELECT COUNT(*) FROM "{self.bronze_catalog}"."{self.bronze_schema}"."{table_name}"')
+            result = await cur.fetchone()
             rows_ingested = result[0] if result else 0
             
-            conn.close()
+            await conn.close()
             return rows_ingested
             
         except Exception as e:
@@ -1437,19 +1467,19 @@ AS
                     
                     logger.info(f"Processing image column: {table_name}.{column_name}")
                     
-                    # Read Bronze Delta table using Trino
+                    # Read Bronze Delta table using Trino (async)
                     # Find all tables in Bronze schema that might contain this data
-                    conn = self.trino.get_connection()
-                    cur = conn.cursor()
+                    conn = await self.trino.get_connection()
+                    cur = await conn.cursor()
                     
                     # List all tables in Bronze schema
                     try:
-                        cur.execute(f'SHOW TABLES FROM "{self.bronze_catalog}"."{self.bronze_schema}"')
-                        bronze_tables = [row[0] for row in cur.fetchall()]
+                        await cur.execute(f'SHOW TABLES FROM "{self.bronze_catalog}"."{self.bronze_schema}"')
+                        bronze_tables = [row[0] for row in await cur.fetchall()]
                         logger.debug(f"Found {len(bronze_tables)} tables in Bronze schema")
                     except Exception as list_error:
                         logger.warning(f"Could not list Bronze tables: {list_error}")
-                        conn.close()
+                        await conn.close()
                         continue
                     
                     # Try to find the table containing this column
@@ -1463,8 +1493,8 @@ AS
                                 WHERE "{column_name}" IS NOT NULL
                                 LIMIT 1000
                             """
-                            cur.execute(query)
-                            paths = cur.fetchall()
+                            await cur.execute(query)
+                            paths = await cur.fetchall()
                             if paths:
                                 image_paths.extend(paths)
                                 logger.info(f"Found {len(paths)} image paths in table {bronze_table}")
@@ -1473,7 +1503,7 @@ AS
                             # Column doesn't exist in this table, try next
                             continue
                     
-                    conn.close()
+                    await conn.close()
                     
                     if not image_paths:
                         logger.info(f"No image paths found in {table_name}.{column_name}")
@@ -1894,31 +1924,32 @@ AS
             Tuple of (data as list of dicts, column names)
         """
         try:
-            conn = self.trino.get_connection()
-            cur = conn.cursor()
+            conn = await self.trino.get_connection()
+            cur = await conn.cursor()
             
             logger.info(f"Executing virtualized query:\n{select_sql}")
-            cur.execute(select_sql)
+            await cur.execute(select_sql)
             
-            # Get column names from cursor description
-            columns = [desc[0] for desc in cur.description] if cur.description else []
+            # Fetch all rows first
+            rows = await cur.fetchall()
             
-            # Fetch all rows
-            rows = cur.fetchall()
+            # Get column names from aiotrino cursor using get_description() method
+            description = await cur.get_description()
+            columns = [col.name if hasattr(col, 'name') else (col.get('name') if isinstance(col, dict) else col[0]) for col in description]
             
             # Convert to list of dicts
             data = []
             for row in rows:
                 row_dict = {}
-                for i, col_name in enumerate(columns):
-                    value = row[i]
+                for i, value in enumerate(row):
+                    col_name = columns[i] if i < len(columns) else f'col_{i}'
                     # Convert non-serializable types to string
                     if value is not None and not isinstance(value, (str, int, float, bool, list, dict)):
                         value = str(value)
                     row_dict[col_name] = value
                 data.append(row_dict)
             
-            conn.close()
+            await conn.close()
             return data, columns
             
         except Exception as e:

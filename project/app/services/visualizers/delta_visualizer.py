@@ -1,5 +1,4 @@
 from typing import Dict, Any, List, Tuple, Optional
-import asyncio
 
 from ..extractors.trino_extractor import TrinoExtractor
 from ...utils.logger import logger
@@ -19,7 +18,7 @@ async def visualize_delta_data(
 ) -> Tuple[int, List[List[Any]], List[str]]:
     """
     Get virtualized data from a Delta Lake table with pagination, filtering, and sorting.
-    Using Trino as the query engine.
+    Using Trino as the query engine (async with aiotrino).
     """
     try:
         # Use TrinoExtractor to setup connection
@@ -56,10 +55,12 @@ async def visualize_delta_data(
         # Get total count
         count_query = f'SELECT count(*) {base_query} {where_clause}'
         
-        conn = extractor._get_connection()
-        cur = conn.cursor()
-        cur.execute(count_query)
-        total_count = cur.fetchone()[0]
+        # Use async connection (aiotrino)
+        conn = await extractor._get_connection()
+        cur = await conn.cursor()
+        await cur.execute(count_query)
+        result = await cur.fetchone()
+        total_count = result[0]
         
         # Build final data query
         query = f'SELECT {select_clause} {base_query} {where_clause}'
@@ -79,11 +80,16 @@ async def visualize_delta_data(
         query += f" OFFSET {offset} LIMIT {page_size}"
         
         # Execute data query
-        cur.execute(query)
-        rows = cur.fetchall()
+        await cur.execute(query)
+        rows = await cur.fetchall()
         
-        # Get column names
-        column_names = [desc[0] for desc in cur.description] if cur.description else []
+        # Get column names from aiotrino cursor using get_description() method
+        column_names = []
+        description = await cur.get_description() if hasattr(cur, 'get_description') else None
+        if description:
+            column_names = [col.name if hasattr(col, 'name') else (col.get('name') if isinstance(col, dict) else col[0]) for col in description]
+        elif selected_columns:
+            column_names = selected_columns
         
         # Convert rows to list of lists and handle types
         formatted_rows = []
@@ -95,7 +101,8 @@ async def visualize_delta_data(
                 else:
                     row_data.append(val)
             formatted_rows.append(row_data)
-            
+        
+        await conn.close()
         return total_count, formatted_rows, column_names
         
     except Exception as e:
@@ -109,7 +116,7 @@ async def execute_delta_query(
     max_rows: int = 1000
 ) -> Tuple[List[List[Any]], List[str]]:
     """
-    Execute a custom SQL query on Delta Lake via Trino.
+    Execute a custom SQL query on Delta Lake via Trino (async with aiotrino).
     """
     try:
         # Use TrinoExtractor to setup connection
@@ -124,17 +131,21 @@ async def execute_delta_query(
         # If the query assumes a specific catalog name that differs from our dynamic one, this might fail.
         # ideally we should inject the catalog name.
         
-        conn = extractor._get_connection()
-        cur = conn.cursor()
+        conn = await extractor._get_connection()
+        cur = await conn.cursor()
         
         # Limit results if not present
         if "limit" not in query.lower():
             query += f" LIMIT {max_rows}"
             
-        cur.execute(query)
-        rows = cur.fetchall()
+        await cur.execute(query)
+        rows = await cur.fetchall()
         
-        column_names = [desc[0] for desc in cur.description] if cur.description else []
+        # Get column names from aiotrino cursor using get_description() method
+        column_names = []
+        description = await cur.get_description() if hasattr(cur, 'get_description') else None
+        if description:
+            column_names = [col.name if hasattr(col, 'name') else (col.get('name') if isinstance(col, dict) else col[0]) for col in description]
         
         formatted_rows = []
         for row in rows:
@@ -145,7 +156,8 @@ async def execute_delta_query(
                 else:
                     row_data.append(val)
             formatted_rows.append(row_data)
-            
+        
+        await conn.close()
         return formatted_rows, column_names
         
     except Exception as e:

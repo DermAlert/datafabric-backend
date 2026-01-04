@@ -133,7 +133,7 @@ class DistinctValuesService:
         search: Optional[str] = None,
         catalog_name: Optional[str] = None
     ) -> List[Any]:
-        """Get distinct values from Delta Lake using Trino."""
+        """Get distinct values from Delta Lake using Trino (async with aiotrino)."""
         try:
             # Use TrinoExtractor to get connection
             extractor = TrinoExtractor(
@@ -158,17 +158,18 @@ class DistinctValuesService:
             
             logger.debug(f"Executing Trino query: {query}")
             
-            # Execute query using internal connection
-            conn = extractor._get_connection()
-            cur = conn.cursor()
-            cur.execute(query)
-            rows = cur.fetchall()
+            # Execute query using async connection (aiotrino)
+            conn = await extractor._get_connection()
+            cur = await conn.cursor()
+            await cur.execute(query)
+            rows = await cur.fetchall()
             
             # Extract values
             values = []
             for row in rows:
                 values.append(row[0])
-                
+            
+            await conn.close()
             return values
             
         except Exception as e:
