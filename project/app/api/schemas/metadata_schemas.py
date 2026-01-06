@@ -60,6 +60,13 @@ class ColumnResponse(BaseModel):
     is_primary_key: bool
     is_unique: bool
     is_indexed: bool
+    
+    # Foreign Key metadata
+    is_foreign_key: bool = False
+    fk_referenced_table_id: Optional[int] = None
+    fk_referenced_column_id: Optional[int] = None
+    fk_constraint_name: Optional[str] = None
+    
     default_value: Optional[str] = None
     description: Optional[str] = None
     statistics: Dict[str, Any]
@@ -115,6 +122,60 @@ class BulkUpdateFlAtivoResponse(BaseModel):
     updated_count: int
     updated_ids: List[int]
     fl_ativo: bool
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+
+# ============================================================================
+# CONSTRAINT EXTRACTION SCHEMAS
+# ============================================================================
+
+class ConstraintExtractionRequest(BaseModel):
+    """Request to extract PK/FK constraints for a connection."""
+    schemas: Optional[List[str]] = None  # If None, extracts from all schemas
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [{
+                "schemas": ["public", "defaultdb"]
+            }]
+        }
+    }
+
+class ConstraintExtractionResponse(BaseModel):
+    """Response from constraint extraction."""
+    connection_id: int
+    catalog: str
+    db_type: str
+    schemas_processed: List[str]
+    primary_keys_found: int
+    foreign_keys_found: int
+    errors: List[Dict[str, Any]]
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+class TableCardinalityInfo(BaseModel):
+    """Information about PK/FK structure for cardinality inference."""
+    table_id: int
+    primary_keys: List[Dict[str, Any]]
+    foreign_keys: List[Dict[str, Any]]
+    has_composite_pk: bool
+    fk_count: int
+    
+    model_config = {
+        "from_attributes": True
+    }
+
+class JoinCardinalityResponse(BaseModel):
+    """Inferred cardinality between two tables."""
+    left_table_id: int
+    right_table_id: int
+    join_column_name: str
+    cardinality: str  # ONE_TO_ONE, ONE_TO_MANY, MANY_TO_ONE, MANY_TO_MANY
     
     model_config = {
         "from_attributes": True

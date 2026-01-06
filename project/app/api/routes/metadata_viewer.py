@@ -19,10 +19,16 @@ from ..schemas.metadata_schemas import (
     UpdateFlAtivoRequest,
     BulkUpdateFlAtivoRequest,
     UpdateFlAtivoResponse,
-    BulkUpdateFlAtivoResponse
+    BulkUpdateFlAtivoResponse,
+    ConstraintExtractionRequest,
+    ConstraintExtractionResponse,
+    TableCardinalityInfo,
+    JoinCardinalityResponse
 )
 # from ...services.data_preview import get_data_preview
 from ...services.distinct_values_service import DistinctValuesService
+from ...services.constraint_extraction_service import ConstraintExtractionService
+from ...services.trino_client import get_trino_client
 
 router = APIRouter()
 
@@ -228,6 +234,10 @@ async def list_columns(
                 is_nullable=col.is_nullable,
                 is_primary_key=col.is_primary_key,
                 is_unique=col.is_unique,
+                is_foreign_key=getattr(col, 'is_foreign_key', False),
+                fk_referenced_table_id=getattr(col, 'fk_referenced_table_id', None),
+                fk_referenced_column_id=getattr(col, 'fk_referenced_column_id', None),
+                fk_constraint_name=getattr(col, 'fk_constraint_name', None),
                 properties=col.properties,
                 is_indexed=getattr(col, 'is_indexed', False),
                 statistics=getattr(col, 'statistics', {}),
@@ -301,6 +311,10 @@ async def get_table_details(
                 is_nullable=col.is_nullable,
                 is_primary_key=col.is_primary_key,
                 is_unique=col.is_unique,
+                is_foreign_key=getattr(col, 'is_foreign_key', False),
+                fk_referenced_table_id=getattr(col, 'fk_referenced_table_id', None),
+                fk_referenced_column_id=getattr(col, 'fk_referenced_column_id', None),
+                fk_constraint_name=getattr(col, 'fk_constraint_name', None),
                 properties=col.properties,
                 # Adding the missing required fields
                 is_indexed=getattr(col, 'is_indexed', False),  # Default to False if not available
@@ -1007,4 +1021,154 @@ async def update_column_fl_ativo(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to update column fl_ativo: {str(e)}"
+        )
+
+
+# ============================================================================
+# CONSTRAINT EXTRACTION ENDPOINTS (PK/FK)
+# ============================================================================
+
+@router.post(
+    "/connections/{connection_id}/extract-constraints",
+    response_model=ConstraintExtractionResponse,
+    summary="Extract PK/FK Constraints",
+    description="""
+    Extract Primary Key and Foreign Key metadata from a database via Trino query passthrough.
+    
+    **Supported databases:**
+    - MySQL / MariaDB
+    - PostgreSQL
+    - SQL Server (experimental)
+    
+    **What it does:**
+    1. Queries the source database's information_schema
+    2. Identifies PRIMARY KEY and FOREIGN KEY constraints
+    3. Updates metadata.external_columns with:
+       - `is_primary_key`: True if column is a PK
+       - `is_foreign_key`: True if column is a FK
+       - `fk_referenced_table_id`: ID of the referenced table
+       - `fk_referenced_column_id`: ID of the referenced column
+       - `fk_constraint_name`: Name of the FK constraint
+    
+    **Use case:**
+    This information enables automatic detection of 1:N relationships for JOIN aggregation in the Silver layer.
+    """
+)
+async def extract_constraints(
+    connection_id: int,
+    request: ConstraintExtractionRequest = ConstraintExtractionRequest(),
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Extract PK/FK constraints from a database connection.
+    """
+    try:
+        trino_client = await get_trino_client()
+        service = ConstraintExtractionService(trino_client, db)
+        
+        result = await service.extract_constraints_for_connection(
+            connection_id=connection_id,
+            schemas=request.schemas
+        )
+        
+        if result.get("status") == "unsupported":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Database type '{result.get('db_type')}' is not supported for constraint extraction"
+            )
+        
+        return ConstraintExtractionResponse(**result)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to extract constraints: {str(e)}"
+        )
+
+
+@router.get(
+    "/tables/{table_id}/cardinality-info",
+    response_model=TableCardinalityInfo,
+    summary="Get Table Cardinality Info",
+    description="""
+    Get PK/FK information for a table to help determine JOIN cardinality.
+    
+    Returns:
+    - List of primary key columns
+    - List of foreign key columns with their references
+    - Whether the table has a composite primary key
+    """
+)
+async def get_table_cardinality_info(
+    table_id: int,
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Get cardinality information for a specific table.
+    """
+    try:
+        trino_client = await get_trino_client()
+        service = ConstraintExtractionService(trino_client, db)
+        
+        result = await service.get_table_cardinality_info(table_id)
+        return TableCardinalityInfo(**result)
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get cardinality info: {str(e)}"
+        )
+
+
+@router.get(
+    "/tables/{left_table_id}/join-cardinality/{right_table_id}",
+    response_model=JoinCardinalityResponse,
+    summary="Infer JOIN Cardinality",
+    description="""
+    Infer the cardinality of a JOIN between two tables based on PK/FK analysis.
+    
+    **Cardinality types:**
+    - `ONE_TO_ONE`: Both columns are PKs
+    - `ONE_TO_MANY`: Left is PK, Right is not
+    - `MANY_TO_ONE`: Left is not PK, Right is PK
+    - `MANY_TO_MANY`: Neither is PK
+    
+    **Note:** Requires that `extract-constraints` has been run first.
+    """
+)
+async def infer_join_cardinality(
+    left_table_id: int,
+    right_table_id: int,
+    join_column: str = Query(..., description="Name of the column used for joining"),
+    db: AsyncSession = Depends(get_db),
+    # current_user: core.User = Depends(get_current_user),
+):
+    """
+    Infer the cardinality of a JOIN between two tables.
+    """
+    try:
+        trino_client = await get_trino_client()
+        service = ConstraintExtractionService(trino_client, db)
+        
+        cardinality = await service.infer_join_cardinality(
+            left_table_id=left_table_id,
+            right_table_id=right_table_id,
+            join_column_name=join_column
+        )
+        
+        return JoinCardinalityResponse(
+            left_table_id=left_table_id,
+            right_table_id=right_table_id,
+            join_column_name=join_column,
+            cardinality=cardinality
+        )
+        
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to infer cardinality: {str(e)}"
         )

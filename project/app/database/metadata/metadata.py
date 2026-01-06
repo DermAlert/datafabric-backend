@@ -65,6 +65,13 @@ class ExternalColumn(AuditMixin, Base):
     is_primary_key = Column(Boolean, nullable=False, default=False)
     is_unique = Column(Boolean, nullable=False, default=False)
     is_indexed = Column(Boolean, nullable=False, default=False)
+    
+    # Foreign Key metadata - extracted via Trino query passthrough
+    is_foreign_key = Column(Boolean, nullable=False, default=False)
+    fk_referenced_table_id = Column(Integer, ForeignKey('metadata.external_tables.id'), nullable=True)
+    fk_referenced_column_id = Column(Integer, ForeignKey('metadata.external_columns.id'), nullable=True)
+    fk_constraint_name = Column(String(255), nullable=True)
+    
     default_value = Column(String, nullable=True)
     description = Column(String, nullable=True)
     is_image_path = Column(Boolean, nullable=False, default=False)
