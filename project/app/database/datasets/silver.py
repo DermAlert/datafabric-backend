@@ -191,6 +191,11 @@ class VirtualizedConfig(AuditMixin, Base):
     # When provided, automatically loads ColumnMappings and ValueMappings from Equivalence
     column_group_ids = Column(JSON, nullable=True)  # List of equivalence.column_groups IDs
     
+    # Relationship IDs from metadata.table_relationships
+    # When provided, uses these relationships for JOINs instead of CROSS JOIN
+    # If None/empty, auto-discovers applicable relationships for selected tables
+    relationship_ids = Column(JSON, nullable=True)  # List of table_relationship IDs
+    
     # Filters to apply
     filter_ids = Column(JSON, nullable=True)  # List of silver_filter IDs
     
@@ -198,6 +203,10 @@ class VirtualizedConfig(AuditMixin, Base):
     # [{column_id: 100, type: "template", rule_id: 1}]
     # [{column_id: 101, type: "lowercase"}]
     column_transformations = Column(JSON, nullable=True)
+    
+    # When True, excludes original source columns after semantic unification
+    # E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear
+    exclude_unified_source_columns = Column(Boolean, default=False, nullable=False)
     
     is_active = Column(Boolean, default=True)
     
@@ -236,25 +245,23 @@ class TransformConfig(AuditMixin, Base):
     # Uses BronzeColumnMapping to resolve external_column.id → bronze_column_name
     column_group_ids = Column(JSON, nullable=True)  # List of equivalence.column_groups IDs
     
-    # Semantic column unification (JSON array) - for direct column name mapping
-    # [{unified_name: "patient_id", source_columns: ["cpf", "cpf_paciente"], normalization_rule_id: 1}]
-    semantic_columns = Column(JSON, nullable=True)
-    
     # Filters to apply
     filter_ids = Column(JSON, nullable=True)
     
-    # Column-specific normalizations (JSON array)
-    # [{column_name: "cpf", type: "rule", rule_id: 1}]
-    # [{column_name: "tel", type: "template", template: "({d2}) {d5}-{d4}"}]
-    column_normalizations = Column(JSON, nullable=True)
-    
-    # Value mappings (JSON array)
-    # [{column_name: "sexo", output_column: "gender", mappings: {...}, default: "unknown"}]
-    value_mappings = Column(JSON, nullable=True)
+    # Column transformations (same format as VirtualizedConfig)
+    # [{column_id: 100, type: "template", rule_id: 1}]
+    # [{column_id: 101, type: "lowercase"}]
+    # Uses BronzeColumnMapping to resolve external_column_id → bronze_column_name
+    # For regex/complex rules, create via POST /api/silver/normalization-rules
+    column_transformations = Column(JSON, nullable=True)
     
     # Image labeling config (optional)
     # {column_name: "image_path", model: "classifier", output_column: "label"}
     image_labeling_config = Column(JSON, nullable=True)
+    
+    # When True, excludes original source columns after semantic unification
+    # E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear
+    exclude_unified_source_columns = Column(Boolean, default=False, nullable=False)
     
     # Execution status
     last_execution_time = Column(TIMESTAMP(timezone=True), nullable=True)

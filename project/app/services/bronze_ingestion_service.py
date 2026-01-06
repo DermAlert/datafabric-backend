@@ -963,10 +963,30 @@ class BronzeIngestionService:
         column_name_counts = defaultdict(int)
         column_mappings = []  # Track column mappings for persistence
         
+        # Identify JOIN columns - these should be unified with COALESCE
+        join_column_ids = set()  # column IDs used in JOINs
+        join_column_names = set()  # column names used in JOINs
+        for rel in relationships:
+            join_column_ids.add(rel.left_column_id)
+            join_column_ids.add(rel.right_column_id)
+            # Get column names
+            left_col_name = await self._get_column_info(rel.left_column_id)
+            right_col_name = await self._get_column_info(rel.right_column_id)
+            if left_col_name:
+                join_column_names.add(left_col_name['column_name'])
+            if right_col_name:
+                join_column_names.add(right_col_name['column_name'])
+        
+        if join_column_names:
+            logger.info(f"JOIN columns to unify in group: {join_column_names}")
+        
         # First pass: count column name occurrences
         for table_id in table_ids:
             for col in resolved_columns.get(table_id, []):
                 column_name_counts[col['column_name']] += 1
+        
+        # Track columns to unify with COALESCE
+        columns_for_coalesce = defaultdict(list)  # col_name -> [(alias, col_expr), ...]
         
         # Second pass: build SELECT with aliases where needed
         column_position = 0
@@ -977,25 +997,47 @@ class BronzeIngestionService:
             for col in resolved_columns.get(table_id, []):
                 col_name = col['column_name']
                 col_data_type = col.get('data_type', '')
+                col_id = col.get('column_id')
                 is_prefixed = False
                 
-                # If column name appears in multiple tables, prefix with table name
+                # Convert to Delta Lake compatible type if needed
+                column_expr = f'{alias}."{col_name}"'
+                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
+                
+                # Check if this is a JOIN column (should be unified)
+                if col_name in join_column_names and column_name_counts[col_name] > 1:
+                    # Collect for COALESCE unification
+                    columns_for_coalesce[col_name].append(column_expr)
+                    
+                    # Track mapping (all map to the same unified name)
+                    column_mappings.append({
+                        'external_column_id': col_id,
+                        'external_table_id': table_id,
+                        'original_column_name': col_name,
+                        'original_table_name': table_info['table_name'],
+                        'original_schema_name': table_info.get('schema_name'),
+                        'bronze_column_name': col_name,  # Unified name (no prefix)
+                        'data_type': col_data_type,
+                        'column_position': column_position,
+                        'is_prefixed': False,
+                        'is_unified': True
+                    })
+                    column_position += 1
+                    continue  # Don't add to select_columns yet - we'll add COALESCE later
+                
+                # Regular column handling (not a JOIN column)
                 if column_name_counts[col_name] > 1:
                     output_name = f"{table_info['table_name']}_{col_name}"
                     is_prefixed = True
                 else:
                     output_name = col_name
                 
-                # Convert to Delta Lake compatible type if needed
-                column_expr = f'{alias}."{col_name}"'
-                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
-                
                 select_columns.append(f'{column_expr} AS "{output_name}"')
                 all_column_names.add(output_name)
                 
                 # Track the column mapping
                 column_mappings.append({
-                    'external_column_id': col.get('column_id'),
+                    'external_column_id': col_id,
                     'external_table_id': table_id,
                     'original_column_name': col_name,
                     'original_table_name': table_info['table_name'],
@@ -1006,6 +1048,17 @@ class BronzeIngestionService:
                     'is_prefixed': is_prefixed
                 })
                 column_position += 1
+        
+        # Add unified JOIN columns with COALESCE
+        for col_name, col_expressions in columns_for_coalesce.items():
+            if len(col_expressions) > 1:
+                coalesce_expr = f"COALESCE({', '.join(col_expressions)})"
+            else:
+                coalesce_expr = col_expressions[0]
+            
+            select_columns.insert(0, f'{coalesce_expr} AS "{col_name}"')  # Add at beginning
+            all_column_names.add(col_name)
+            logger.info(f"Unified JOIN column '{col_name}' with COALESCE from {len(col_expressions)} sources")
         
         # Add metadata columns
         select_columns.append(f"'{table_metadata[primary_table_id]['table_name']}' AS _source_table")
@@ -1115,10 +1168,30 @@ FROM {from_clause}
         column_name_counts = defaultdict(int)
         column_mappings = []  # Track column mappings for persistence
         
+        # Identify JOIN columns - these should be unified with COALESCE
+        join_column_ids = set()  # column IDs used in JOINs
+        join_column_names = set()  # column names used in JOINs
+        for rel in relationships:
+            join_column_ids.add(rel.left_column_id)
+            join_column_ids.add(rel.right_column_id)
+            # Get column names
+            left_col_name = await self._get_column_info(rel.left_column_id)
+            right_col_name = await self._get_column_info(rel.right_column_id)
+            if left_col_name:
+                join_column_names.add(left_col_name['column_name'])
+            if right_col_name:
+                join_column_names.add(right_col_name['column_name'])
+        
+        logger.info(f"JOIN columns to unify: {join_column_names}")
+        
         # First pass: count column name occurrences
         for table_id in table_ids:
             for col in resolved_columns.get(table_id, []):
                 column_name_counts[col['column_name']] += 1
+        
+        # Track columns to unify with COALESCE
+        columns_for_coalesce = defaultdict(list)  # col_name -> [(alias, col_expr), ...]
+        processed_join_columns = set()  # Track which join columns we've already added
         
         # Second pass: build SELECT with aliases where needed
         column_position = 0
@@ -1129,25 +1202,47 @@ FROM {from_clause}
             for col in resolved_columns.get(table_id, []):
                 col_name = col['column_name']
                 col_data_type = col.get('data_type', '')
+                col_id = col.get('column_id')
                 is_prefixed = False
                 
-                # If column name appears in multiple tables, prefix with table name
+                # Convert to Delta Lake compatible type if needed
+                column_expr = f'{alias}."{col_name}"'
+                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
+                
+                # Check if this is a JOIN column (should be unified)
+                if col_name in join_column_names and column_name_counts[col_name] > 1:
+                    # Collect for COALESCE unification
+                    columns_for_coalesce[col_name].append(column_expr)
+                    
+                    # Track mapping (all map to the same unified name)
+                    column_mappings.append({
+                        'external_column_id': col_id,
+                        'external_table_id': table_id,
+                        'original_column_name': col_name,
+                        'original_table_name': table_info['table_name'],
+                        'original_schema_name': table_info.get('schema_name'),
+                        'bronze_column_name': col_name,  # Unified name (no prefix)
+                        'data_type': col_data_type,
+                        'column_position': column_position,
+                        'is_prefixed': False,
+                        'is_unified': True
+                    })
+                    column_position += 1
+                    continue  # Don't add to select_columns yet - we'll add COALESCE later
+                
+                # Regular column handling (not a JOIN column)
                 if column_name_counts[col_name] > 1:
                     output_name = f"{table_info['table_name']}_{col_name}"
                     is_prefixed = True
                 else:
                     output_name = col_name
                 
-                # Convert to Delta Lake compatible type if needed
-                column_expr = f'{alias}."{col_name}"'
-                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
-                
                 select_columns.append(f'{column_expr} AS "{output_name}"')
                 all_column_names.add(output_name)
                 
                 # Track the column mapping
                 column_mappings.append({
-                    'external_column_id': col.get('column_id'),
+                    'external_column_id': col_id,
                     'external_table_id': table_id,
                     'original_column_name': col_name,
                     'original_table_name': table_info['table_name'],
@@ -1158,6 +1253,17 @@ FROM {from_clause}
                     'is_prefixed': is_prefixed
                 })
                 column_position += 1
+        
+        # Add unified JOIN columns with COALESCE
+        for col_name, col_expressions in columns_for_coalesce.items():
+            if len(col_expressions) > 1:
+                coalesce_expr = f"COALESCE({', '.join(col_expressions)})"
+            else:
+                coalesce_expr = col_expressions[0]
+            
+            select_columns.insert(0, f'{coalesce_expr} AS "{col_name}"')  # Add at beginning
+            all_column_names.add(col_name)
+            logger.info(f"Unified JOIN column '{col_name}' with COALESCE from {len(col_expressions)} sources")
         
         # Add metadata columns
         select_columns.append("'federated' AS _source_table")

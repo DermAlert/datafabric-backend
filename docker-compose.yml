@@ -55,6 +55,15 @@ services:
       - INTERNAL_S3_ACCESS_KEY=minio
       - INTERNAL_S3_SECRET_KEY=minio123
       - INTERNAL_METASTORE_BUCKET=datafabric-metastore
+      # Spark configuration for Silver layer
+      - SPARK_MODE=local
+      - SPARK_MASTER=local[*]
+      - SPARK_DRIVER_MEMORY=4g
+      - SPARK_SHUFFLE_PARTITIONS=8
+      - SPARK_LOG_LEVEL=WARN
+      # Silver bucket
+      - SILVER_BUCKET=datafabric-silver
+      - BRONZE_BUCKET=datafabric-bronze
     volumes:
       - ./project:/usr/src/app
     ports:
