@@ -2,6 +2,7 @@ from sqlalchemy.future import select
 from fastapi import HTTPException, status
 from typing import Optional
 from datetime import datetime
+import logging
 from app.api.schemas.data_connection import (
     DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult
 )
@@ -9,9 +10,11 @@ from app.api.schemas.search import BaseSearchRequest, SearchDataResult
 
 from app.database.databaseUtils import DatabaseService
 from app.database.core import core
-from app.services.metadata_extraction import extract_metadata
 from app.services.connection_manager import test_connection
 from app.utils.connection_validators import validate_metadata_connection
+from app.services.airflow_client import get_airflow_client
+
+logger = logging.getLogger(__name__)
 
 class DataConnectionService:
     def __init__(self, db):
@@ -120,14 +123,32 @@ class DataConnectionService:
         await self.db.commit()
         return ConnectionTestResult(success=success, message=message, details=details)
 
-    async def sync(self, id: int, background_tasks):
+    async def sync(self, id: int, background_tasks=None):
         obj = await self.get(id)
         
         # Validate that connection is not of type IMAGE
         validate_metadata_connection(obj, "metadata synchronization")
         
+        # Check if sync is already in progress (prevent race conditions)
+        if obj.sync_status in ('running', 'pending'):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Synchronization for connection '{obj.name}' is already in progress (status: {obj.sync_status}). "
+                       f"Wait for it to complete before starting a new sync."
+            )
+        
         obj.sync_status = 'pending'
         obj.last_sync_time = datetime.now()
         await self.db.commit()
-        background_tasks.add_task(extract_metadata, connection_id=id)
-        return {"message": f"Metadata synchronization for connection '{obj.name}' has been initiated"}
+        
+        # Use Airflow for job orchestration (no fallback)
+        airflow = get_airflow_client()
+        dag_run = await airflow.trigger_sync_dag(connection_id=id)
+        
+        logger.info(f"Triggered Airflow DAG for connection {id}. Run ID: {dag_run.get('dag_run_id')}")
+        
+        return {
+            "message": f"Metadata synchronization for connection '{obj.name}' has been initiated via Airflow",
+            "dag_run_id": dag_run.get("dag_run_id"),
+            "orchestrator": "airflow"
+        }

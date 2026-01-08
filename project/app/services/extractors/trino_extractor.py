@@ -1,15 +1,18 @@
 from typing import Dict, Any, List, Optional
-from trino.dbapi import connect
+import aiotrino
 from ..trino_manager import TrinoManager
 from ...utils.logger import logger
 import urllib3
 from urllib.parse import urlparse
 from minio import Minio
 import re
+import asyncio
+
 
 class TrinoExtractor:
     """
     Generic Extractor using Trino for metadata extraction.
+    Uses aiotrino for native async I/O - no thread pool overhead.
     """
     
     def __init__(self, connection_params: Dict[str, Any], connection_type: str, connection_name: str = "default", connection_id: Optional[int] = None):
@@ -18,28 +21,34 @@ class TrinoExtractor:
         self.connection_name = connection_name
         self.connection_id = connection_id
         self.trino_manager = TrinoManager()
+        self._catalog_ensured = False
         
         # Generate catalog name with ID for uniqueness
         if connection_id is not None:
             self.catalog = self.trino_manager.generate_catalog_name(connection_name, connection_id)
         else:
             self.catalog = self.trino_manager._sanitize_identifier(connection_name)
-        
-        self._ensure_connection()
 
-    def _ensure_connection(self):
+    async def ensure_connection(self):
         """
-        Ensures the catalog exists in Trino.
+        Ensures the catalog exists in Trino (async version).
+        Uses asyncio.to_thread for the TrinoManager operations that interact with MinIO.
         """
-        self.trino_manager.ensure_catalog_exists(
-            self.connection_name, 
-            self.connection_type, 
-            self.connection_params,
-            self.connection_id
-        )
+        if not self._catalog_ensured:
+            # TrinoManager.ensure_catalog_exists still uses sync trino client
+            # We run it in thread to not block, but the actual Trino queries in this class are async
+            await asyncio.to_thread(
+                self.trino_manager.ensure_catalog_exists,
+                self.connection_name, 
+                self.connection_type, 
+                self.connection_params,
+                self.connection_id
+            )
+            self._catalog_ensured = True
 
-    def _get_connection(self):
-        return connect(
+    async def _get_connection(self):
+        """Get an async Trino connection using aiotrino."""
+        return aiotrino.dbapi.connect(
             host=self.trino_manager.host,
             port=self.trino_manager.port,
             user=self.trino_manager.user,
@@ -124,8 +133,6 @@ class TrinoExtractor:
             
             if not secure:
                  urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-            import asyncio
             
             def scan_bucket():
                 logger.info(f"Connecting to MinIO at {clean_endpoint} for bucket {bucket_name}")
@@ -144,7 +151,6 @@ class TrinoExtractor:
                         # List one object to check existence
                         objs = list(client.list_objects(bucket_name, prefix=path, recursive=True))
                         found = len(objs) > 0
-                        # logger.debug(f"Checking {path}: {'Found' if found else 'Not Found'}")
                         return found
                     except Exception as e:
                         logger.debug(f"Error checking delta log at {prefix}: {e}")
@@ -159,7 +165,6 @@ class TrinoExtractor:
                     
                     for obj in top_level:
                         if not obj.is_dir:
-                            # Ignore files at bucket root for discovery purposes
                             continue
 
                         folder_name = obj.object_name.strip("/")
@@ -188,12 +193,10 @@ class TrinoExtractor:
                             if not sub.is_dir:
                                 continue
 
-                            # sub.object_name is like "folder/sub/"
                             parts = sub.object_name.strip("/").split("/")
                             sub_name = parts[-1]
                             full_path = sub.object_name.strip("/")
 
-                            # Check if subfolder is a table
                             if has_delta_log(full_path):
                                 logger.info(f"Found table in schema {folder_name}: {sub_name}")
                                 is_schema = True
@@ -216,14 +219,16 @@ class TrinoExtractor:
                     
                 return discovered
 
+            # MinIO client is sync, so we still use to_thread for bucket scanning
             items = await asyncio.to_thread(scan_bucket)
             logger.info(f"Discovery found {len(items)} items")
             
             if not items:
                 return
 
-            conn = self._get_connection()
-            cur = conn.cursor()
+            # Use async Trino connection for schema/table registration
+            conn = await self._get_connection()
+            cur = await conn.cursor()
             
             # Collect all schemas that need to be created (including 'default' for root tables)
             schemas_to_create = set()
@@ -233,16 +238,14 @@ class TrinoExtractor:
             # Create all schemas first
             for schema_name in schemas_to_create:
                 try:
-                    # Use a location within the *same* bucket being discovered.
-                    # This avoids pointing schemas to an unrelated/internal bucket that may be
-                    # unreachable for non-MinIO / external S3 endpoints.
                     if schema_name == "default":
                         schema_location = f"s3a://{bucket_name}/"
                     else:
                         schema_location = f"s3a://{bucket_name}/{schema_name}/"
                     query = f"CREATE SCHEMA IF NOT EXISTS \"{self.catalog}\".\"{schema_name}\" WITH (location = '{schema_location}')"
                     logger.info(f"Creating schema: {query}")
-                    cur.execute(query)
+                    await cur.execute(query)
+                    await cur.fetchall()  # Consume result
                 except Exception as schema_err:
                     logger.warning(f"Could not create schema {schema_name}: {schema_err}")
             
@@ -250,8 +253,7 @@ class TrinoExtractor:
             for item in items:
                 try:
                     if item["type"] == "schema":
-                        # Already created above
-                        pass
+                        pass  # Already created above
                         
                     elif item["type"] == "table":
                         schema_name = item["schema"]
@@ -259,14 +261,15 @@ class TrinoExtractor:
                         location = item["location"]
                         
                         # Register Table
-                        # First check if table exists to avoid error noise
                         try:
                             check_query = f"SHOW TABLES FROM \"{self.catalog}\".\"{schema_name}\" LIKE '{table_name}'"
-                            cur.execute(check_query)
-                            if not cur.fetchall():
+                            await cur.execute(check_query)
+                            result = await cur.fetchall()
+                            if not result:
                                 logger.info(f"Registering table {schema_name}.{table_name} at {location}")
                                 reg_query = f"CALL \"{self.catalog}\".system.register_table(schema_name => '{schema_name}', table_name => '{table_name}', table_location => '{location}')"
-                                cur.execute(reg_query)
+                                await cur.execute(reg_query)
+                                await cur.fetchall()  # Consume result
                             else:
                                 logger.debug(f"Table {schema_name}.{table_name} already exists")
                         except Exception as table_err:
@@ -279,7 +282,7 @@ class TrinoExtractor:
             logger.error(f"Error discovering Delta metadata: {e}")
         finally:
             if 'conn' in locals():
-                conn.close()
+                await conn.close()
 
     async def extract_catalogs(self) -> List[Dict[str, Any]]:
         """
@@ -294,16 +297,16 @@ class TrinoExtractor:
 
     async def extract_schemas(self) -> List[Dict[str, Any]]:
         """
-        Extract schemas using Trino.
+        Extract schemas using Trino (fully async with aiotrino).
         """
         # Try to discover schemas from storage if this is a Delta/MinIO connection
         await self._discover_delta_metadata()
-
+        
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
-            cur.execute(f"SHOW SCHEMAS FROM \"{self.catalog}\"")
-            rows = cur.fetchall()
+            conn = await self._get_connection()
+            cur = await conn.cursor()
+            await cur.execute(f"SHOW SCHEMAS FROM \"{self.catalog}\"")
+            rows = await cur.fetchall()
             
             schemas = []
             for row in rows:
@@ -323,20 +326,18 @@ class TrinoExtractor:
             return []
         finally:
             if 'conn' in locals():
-                conn.close()
+                await conn.close()
 
     async def extract_tables(self, schema_name: str) -> List[Dict[str, Any]]:
         """
-        Extract tables from a schema.
+        Extract tables from a schema (fully async with aiotrino).
         """
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
+            conn = await self._get_connection()
+            cur = await conn.cursor()
             
             # Prefer information_schema.tables because it tends to preserve the canonical
             # identifier spelling as exposed by Trino (including mixed-case names).
-            # Using SHOW TABLES can yield a normalized (lowercased) name depending on connector,
-            # which then breaks subsequent quoted queries and column discovery.
             tbl_query = f"""
                 SELECT table_name, table_type
                 FROM information_schema.tables
@@ -344,8 +345,8 @@ class TrinoExtractor:
                   AND table_schema = '{schema_name}'
                 ORDER BY table_name
             """
-            cur.execute(tbl_query)
-            rows = cur.fetchall()
+            await cur.execute(tbl_query)
+            rows = await cur.fetchall()
             
             tables = []
             for row in rows:
@@ -364,8 +365,8 @@ class TrinoExtractor:
                         f"{self._format_ident(schema_name)}."
                         f"{self._format_ident(table_name)}"
                     )
-                    cur.execute(q)
-                    count_res = cur.fetchone()
+                    await cur.execute(q)
+                    count_res = await cur.fetchone()
                     if count_res:
                         row_count = count_res[0]
                 except Exception as e:
@@ -391,15 +392,15 @@ class TrinoExtractor:
             return []
         finally:
             if 'conn' in locals():
-                conn.close()
+                await conn.close()
 
     async def extract_columns(self, schema_name: str, table_name: str) -> List[Dict[str, Any]]:
         """
-        Extract columns for a specific table.
+        Extract columns for a specific table (fully async with aiotrino).
         """
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
+            conn = await self._get_connection()
+            cur = await conn.cursor()
             
             # Use information_schema.columns for better detail
             query_exact = f"""
@@ -415,8 +416,8 @@ class TrinoExtractor:
                 AND table_name = '{table_name}'
                 ORDER BY ordinal_position
             """
-            cur.execute(query_exact)
-            rows = cur.fetchall()
+            await cur.execute(query_exact)
+            rows = await cur.fetchall()
 
             # Fallback: some connectors expose mixed-case names but SHOW TABLES or other callers
             # may provide a lowercased/normalized name. If exact match returns nothing, retry
@@ -435,8 +436,8 @@ class TrinoExtractor:
                       AND lower(table_name) = lower('{table_name}')
                     ORDER BY ordinal_position
                 """
-                cur.execute(query_ci)
-                rows = cur.fetchall()
+                await cur.execute(query_ci)
+                rows = await cur.fetchall()
             
             columns = []
             for row in rows:
@@ -449,7 +450,6 @@ class TrinoExtractor:
                 # Get statistics/samples
                 sample_values = []
                 try:
-                    # Try to get samples
                     sample_query = (
                         f"SELECT DISTINCT {self._format_ident(col_name)} "
                         f"FROM {self._format_ident(self.catalog)}."
@@ -458,8 +458,8 @@ class TrinoExtractor:
                         f"WHERE {self._format_ident(col_name)} IS NOT NULL "
                         f"LIMIT 5"
                     )
-                    cur.execute(sample_query)
-                    samples = cur.fetchall()
+                    await cur.execute(sample_query)
+                    samples = await cur.fetchall()
                     sample_values = [str(s[0]) for s in samples if s[0] is not None]
                     logger.debug(f"Sample values for {table_name}.{col_name}: {sample_values}")
                 except Exception as e:
@@ -492,15 +492,15 @@ class TrinoExtractor:
             return []
         finally:
             if 'conn' in locals():
-                conn.close()
+                await conn.close()
                 
     async def extract_table_data(self, schema_name: str, table_name: str, limit: Optional[int] = None, offset: int = 0) -> Dict[str, Any]:
         """
-        Extract actual data from a table via Trino.
+        Extract actual data from a table via Trino (fully async with aiotrino).
         """
         try:
-            conn = self._get_connection()
-            cur = conn.cursor()
+            conn = await self._get_connection()
+            cur = await conn.cursor()
             
             query = (
                 f"SELECT * FROM "
@@ -511,16 +511,16 @@ class TrinoExtractor:
             if limit is not None:
                 query += f" LIMIT {limit}"
             if offset > 0:
-                # Trino supports OFFSET
                 query += f" OFFSET {offset}" 
                 
-            cur.execute(query)
-            rows = cur.fetchall()
+            await cur.execute(query)
+            rows = await cur.fetchall()
             
-            # Get columns from cursor description if available, else try to infer
+            # Get column names from aiotrino cursor using get_description() method
             columns = []
-            if cur.description:
-                columns = [desc[0] for desc in cur.description]
+            description = await cur.get_description() if hasattr(cur, 'get_description') else None
+            if description:
+                columns = [col.name if hasattr(col, 'name') else (col.get('name') if isinstance(col, dict) else col[0]) for col in description]
             
             data = []
             for row in rows:
@@ -534,7 +534,7 @@ class TrinoExtractor:
                 "table_name": table_name,
                 "columns": [{"column_name": c} for c in columns],
                 "data": data,
-                "total_rows": len(data), # Approx
+                "total_rows": len(data),
                 "fetched_rows": len(data),
                 "offset": offset
             }
@@ -548,9 +548,8 @@ class TrinoExtractor:
             }
         finally:
             if 'conn' in locals():
-                conn.close()
+                await conn.close()
 
     async def close(self):
-        # No persistent connection to close in this pattern, 
-        # connections are created/closed per method or we could keep one.
+        # No persistent connection to close in this pattern
         pass

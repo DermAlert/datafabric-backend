@@ -171,7 +171,7 @@ class SemanticColumnLinkResponse(BaseModel):
 # ==================== DISCOVERY SCHEMAS ====================
 
 class DiscoverRelationshipsRequest(BaseModel):
-    """Request to discover relationships for specific tables or connections"""
+    """Request to discover relationships from database FK constraints"""
     
     # Scope of discovery
     connection_ids: Optional[List[int]] = Field(
@@ -183,17 +183,8 @@ class DiscoverRelationshipsRequest(BaseModel):
         description="Limit discovery to these tables. If None, discovers across all tables in scope."
     )
     
-    # Discovery options
-    discover_fk: bool = Field(True, description="Discover relationships from foreign key constraints")
-    discover_by_name: bool = Field(True, description="Discover relationships by column name patterns")
-    discover_by_data: bool = Field(False, description="Discover relationships by analyzing data (slower)")
-    
-    # Thresholds
-    min_confidence: float = Field(0.7, ge=0.0, le=1.0, description="Minimum confidence score for suggestions")
-    
     # Options
-    include_cross_connection: bool = Field(True, description="Include relationships across different connections")
-    auto_accept_fk: bool = Field(True, description="Automatically accept FK-based relationships")
+    auto_accept: bool = Field(False, description="Automatically create relationships (if false, creates as suggestions for review)")
 
 
 class DiscoverRelationshipsResponse(BaseModel):
@@ -222,15 +213,33 @@ class AcceptSuggestionRequest(BaseModel):
     
     # Optional overrides
     cardinality: Optional[RelationshipCardinalityEnum] = None
-    default_join_type: Optional[JoinTypeEnum] = None
+    default_join_type: Optional[JoinTypeEnum] = Field(
+        None, 
+        description="Join type for the relationship. Defaults to FULL if not provided."
+    )
     name: Optional[str] = None
     description: Optional[str] = None
 
 
 class BulkAcceptSuggestionsRequest(BaseModel):
     """Request to accept multiple suggestions at once"""
-    suggestion_ids: List[int] = Field(..., min_items=1)
-    default_join_type: Optional[JoinTypeEnum] = Field(None, description="Apply this join type to all")
+    suggestion_ids: List[int] = Field(..., min_items=1, examples=[[1, 2, 3]])
+    default_join_type: Optional[JoinTypeEnum] = Field(
+        None, 
+        description="Apply this join type to all accepted relationships. Defaults to FULL if not provided.",
+        examples=["full"]
+    )
+    
+    model_config = {
+        "json_schema_extra": {
+            "examples": [
+                {
+                    "suggestion_ids": [1, 2, 3],
+                    "default_join_type": "full"
+                }
+            ]
+        }
+    }
 
 
 # ==================== SEARCH/LIST SCHEMAS ====================

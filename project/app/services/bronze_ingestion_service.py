@@ -109,15 +109,25 @@ class BronzeIngestionService:
         except Exception as e:
             logger.warning(f"Could not ensure bronze bucket exists: {e}")
     
-    def _ensure_bronze_schema(self):
-        """Create the bronze schema in Trino if it doesn't exist"""
+    async def _ensure_bronze_schema_async(self):
+        """Create the bronze schema in Trino if it doesn't exist (async)"""
         try:
-            conn = self.trino.get_connection()
-            cur = conn.cursor()
+            conn = await self.trino.get_connection()
+            cur = await conn.cursor()
+            
+            # First check if bronze catalog exists
+            await cur.execute(f"SHOW CATALOGS LIKE '{self.bronze_catalog}'")
+            catalogs = await cur.fetchall()
+            
+            if not catalogs:
+                logger.error(f"Bronze catalog '{self.bronze_catalog}' does not exist in Trino! "
+                            f"Make sure bronze.properties is configured in trino/catalog/")
+                await conn.close()
+                return
             
             # Check if schema exists
-            cur.execute(f"SHOW SCHEMAS FROM {self.bronze_catalog} LIKE '{self.bronze_schema}'")
-            schemas = cur.fetchall()
+            await cur.execute(f"SHOW SCHEMAS FROM {self.bronze_catalog} LIKE '{self.bronze_schema}'")
+            schemas = await cur.fetchall()
             
             if not schemas:
                 # Create schema with location pointing to bronze bucket
@@ -125,14 +135,28 @@ class BronzeIngestionService:
                     CREATE SCHEMA IF NOT EXISTS {self.bronze_catalog}.{self.bronze_schema}
                     WITH (location = 's3a://{self.bronze_bucket}/')
                 """
-                cur.execute(create_schema_sql)
+                logger.info(f"Creating bronze schema with SQL: {create_schema_sql}")
+                await cur.execute(create_schema_sql)
+                await cur.fetchall()  # Consume result
                 logger.info(f"Created bronze schema: {self.bronze_catalog}.{self.bronze_schema}")
             else:
                 logger.debug(f"Bronze schema already exists: {self.bronze_catalog}.{self.bronze_schema}")
             
-            conn.close()
+            await conn.close()
         except Exception as e:
-            logger.warning(f"Could not ensure bronze schema exists: {e}")
+            logger.error(f"Failed to ensure bronze schema exists: {e}")
+    
+    def _ensure_bronze_schema(self):
+        """Sync wrapper for _ensure_bronze_schema_async (called at init)"""
+        import asyncio
+        try:
+            loop = asyncio.get_running_loop()
+            # Already in async context - skip sync init, will be done on first use
+            self._bronze_schema_ensured = False
+        except RuntimeError:
+            # No running loop - safe to run
+            asyncio.run(self._ensure_bronze_schema_async())
+            self._bronze_schema_ensured = True
     
     def _get_dataset_folder_name(self, dataset_name: str, dataset_id: Optional[int] = None) -> str:
         """
@@ -939,10 +963,30 @@ class BronzeIngestionService:
         column_name_counts = defaultdict(int)
         column_mappings = []  # Track column mappings for persistence
         
+        # Identify JOIN columns - these should be unified with COALESCE
+        join_column_ids = set()  # column IDs used in JOINs
+        join_column_names = set()  # column names used in JOINs
+        for rel in relationships:
+            join_column_ids.add(rel.left_column_id)
+            join_column_ids.add(rel.right_column_id)
+            # Get column names
+            left_col_name = await self._get_column_info(rel.left_column_id)
+            right_col_name = await self._get_column_info(rel.right_column_id)
+            if left_col_name:
+                join_column_names.add(left_col_name['column_name'])
+            if right_col_name:
+                join_column_names.add(right_col_name['column_name'])
+        
+        if join_column_names:
+            logger.info(f"JOIN columns to unify in group: {join_column_names}")
+        
         # First pass: count column name occurrences
         for table_id in table_ids:
             for col in resolved_columns.get(table_id, []):
                 column_name_counts[col['column_name']] += 1
+        
+        # Track columns to unify with COALESCE
+        columns_for_coalesce = defaultdict(list)  # col_name -> [(alias, col_expr), ...]
         
         # Second pass: build SELECT with aliases where needed
         column_position = 0
@@ -953,25 +997,47 @@ class BronzeIngestionService:
             for col in resolved_columns.get(table_id, []):
                 col_name = col['column_name']
                 col_data_type = col.get('data_type', '')
+                col_id = col.get('column_id')
                 is_prefixed = False
                 
-                # If column name appears in multiple tables, prefix with table name
+                # Convert to Delta Lake compatible type if needed
+                column_expr = f'{alias}."{col_name}"'
+                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
+                
+                # Check if this is a JOIN column (should be unified)
+                if col_name in join_column_names and column_name_counts[col_name] > 1:
+                    # Collect for COALESCE unification
+                    columns_for_coalesce[col_name].append(column_expr)
+                    
+                    # Track mapping (all map to the same unified name)
+                    column_mappings.append({
+                        'external_column_id': col_id,
+                        'external_table_id': table_id,
+                        'original_column_name': col_name,
+                        'original_table_name': table_info['table_name'],
+                        'original_schema_name': table_info.get('schema_name'),
+                        'bronze_column_name': col_name,  # Unified name (no prefix)
+                        'data_type': col_data_type,
+                        'column_position': column_position,
+                        'is_prefixed': False,
+                        'is_unified': True
+                    })
+                    column_position += 1
+                    continue  # Don't add to select_columns yet - we'll add COALESCE later
+                
+                # Regular column handling (not a JOIN column)
                 if column_name_counts[col_name] > 1:
                     output_name = f"{table_info['table_name']}_{col_name}"
                     is_prefixed = True
                 else:
                     output_name = col_name
                 
-                # Convert to Delta Lake compatible type if needed
-                column_expr = f'{alias}."{col_name}"'
-                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
-                
                 select_columns.append(f'{column_expr} AS "{output_name}"')
                 all_column_names.add(output_name)
                 
                 # Track the column mapping
                 column_mappings.append({
-                    'external_column_id': col.get('column_id'),
+                    'external_column_id': col_id,
                     'external_table_id': table_id,
                     'original_column_name': col_name,
                     'original_table_name': table_info['table_name'],
@@ -982,6 +1048,17 @@ class BronzeIngestionService:
                     'is_prefixed': is_prefixed
                 })
                 column_position += 1
+        
+        # Add unified JOIN columns with COALESCE
+        for col_name, col_expressions in columns_for_coalesce.items():
+            if len(col_expressions) > 1:
+                coalesce_expr = f"COALESCE({', '.join(col_expressions)})"
+            else:
+                coalesce_expr = col_expressions[0]
+            
+            select_columns.insert(0, f'{coalesce_expr} AS "{col_name}"')  # Add at beginning
+            all_column_names.add(col_name)
+            logger.info(f"Unified JOIN column '{col_name}' with COALESCE from {len(col_expressions)} sources")
         
         # Add metadata columns
         select_columns.append(f"'{table_metadata[primary_table_id]['table_name']}' AS _source_table")
@@ -1091,10 +1168,30 @@ FROM {from_clause}
         column_name_counts = defaultdict(int)
         column_mappings = []  # Track column mappings for persistence
         
+        # Identify JOIN columns - these should be unified with COALESCE
+        join_column_ids = set()  # column IDs used in JOINs
+        join_column_names = set()  # column names used in JOINs
+        for rel in relationships:
+            join_column_ids.add(rel.left_column_id)
+            join_column_ids.add(rel.right_column_id)
+            # Get column names
+            left_col_name = await self._get_column_info(rel.left_column_id)
+            right_col_name = await self._get_column_info(rel.right_column_id)
+            if left_col_name:
+                join_column_names.add(left_col_name['column_name'])
+            if right_col_name:
+                join_column_names.add(right_col_name['column_name'])
+        
+        logger.info(f"JOIN columns to unify: {join_column_names}")
+        
         # First pass: count column name occurrences
         for table_id in table_ids:
             for col in resolved_columns.get(table_id, []):
                 column_name_counts[col['column_name']] += 1
+        
+        # Track columns to unify with COALESCE
+        columns_for_coalesce = defaultdict(list)  # col_name -> [(alias, col_expr), ...]
+        processed_join_columns = set()  # Track which join columns we've already added
         
         # Second pass: build SELECT with aliases where needed
         column_position = 0
@@ -1105,25 +1202,47 @@ FROM {from_clause}
             for col in resolved_columns.get(table_id, []):
                 col_name = col['column_name']
                 col_data_type = col.get('data_type', '')
+                col_id = col.get('column_id')
                 is_prefixed = False
                 
-                # If column name appears in multiple tables, prefix with table name
+                # Convert to Delta Lake compatible type if needed
+                column_expr = f'{alias}."{col_name}"'
+                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
+                
+                # Check if this is a JOIN column (should be unified)
+                if col_name in join_column_names and column_name_counts[col_name] > 1:
+                    # Collect for COALESCE unification
+                    columns_for_coalesce[col_name].append(column_expr)
+                    
+                    # Track mapping (all map to the same unified name)
+                    column_mappings.append({
+                        'external_column_id': col_id,
+                        'external_table_id': table_id,
+                        'original_column_name': col_name,
+                        'original_table_name': table_info['table_name'],
+                        'original_schema_name': table_info.get('schema_name'),
+                        'bronze_column_name': col_name,  # Unified name (no prefix)
+                        'data_type': col_data_type,
+                        'column_position': column_position,
+                        'is_prefixed': False,
+                        'is_unified': True
+                    })
+                    column_position += 1
+                    continue  # Don't add to select_columns yet - we'll add COALESCE later
+                
+                # Regular column handling (not a JOIN column)
                 if column_name_counts[col_name] > 1:
                     output_name = f"{table_info['table_name']}_{col_name}"
                     is_prefixed = True
                 else:
                     output_name = col_name
                 
-                # Convert to Delta Lake compatible type if needed
-                column_expr = f'{alias}."{col_name}"'
-                column_expr = self._convert_to_delta_compatible_type(column_expr, col_data_type)
-                
                 select_columns.append(f'{column_expr} AS "{output_name}"')
                 all_column_names.add(output_name)
                 
                 # Track the column mapping
                 column_mappings.append({
-                    'external_column_id': col.get('column_id'),
+                    'external_column_id': col_id,
                     'external_table_id': table_id,
                     'original_column_name': col_name,
                     'original_table_name': table_info['table_name'],
@@ -1134,6 +1253,17 @@ FROM {from_clause}
                     'is_prefixed': is_prefixed
                 })
                 column_position += 1
+        
+        # Add unified JOIN columns with COALESCE
+        for col_name, col_expressions in columns_for_coalesce.items():
+            if len(col_expressions) > 1:
+                coalesce_expr = f"COALESCE({', '.join(col_expressions)})"
+            else:
+                coalesce_expr = col_expressions[0]
+            
+            select_columns.insert(0, f'{coalesce_expr} AS "{col_name}"')  # Add at beginning
+            all_column_names.add(col_name)
+            logger.info(f"Unified JOIN column '{col_name}' with COALESCE from {len(col_expressions)} sources")
         
         # Add metadata columns
         select_columns.append("'federated' AS _source_table")
@@ -1253,6 +1383,11 @@ FROM {from_clause}
         
         Creates a table in the bronze catalog pointing to MinIO.
         """
+        # Ensure bronze schema exists before ingestion
+        if not getattr(self, '_bronze_schema_ensured', False):
+            await self._ensure_bronze_schema_async()
+            self._bronze_schema_ensured = True
+        
         # Extract table name from output path
         # e.g., "s3a://datafabric-bronze/my_dataset/part_postgres/" -> "my_dataset_part_postgres"
         path_parts = output_path.rstrip('/').split('/')
@@ -1274,16 +1409,17 @@ AS
         logger.info(f"Executing Bronze ingestion SQL:\n{create_sql}")
         
         try:
-            conn = self.trino.get_connection()
-            cur = conn.cursor()
-            cur.execute(create_sql)
+            conn = await self.trino.get_connection()
+            cur = await conn.cursor()
+            await cur.execute(create_sql)
+            await cur.fetchall()  # Consume result
             
             # Get row count
-            cur.execute(f'SELECT COUNT(*) FROM "{self.bronze_catalog}"."{self.bronze_schema}"."{table_name}"')
-            result = cur.fetchone()
+            await cur.execute(f'SELECT COUNT(*) FROM "{self.bronze_catalog}"."{self.bronze_schema}"."{table_name}"')
+            result = await cur.fetchone()
             rows_ingested = result[0] if result else 0
             
-            conn.close()
+            await conn.close()
             return rows_ingested
             
         except Exception as e:
@@ -1437,19 +1573,19 @@ AS
                     
                     logger.info(f"Processing image column: {table_name}.{column_name}")
                     
-                    # Read Bronze Delta table using Trino
+                    # Read Bronze Delta table using Trino (async)
                     # Find all tables in Bronze schema that might contain this data
-                    conn = self.trino.get_connection()
-                    cur = conn.cursor()
+                    conn = await self.trino.get_connection()
+                    cur = await conn.cursor()
                     
                     # List all tables in Bronze schema
                     try:
-                        cur.execute(f'SHOW TABLES FROM "{self.bronze_catalog}"."{self.bronze_schema}"')
-                        bronze_tables = [row[0] for row in cur.fetchall()]
+                        await cur.execute(f'SHOW TABLES FROM "{self.bronze_catalog}"."{self.bronze_schema}"')
+                        bronze_tables = [row[0] for row in await cur.fetchall()]
                         logger.debug(f"Found {len(bronze_tables)} tables in Bronze schema")
                     except Exception as list_error:
                         logger.warning(f"Could not list Bronze tables: {list_error}")
-                        conn.close()
+                        await conn.close()
                         continue
                     
                     # Try to find the table containing this column
@@ -1463,8 +1599,8 @@ AS
                                 WHERE "{column_name}" IS NOT NULL
                                 LIMIT 1000
                             """
-                            cur.execute(query)
-                            paths = cur.fetchall()
+                            await cur.execute(query)
+                            paths = await cur.fetchall()
                             if paths:
                                 image_paths.extend(paths)
                                 logger.info(f"Found {len(paths)} image paths in table {bronze_table}")
@@ -1473,7 +1609,7 @@ AS
                             # Column doesn't exist in this table, try next
                             continue
                     
-                    conn.close()
+                    await conn.close()
                     
                     if not image_paths:
                         logger.info(f"No image paths found in {table_name}.{column_name}")
@@ -1894,31 +2030,32 @@ AS
             Tuple of (data as list of dicts, column names)
         """
         try:
-            conn = self.trino.get_connection()
-            cur = conn.cursor()
+            conn = await self.trino.get_connection()
+            cur = await conn.cursor()
             
             logger.info(f"Executing virtualized query:\n{select_sql}")
-            cur.execute(select_sql)
+            await cur.execute(select_sql)
             
-            # Get column names from cursor description
-            columns = [desc[0] for desc in cur.description] if cur.description else []
+            # Fetch all rows first
+            rows = await cur.fetchall()
             
-            # Fetch all rows
-            rows = cur.fetchall()
+            # Get column names from aiotrino cursor using get_description() method
+            description = await cur.get_description()
+            columns = [col.name if hasattr(col, 'name') else (col.get('name') if isinstance(col, dict) else col[0]) for col in description]
             
             # Convert to list of dicts
             data = []
             for row in rows:
                 row_dict = {}
-                for i, col_name in enumerate(columns):
-                    value = row[i]
+                for i, value in enumerate(row):
+                    col_name = columns[i] if i < len(columns) else f'col_{i}'
                     # Convert non-serializable types to string
                     if value is not None and not isinstance(value, (str, int, float, bool, list, dict)):
                         value = str(value)
                     row_dict[col_name] = value
                 data.append(row_dict)
             
-            conn.close()
+            await conn.close()
             return data, columns
             
         except Exception as e:

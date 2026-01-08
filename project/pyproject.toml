@@ -28,7 +28,7 @@ fsspec="2025.5.1"
 s3fs="2025.5.1"
 redis="6.2.0"
 httpx="0.28.1"
-trino = "^0.330.0"
+aiotrino = "^0.3.0"
 
 [build-system]
 requires = ["poetry>=1.0"]

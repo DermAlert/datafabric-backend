@@ -2,6 +2,9 @@ from fastapi import FastAPI
 from contextlib import asynccontextmanager
 from fastapi.middleware.cors import CORSMiddleware
 from app.api.api import api_router
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import os
 
 # from app.database.populate_db import populate_db
 from app.database import database
@@ -14,9 +17,19 @@ from app.database.delta_sharing import delta_sharing
 from app.database.datasets import bronze
 from app.database.metadata import relationships
 
+# Configuração do thread pool para asyncio.to_thread()
+# Usado principalmente para operações MinIO (sync) - Trino agora usa aiotrino (async nativo)
+THREAD_POOL_SIZE = int(os.getenv("THREAD_POOL_SIZE", "20"))
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Configurar thread pool para operações síncronas (MinIO, etc.)
+    # Trino agora usa aiotrino (async nativo) - não precisa de threads
+    executor = ThreadPoolExecutor(max_workers=THREAD_POOL_SIZE)
+    loop = asyncio.get_event_loop()
+    loop.set_default_executor(executor)
+    print(f"Thread pool configured with {THREAD_POOL_SIZE} workers (for sync ops like MinIO)")
 
     await database.create_schemas()
 
@@ -65,8 +78,8 @@ app.add_middleware(
 )
 
 @app.get("/")
-def healthcheck():
-    return {"message": "Project Running Successfully"}
+async def healthcheck():
+    return {"status": "healthy", "message": "Data Fabric Backend Running"}
 
 app.include_router(api_router, prefix="/api")
 

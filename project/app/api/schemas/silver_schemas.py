@@ -156,21 +156,7 @@ class NormalizationRuleTestResult(BaseModel):
 # NOTE: Semantic mappings are managed by the Equivalence module.
 # Use equivalence.ColumnGroup and equivalence.ColumnMapping via /api/equivalence endpoints.
 # VirtualizedConfig and TransformConfig reference column_group_ids from Equivalence.
-
-
-# ==================== SEMANTIC COLUMN (for Transform) ====================
-
-class SemanticColumnConfig(BaseModel):
-    """
-    Semantic column unification config for Transform (Bronze → Silver).
-    
-    Maps multiple Bronze column names to a unified name.
-    Uses column names (strings) since Bronze Delta Lake doesn't have external_column.id.
-    """
-    unified_name: str = Field(..., description="Output column name in Silver")
-    source_columns: List[str] = Field(..., min_items=1, description="Bronze column names to unify")
-    normalization_rule_id: Optional[int] = Field(None, description="Optional rule to apply")
-    aggregation: Optional[str] = Field(None, description="How to aggregate: 'coalesce', 'first', 'concat'")
+# This provides: ColumnMappings (column unification) + ValueMappings (value normalization)
 
 
 # ==================== FILTERS ====================
@@ -279,11 +265,23 @@ class VirtualizedConfigCreate(BaseModel):
         None, 
         description="Column groups from Equivalence. Auto-loads ColumnMappings and ValueMappings."
     )
+    relationship_ids: Optional[List[int]] = Field(
+        None, 
+        description="Relationship IDs from metadata.table_relationships for JOINs. "
+                    "If None, auto-discovers relationships for selected tables. "
+                    "If empty list [], uses CROSS JOIN (not recommended)."
+    )
     filter_ids: Optional[List[int]] = Field(None, description="Filter IDs (from POST /api/silver/filters)")
     
     column_transformations: Optional[List[VirtualizedColumnTransformation]] = Field(
         None,
         description="Text transformations: template, lowercase, uppercase, trim, normalize_spaces, remove_accents"
+    )
+    
+    exclude_unified_source_columns: bool = Field(
+        False,
+        description="When True, excludes original source columns after semantic unification. "
+                    "E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear in output."
     )
 
 
@@ -293,8 +291,10 @@ class VirtualizedConfigUpdate(BaseModel):
     description: Optional[str] = None
     tables: Optional[List[TableColumnSelection]] = None
     column_group_ids: Optional[List[int]] = None
+    relationship_ids: Optional[List[int]] = None
     filter_ids: Optional[List[int]] = None
     column_transformations: Optional[List[VirtualizedColumnTransformation]] = None
+    exclude_unified_source_columns: Optional[bool] = None
     is_active: Optional[bool] = None
 
 
@@ -305,8 +305,10 @@ class VirtualizedConfigResponse(BaseModel):
     description: Optional[str]
     tables: List[Dict[str, Any]]
     column_group_ids: Optional[List[int]]
+    relationship_ids: Optional[List[int]]
     filter_ids: Optional[List[int]]
     column_transformations: Optional[List[Dict[str, Any]]]
+    exclude_unified_source_columns: bool = False
     is_active: bool
     generated_sql: Optional[str]
     
@@ -338,29 +340,6 @@ class VirtualizedQueryResponse(BaseModel):
 
 # ==================== TRANSFORM CONFIG ====================
 
-class TransformColumnNormalization(BaseModel):
-    """Column normalization for transform (Bronze → Silver)."""
-    column_name: str = Field(..., description="Column name in Bronze dataset")
-    type: NormalizationTypeEnum = Field(..., description="Type of normalization")
-    # For rule type
-    rule_id: Optional[int] = Field(None, description="normalization_rule.id")
-    # For template type
-    template: Optional[str] = Field(None, description="Template inline")
-    # For sql_regex
-    pattern: Optional[str] = None
-    replacement: Optional[str] = None
-    # Output column name (optional, defaults to same)
-    output_column: Optional[str] = None
-
-
-class TransformValueMapping(BaseModel):
-    """Value mapping for transform."""
-    column_name: str = Field(..., description="Column name in Bronze dataset")
-    output_column: Optional[str] = Field(None, description="Output column name")
-    mappings: Dict[str, str] = Field(..., description="Value mappings")
-    default_value: Optional[str] = Field("", description="Default if no match")
-
-
 class TransformImageLabeling(BaseModel):
     """Image labeling configuration."""
     column_name: str = Field(..., description="Column with image paths")
@@ -370,7 +349,17 @@ class TransformImageLabeling(BaseModel):
 
 
 class TransformConfigCreate(BaseModel):
-    """Create a transform config."""
+    """
+    Create a transform config for Bronze → Silver transformation.
+    
+    Supports the same transformations as VirtualizedConfig:
+    - column_transformations: Same format (column_id + type)
+    - column_group_ids: Semantic unification + value mappings from Equivalence
+    - filter_ids: Reusable filters
+    
+    The system automatically resolves external_column_id to bronze_column_name
+    using BronzeColumnMapping.
+    """
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     
@@ -379,14 +368,26 @@ class TransformConfigCreate(BaseModel):
     silver_bucket: Optional[str] = Field(None, description="Output bucket (optional)")
     silver_path_prefix: Optional[str] = Field(None, description="Output path prefix")
     
-    column_group_ids: Optional[List[int]] = Field(None, description="Column groups from Equivalence (uses BronzeColumnMapping)")
-    semantic_columns: Optional[List[SemanticColumnConfig]] = Field(None, description="Direct column name mapping")
-    filter_ids: Optional[List[int]] = None
+    # Same as VirtualizedConfig
+    column_group_ids: Optional[List[int]] = Field(
+        None, 
+        description="Column groups from Equivalence. Auto-loads ColumnMappings (column unification) and ValueMappings (value normalization)."
+    )
+    filter_ids: Optional[List[int]] = Field(None, description="Filter IDs (from POST /api/silver/filters)")
     
-    column_normalizations: Optional[List[TransformColumnNormalization]] = None
-    value_mappings: Optional[List[TransformValueMapping]] = None
+    # column_transformations - SAME FORMAT AS VIRTUALIZED
+    column_transformations: Optional[List[VirtualizedColumnTransformation]] = Field(
+        None,
+        description="Text transformations (same as Virtualized): template, lowercase, uppercase, trim, normalize_spaces, remove_accents. Uses external_column_id, auto-resolved to bronze_column_name. For regex/complex rules, create via POST /api/silver/normalization-rules first."
+    )
     
     image_labeling_config: Optional[TransformImageLabeling] = None
+    
+    exclude_unified_source_columns: bool = Field(
+        False,
+        description="When True, excludes original source columns after semantic unification. "
+                    "E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear in output."
+    )
 
 
 class TransformConfigUpdate(BaseModel):
@@ -397,11 +398,10 @@ class TransformConfigUpdate(BaseModel):
     silver_bucket: Optional[str] = None
     silver_path_prefix: Optional[str] = None
     column_group_ids: Optional[List[int]] = None
-    semantic_columns: Optional[List[SemanticColumnConfig]] = None
     filter_ids: Optional[List[int]] = None
-    column_normalizations: Optional[List[TransformColumnNormalization]] = None
-    value_mappings: Optional[List[TransformValueMapping]] = None
+    column_transformations: Optional[List[VirtualizedColumnTransformation]] = None
     image_labeling_config: Optional[TransformImageLabeling] = None
+    exclude_unified_source_columns: Optional[bool] = None
     is_active: Optional[bool] = None
 
 
@@ -415,11 +415,10 @@ class TransformConfigResponse(BaseModel):
     silver_bucket: Optional[str]
     silver_path_prefix: Optional[str]
     column_group_ids: Optional[List[int]]
-    semantic_columns: Optional[List[Dict[str, Any]]]
     filter_ids: Optional[List[int]]
-    column_normalizations: Optional[List[Dict[str, Any]]]
-    value_mappings: Optional[List[Dict[str, Any]]]
+    column_transformations: Optional[List[Dict[str, Any]]]
     image_labeling_config: Optional[Dict[str, Any]]
+    exclude_unified_source_columns: bool = False
     last_execution_time: Optional[datetime]
     last_execution_status: Optional[str]
     last_execution_rows: Optional[int]

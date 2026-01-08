@@ -32,7 +32,7 @@ dag = DAG(
     description='Processa sincronização de metadados de conexões de dados via microserviço',
     schedule_interval=None,  # Triggered manually or via API
     catchup=False,
-    max_active_runs=3,  # Permite até 3 DAG runs simultâneos (igual ao sync_pool)
+    max_active_runs=3,  # Permite até 3 DAG runs simultâneos (para testar fila)
     max_active_tasks=10,  # Permite múltiplas tarefas ativas por DAG run
     tags=['microservice', 'sync', 'metadata'],
     is_paused_upon_creation=False,  # Start unpaused
@@ -100,16 +100,16 @@ prepare_request_task = PythonOperator(
     dag=dag
 )
 
-# Task 3: Call sync microservice
+# Task 3: Call FastAPI internal endpoint
 sync_microservice_task = HttpOperator(
     task_id='call_sync_microservice',
-    http_conn_id='sync_service_conn',  # Configure this connection in Airflow
-    endpoint='/process-sync',
+    http_conn_id='sync_service_conn',  # Conexão HTTP para o FastAPI backend
+    endpoint='/api/internal/process-sync',  # Endpoint interno do FastAPI (com prefixo /api)
     method='POST',
     headers={'Content-Type': 'application/json'},
     data="{{ task_instance.xcom_pull(task_ids='prepare_request') }}",
-    pool='sync_pool',  # Use sync pool for resource management
-    pool_slots=1,  # Each sync job takes 1 slot
+    pool='sync_pool',  # Pool para controlar concorrência de syncs
+    pool_slots=1,  # Cada sync job ocupa 1 slot
     dag=dag
 )
 

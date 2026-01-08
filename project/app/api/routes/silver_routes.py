@@ -418,8 +418,10 @@ Data is NOT saved - returned as JSON (use for exploration, APIs, etc.).
 | `description` | string | ❌ | Optional description |
 | `tables` | object[] | ✅ | Tables and columns (same structure as Bronze) |
 | `column_group_ids` | int[] | ❌ | Semantic groups from Equivalence (auto-loads ColumnMappings + ValueMappings) |
+| `relationship_ids` | int[] | ❌ | Relationship IDs for JOINs. `null`=auto-discover, `[]`=CROSS JOIN (not recommended) |
 | `filter_ids` | int[] | ❌ | Filter IDs from POST /api/silver/filters |
 | `column_transformations` | object[] | ❌ | Text transformations per column |
+| `exclude_unified_source_columns` | bool | ❌ | When `true`, excludes original source columns after semantic unification. Default: `false` |
 
 ---
 
@@ -537,14 +539,20 @@ See GET /api/silver/transformation-types for full documentation.
     {"table_id": 14, "column_ids": [160, 161, 162]}
   ],
   "column_group_ids": [1, 2],
+  "relationship_ids": [4, 5],
   "filter_ids": [1, 2],
   "column_transformations": [
     {"column_id": 162, "type": "template", "rule_id": 1},
     {"column_id": 160, "type": "uppercase"},
     {"column_id": 161, "type": "trim"}
-  ]
+  ],
+  "exclude_unified_source_columns": true
 }
 ```
+
+*exclude_unified_source_columns*: when `true`, only the unified column appears (e.g., only `sex_group` instead of `clinical_sex` + `sexo` + `sex_group`)
+
+*relationship_ids*: specify which relationships to use for JOINs. If `null`, auto-discovers. If `[]`, forces CROSS JOIN.
 
 ---
 
@@ -660,33 +668,153 @@ async def list_transform_configs(
     status_code=status.HTTP_201_CREATED,
     summary="Create transform config",
     description="""
-Create a transform config to materialize Bronze data to Silver.
+Create a transform config to materialize Bronze data into Silver Delta Lake using **Apache Spark**.
 
-**Supported normalizations:**
-- `rule`: Use a normalization rule (by rule_id)
-- `template`: Use inline template
-- `sql_regex`: Apply regex pattern
-- `python_rule`: Use Python Normalizer
+Unlike VirtualizedConfig (which queries data on-demand via Trino), TransformConfig 
+**persists** transformed data to Silver Delta Lake for efficient downstream consumption.
 
-**Example:**
+---
+
+## **Virtualized vs Transform (Materialized):**
+
+| Aspect | Virtualized | Transform |
+|--------|-------------|-----------|
+| **Engine** | Trino (SQL) | Spark (DataFrame) |
+| **Output** | JSON (in memory) | Delta Lake (persisted) |
+| **Use Case** | Exploration, APIs | Data pipelines, curated datasets |
+| **Performance** | Fast for small queries | Optimized for large ETL |
+| **Python UDFs** | ❌ Not supported | ✅ Supported |
+
+---
+
+## **Request Fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | ✅ | Unique name for the config |
+| `description` | string | ❌ | Optional description |
+| `source_bronze_dataset_id` | int | ✅ | Bronze dataset ID (from GET /api/bronze/datasets) |
+| `silver_bucket` | string | ❌ | Output bucket (defaults to system silver bucket) |
+| `silver_path_prefix` | string | ❌ | Output path prefix |
+| `column_group_ids` | int[] | ❌ | Semantic groups from Equivalence (column unification + value mappings) |
+| `filter_ids` | int[] | ❌ | Filter IDs from POST /api/silver/filters |
+| `column_transformations` | object[] | ❌ | **Same format as Virtualized** (uses `column_id`) |
+| `exclude_unified_source_columns` | bool | ❌ | When `true`, excludes original source columns after semantic unification. Default: `false` |
+
+---
+
+## **column_transformations (same as Virtualized):**
+
+Uses `column_id` (external_column.id) - automatically resolved to Bronze column name.
+
+```json
+"column_transformations": [
+  {"column_id": 160, "type": "lowercase"},
+  {"column_id": 161, "type": "template", "rule_id": 1}
+]
+```
+
+| type | Description | Required Fields |
+|------|-------------|-----------------|
+| `template` | Use normalization rule (regex or Python) | `rule_id` |
+| `lowercase` | Convert to lowercase | - |
+| `uppercase` | Convert to uppercase | - |
+| `trim` | Remove spaces | - |
+| `normalize_spaces` | Collapse multiple spaces | - |
+| `remove_accents` | Remove accents (á→a) | - |
+
+**For regex or complex transformations:** Create a rule via `POST /api/silver/normalization-rules` first, then reference via `rule_id`.
+
+---
+
+## **Example 1: Minimal**
 ```json
 {
   "name": "patients_silver",
-  "source_bronze_dataset_id": 15,
-  "column_normalizations": [
-    {"column_name": "cpf", "type": "rule", "rule_id": 1},
-    {"column_name": "phone", "type": "template", "template": "({d2}) {d5}-{d4}"}
-  ],
-  "value_mappings": [
-    {
-      "column_name": "gender",
-      "mappings": {"M": "male", "F": "female", "Masculino": "male"},
-      "default_value": "unknown"
-    }
-  ],
-  "filter_ids": [3]
+  "source_bronze_dataset_id": 15
 }
 ```
+
+---
+
+## **Example 2: With column_transformations (same as Virtualized)**
+```json
+{
+  "name": "patients_normalized",
+  "source_bronze_dataset_id": 15,
+  "column_transformations": [
+    {"column_id": 160, "type": "lowercase"},
+    {"column_id": 161, "type": "trim"},
+    {"column_id": 162, "type": "template", "rule_id": 1}
+  ]
+}
+```
+
+---
+
+## **Example 3: With Semantic Equivalence**
+```json
+{
+  "name": "unified_patients_silver",
+  "source_bronze_dataset_id": 15,
+  "column_group_ids": [1, 2]
+}
+```
+*column_group_ids* loads from Equivalence module:
+- **ColumnMappings**: unify columns (e.g., "sexo" + "gender" → unified column)
+- **ValueMappings**: normalize values (e.g., "M"→"Masculino")
+
+---
+
+## **Example 4: With Filters**
+```json
+{
+  "name": "active_patients_silver",
+  "source_bronze_dataset_id": 15,
+  "filter_ids": [1, 2]
+}
+```
+
+---
+
+## **Example 5: Complete (all features)**
+```json
+{
+  "name": "full_silver_pipeline",
+  "description": "Complete patient transformation with all features",
+  "source_bronze_dataset_id": 15,
+  "column_group_ids": [1],
+  "filter_ids": [1],
+  "column_transformations": [
+    {"column_id": 160, "type": "uppercase"},
+    {"column_id": 162, "type": "template", "rule_id": 1}
+  ],
+  "exclude_unified_source_columns": true
+}
+```
+*column_group_ids* loads from Equivalence module both:
+- **ColumnMappings**: unify columns under same name (COALESCE)
+- **ValueMappings**: normalize values (M→Masculino, F→Feminino)
+
+*exclude_unified_source_columns*: when `true`, only the unified column appears (e.g., only `sex_group` instead of `clinical_sex` + `sexo` + `sex_group`)
+
+---
+
+## **Workflow:**
+1. **Create config** → POST /api/silver/transform/configs
+2. **Preview** → POST /api/silver/transform/configs/{id}/preview
+3. **Execute** → POST /api/silver/transform/configs/{id}/execute
+4. **Query** → GET /api/silver/transform/configs/{id}/query
+
+---
+
+## **Notes:**
+- Use GET /api/bronze/datasets to find `source_bronze_dataset_id`
+- Use GET /api/metadata/tables/{id}/columns to find `column_id` for column_transformations
+- Create rules first via POST /api/silver/normalization-rules for `template` type (regex, formatting)
+- Create filters first via POST /api/silver/filters for `filter_ids`
+- For semantic unification + value mappings, use /api/equivalence to create ColumnGroups
+- After execute, the Silver table is auto-registered in Trino for SQL queries
 """
 )
 async def create_transform_config(
@@ -752,16 +880,100 @@ async def preview_transform_config(
 @router.post(
     "/transform/configs/{config_id}/execute",
     response_model=TransformExecuteResponse,
-    summary="Execute transform",
+    summary="Execute transform (Bronze → Silver)",
     description="""
-Execute a transform to materialize Bronze data to Silver Delta Lake.
+Execute a transform to materialize Bronze data to Silver Delta Lake using **Apache Spark**.
 
-This will:
-1. Read data from the Bronze dataset
-2. Apply all configured transformations
-3. Write to Silver Delta Lake
+---
 
-**Note:** This is a potentially long-running operation.
+## **What Happens:**
+
+| Step | Description |
+|------|-------------|
+| 1️⃣ | **Read Bronze**: Load data from Bronze Delta Lake via Spark |
+| 2️⃣ | **Apply column_transformations**: Same as Virtualized (lowercase, uppercase, trim, etc.) |
+| 3️⃣ | **Apply column_group_ids**: Semantic unification + value mappings from Equivalence |
+| 4️⃣ | **Apply filter_ids**: Filter rows based on conditions |
+| 5️⃣ | **Write Silver**: Persist to Silver Delta Lake with ACID transactions |
+| 6️⃣ | **Register in Trino**: Auto-register table for SQL queries |
+
+---
+
+## **Supported Transformations:**
+
+### column_transformations (same format as Virtualized)
+Uses `column_id` (external_column.id), auto-resolved to bronze_column_name.
+
+| Type | Description | Example |
+|------|-------------|---------|
+| `lowercase` | Convert to lowercase | `{"column_id": 10, "type": "lowercase"}` |
+| `uppercase` | Convert to uppercase | `{"column_id": 10, "type": "uppercase"}` |
+| `trim` | Remove leading/trailing spaces | `{"column_id": 10, "type": "trim"}` |
+| `normalize_spaces` | Collapse multiple spaces | `{"column_id": 10, "type": "normalize_spaces"}` |
+| `remove_accents` | Remove diacritics | `{"column_id": 10, "type": "remove_accents"}` |
+| `template` | Apply normalization rule (regex or Python) | `{"column_id": 10, "type": "template", "rule_id": 1}` |
+
+**For regex/complex transformations:** Create a rule via `POST /api/silver/normalization-rules` first, then use `type: "template"` with `rule_id`.
+
+### column_group_ids (Semantic Unification + Value Mappings)
+Loads from Equivalence module:
+- **ColumnMappings**: Unify columns under same name (COALESCE)
+- **ValueMappings**: Normalize values (M→Masculino, F→Feminino)
+
+Use `/api/equivalence` to create ColumnGroups, ColumnMappings, and ValueMappings.
+
+### filter_ids (Row Filtering)
+Apply pre-created filters (POST /api/silver/filters).
+
+---
+
+## **Response:**
+
+```json
+{
+  "config_id": 1,
+  "config_name": "patients_silver",
+  "execution_id": 42,
+  "status": "success",
+  "rows_processed": 50000,
+  "rows_output": 48500,
+  "output_path": "s3a://datafabric-silver/1-patients_silver/",
+  "execution_time_seconds": 12.5,
+  "message": "Silver transformation completed. 48500 rows written. Table registered in Trino as silver.default.1_patients_silver"
+}
+```
+
+---
+
+## **Why Spark (not Trino)?**
+
+| Aspect | Spark | Trino |
+|--------|-------|-------|
+| **ETL Write** | ✅ Native Delta Lake writes | ❌ Limited write support |
+| **ACID** | ✅ Full transaction support | ⚠️ Partial |
+| **UDFs** | ✅ Python UDFs (normalization rules) | ❌ Limited |
+| **Scale** | ✅ Optimized for large batch jobs | ✅ Optimized for queries |
+| **Parallelism** | ✅ Partition-level parallelism | ⚠️ Query-level |
+
+---
+
+## **After Execution:**
+
+The Silver table is automatically registered in Trino. You can:
+
+1. **Query via API**: `GET /api/silver/transform/configs/{id}/query?limit=1000`
+2. **Query via Trino SQL**: 
+   ```sql
+   SELECT * FROM silver.default.{config_id}_{config_name} LIMIT 100
+   ```
+
+---
+
+## **Notes:**
+- This is a **long-running operation** for large datasets
+- Use `/preview` first to validate transformations
+- Output overwrites previous execution (mode=overwrite)
+- Check `/executions` endpoint for execution history
 """
 )
 async def execute_transform_config(
@@ -769,4 +981,120 @@ async def execute_transform_config(
     service: SilverTransformationService = Depends(get_service)
 ):
     return await service.execute_transform_config(config_id)
+
+
+@router.get(
+    "/transform/configs/{config_id}/table-info",
+    summary="Get Silver table info",
+    description="Get information about the Silver Delta table including schema and row count."
+)
+async def get_silver_table_info(
+    config_id: int,
+    service: SilverTransformationService = Depends(get_service)
+):
+    info = await service.get_silver_table_info(config_id)
+    if not info:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Silver table for config {config_id} not found. Execute the transform first."
+        )
+    return info
+
+
+@router.get(
+    "/transform/configs/{config_id}/query",
+    summary="Query Silver table (after execute)",
+    description="""
+Query the materialized Silver Delta table via Trino.
+
+---
+
+## **Prerequisites:**
+
+⚠️ **You must execute the transform first!** Use `POST /api/silver/transform/configs/{id}/execute`
+
+---
+
+## **How it Works:**
+
+| Step | Description |
+|------|-------------|
+| 1️⃣ | After `/execute`, the Silver Delta table is created in S3 |
+| 2️⃣ | The table is auto-registered in Trino catalog `silver.default.{id}_{name}` |
+| 3️⃣ | This endpoint queries the registered table via Trino SQL |
+
+---
+
+## **Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | int | 1000 | Maximum rows to return (1-100000) |
+| `offset` | int | 0 | Rows to skip for pagination |
+
+---
+
+## **Response:**
+
+```json
+{
+  "config_id": 1,
+  "config_name": "patients_silver",
+  "columns": ["id", "name", "cpf_normalizado", "gender_unified", "_silver_timestamp"],
+  "data": [
+    {"id": 1, "name": "João Silva", "cpf_normalizado": "123.456.789-00", "gender_unified": "Masculino", "_silver_timestamp": "2024-01-15T10:30:00"},
+    ...
+  ],
+  "row_count": 1000,
+  "total_rows": 50000,
+  "execution_time_seconds": 0.5
+}
+```
+
+---
+
+## **Special Columns:**
+
+Silver tables include metadata columns added during transformation:
+
+| Column | Description |
+|--------|-------------|
+| `_silver_timestamp` | When the row was transformed |
+| `_transform_config_id` | ID of the transform config |
+
+---
+
+## **Alternative: Direct Trino SQL:**
+
+You can also query directly via Trino:
+```sql
+SELECT * FROM silver.default.{config_id}_{config_name} 
+WHERE gender_unified = 'Masculino'
+LIMIT 100
+```
+
+---
+
+## **Errors:**
+
+| Code | Description |
+|------|-------------|
+| 404 | Config not found |
+| 400 | Transform not executed yet (no Silver table) |
+| 500 | Query execution error |
+"""
+)
+async def query_silver_table(
+    config_id: int,
+    limit: int = Query(1000, ge=1, le=100000, description="Maximum rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip"),
+    service: SilverTransformationService = Depends(get_service)
+):
+    result = await service.query_silver_table(config_id, limit=limit, offset=offset)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Silver table for config {config_id} not found. Execute the transform first."
+        )
+    return result
 

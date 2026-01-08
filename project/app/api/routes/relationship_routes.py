@@ -37,6 +37,7 @@ from ..schemas.relationship_schemas import (
 )
 from ..schemas.search import SearchResult
 from ...services.relationship_discovery_service import RelationshipDiscoveryService
+from ...services.trino_client import get_trino_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -51,37 +52,40 @@ async def discover_relationships(
     # current_user = Depends(get_current_user),
 ):
     """
-    Discover relationships between tables automatically.
+    Discover relationships between tables by extracting FK constraints from databases.
     
-    This endpoint analyzes tables and columns to find potential relationships using:
+    **How it works:**
+    1. Connects to source databases via Trino query passthrough
+    2. Queries `information_schema` to extract PK/FK constraints
+    3. Creates relationships or suggestions based on real database FKs
     
-    1. **FK Constraints** (`discover_fk=true`): 
-       - Reads foreign key information from column metadata
-       - Highest confidence (1.0)
-       - Auto-accepted by default
-    
-    2. **Name Patterns** (`discover_by_name=true`):
-       - Looks for patterns like `user_id` -> `users.id`
-       - Confidence 0.6-0.95 depending on type compatibility
-       - Created as suggestions for user confirmation
-    
-    3. **Data Analysis** (`discover_by_data=true`):
-       - Compares sample values between columns
-       - Slower but catches non-obvious relationships
-       - Confidence 0.5-0.9 based on value overlap
+    **Supported Databases:**
+    - MySQL / MariaDB
+    - PostgreSQL
+    - Other databases will show a warning (not supported yet)
     
     **Scope Control:**
     - `connection_ids`: Limit to specific connections
     - `table_ids`: Limit to specific tables
-    - `include_cross_connection`: Include inter-DB relationships
     
     **Results:**
-    - FK-based relationships are auto-accepted (configurable)
-    - Other discoveries become suggestions for review
+    - By default creates suggestions for review (`auto_accept=false`)
+    - Set `auto_accept=true` to create relationships directly
+    
+    **Note:** FK constraints only exist within the same database, so relationships
+    discovered here are always INTRA_CONNECTION (same database).
     """
     try:
         service = RelationshipDiscoveryService(db)
-        return await service.discover_relationships(request)
+        
+        # Get Trino client for FK constraint extraction
+        trino_client = None
+        try:
+            trino_client = await get_trino_client()
+        except Exception as e:
+            logger.warning(f"Could not get Trino client for FK extraction: {e}")
+        
+        return await service.discover_relationships(request, trino_client=trino_client)
     except HTTPException:
         raise
     except Exception as e:
@@ -298,7 +302,10 @@ async def list_pending_suggestions(
 async def accept_suggestion(
     suggestion_id: int,
     cardinality: Optional[RelationshipCardinalityEnum] = None,
-    default_join_type: Optional[JoinTypeEnum] = None,
+    default_join_type: Optional[JoinTypeEnum] = Query(
+        None, 
+        description="Join type for the relationship. **Defaults to FULL** (safest for Data Fabric)."
+    ),
     name: Optional[str] = None,
     description: Optional[str] = None,
     db: AsyncSession = Depends(get_db),
@@ -309,9 +316,12 @@ async def accept_suggestion(
     
     This converts the suggestion into a permanent, verified relationship.
     
+    **Default join type is FULL OUTER JOIN** - the safest option for a Data Fabric
+    as it preserves all data from both tables and reveals data quality issues.
+    
     You can optionally override:
-    - `cardinality`: Relationship cardinality
-    - `default_join_type`: Default join strategy
+    - `cardinality`: Relationship cardinality (ONE_TO_ONE, ONE_TO_MANY, etc.)
+    - `default_join_type`: Join strategy (INNER, LEFT, RIGHT, FULL). **Default: FULL**
     - `name`, `description`: Metadata
     """
     try:
@@ -368,6 +378,12 @@ async def bulk_accept_suggestions(
     Accept multiple suggestions at once.
     
     Useful for quickly accepting high-confidence suggestions.
+    
+    **Default join type is FULL OUTER JOIN** - the safest option for a Data Fabric
+    as it preserves all data from both tables and reveals data quality issues.
+    
+    You can override `default_join_type` to apply a different join type to all
+    accepted relationships.
     """
     try:
         service = RelationshipDiscoveryService(db)

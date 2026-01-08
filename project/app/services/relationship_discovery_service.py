@@ -77,10 +77,14 @@ class RelationshipDiscoveryService:
     
     async def discover_relationships(
         self, 
-        request: DiscoverRelationshipsRequest
+        request: DiscoverRelationshipsRequest,
+        trino_client=None  # Trino client for constraint extraction
     ) -> DiscoverRelationshipsResponse:
         """
         Main discovery method that orchestrates all discovery strategies.
+        
+        When discover_fk=True, automatically extracts PK/FK constraints from
+        source databases via Trino before running discovery.
         """
         warnings = []
         new_relationships = []
@@ -104,6 +108,34 @@ class RelationshipDiscoveryService:
                 warnings=["No tables found in the specified scope"]
             )
         
+        # ==== Extract PK/FK constraints from databases via Trino ====
+        if trino_client is not None:
+                from .constraint_extraction_service import ConstraintExtractionService
+                constraint_service = ConstraintExtractionService(trino_client, self.db)
+                
+                # Get unique connection IDs
+                connection_ids = set(t['connection_id'] for t in tables)
+                
+                for conn_id in connection_ids:
+                    try:
+                        result = await constraint_service.extract_constraints_for_connection(conn_id)
+                        if result.get('status') == 'unsupported':
+                            warnings.append(
+                                f"Connection {conn_id}: Database type '{result.get('db_type')}' not supported for FK extraction yet. "
+                                f"Supported: MySQL, PostgreSQL."
+                            )
+                        else:
+                            pk_count = result.get('primary_keys_found', 0)
+                            fk_count = result.get('foreign_keys_found', 0)
+                            if pk_count > 0 or fk_count > 0:
+                                logger.info(
+                                    f"Extracted constraints for connection {conn_id}: "
+                                    f"{pk_count} PKs, {fk_count} FKs"
+                                )
+                    except Exception as e:
+                        warnings.append(f"Failed to extract constraints for connection {conn_id}: {str(e)}")
+                        logger.error(f"Constraint extraction failed for connection {conn_id}: {e}")
+        
         # Get all columns for these tables
         columns = await self._get_columns_for_tables([t['table_id'] for t in tables])
         
@@ -113,33 +145,10 @@ class RelationshipDiscoveryService:
         for col in columns:
             columns_by_table[col['table_id']].append(col)
         
-        discovered = []
-        
-        # Strategy 1: Discover from FK constraints (if available in metadata)
-        if request.discover_fk:
-            fk_relationships = await self._discover_from_fk_constraints(
-                tables, columns, table_lookup
-            )
-            discovered.extend(fk_relationships)
-        
-        # Strategy 2: Discover by column name patterns
-        if request.discover_by_name:
-            name_relationships = await self._discover_by_name_patterns(
-                tables, columns, columns_by_table, table_lookup,
-                request.include_cross_connection
-            )
-            discovered.extend(name_relationships)
-        
-        # Strategy 3: Discover by data analysis (optional, slower)
-        if request.discover_by_data:
-            data_relationships = await self._discover_by_data_analysis(
-                tables, columns, columns_by_table, table_lookup,
-                request.include_cross_connection
-            )
-            discovered.extend(data_relationships)
-        
-        # Filter by minimum confidence
-        discovered = [d for d in discovered if d['confidence'] >= request.min_confidence]
+        # Discover from FK constraints (extracted from database)
+        discovered = await self._discover_from_fk_constraints(
+            tables, columns, table_lookup
+        )
         
         # Deduplicate
         discovered = self._deduplicate_discoveries(discovered)
@@ -158,13 +167,13 @@ class RelationshipDiscoveryService:
             if pair in existing_pairs or reverse_pair in existing_pairs:
                 continue  # Already exists
             
-            # Auto-accept FK-based relationships if configured
-            if request.auto_accept_fk and disc['source'] == RelationshipSource.AUTO_FK:
+            # Auto-accept if configured, otherwise create as suggestion
+            if request.auto_accept:
                 rel = await self._create_relationship_from_discovery(disc)
                 new_relationships.append(await self._build_relationship_response(rel))
                 relationships_created += 1
             else:
-                # Create as suggestion
+                # Create as suggestion for review
                 suggestion = await self._create_suggestion_from_discovery(disc)
                 new_suggestions.append(await self._build_suggestion_response(suggestion))
                 suggestions_created += 1
@@ -189,15 +198,43 @@ class RelationshipDiscoveryService:
         table_lookup: Dict
     ) -> List[Dict]:
         """
-        Discover relationships from foreign key constraints stored in metadata.
+        Discover relationships from foreign key constraints.
         
-        Note: This requires FK information to be stored in column properties
-        during metadata extraction.
+        Uses two sources:
+        1. FK metadata stored in external_columns (is_foreign_key, fk_referenced_table_id, fk_referenced_column_id)
+        2. Legacy FK info in column properties
+        
+        If FK metadata is not populated, call POST /api/metadata/connections/{id}/extract-constraints first.
         """
         discovered = []
         
         for col in columns:
-            # Check if column has FK information in properties
+            # ==== Strategy 1: Use new FK metadata fields (preferred) ====
+            # Check if this column is marked as FK with referenced table/column
+            col_result = await self.db.execute(
+                select(ExternalColumn).where(ExternalColumn.id == col['column_id'])
+            )
+            col_obj = col_result.scalar_one_or_none()
+            
+            if col_obj and col_obj.is_foreign_key and col_obj.fk_referenced_table_id and col_obj.fk_referenced_column_id:
+                # FK metadata is populated - use it directly
+                discovered.append({
+                    'left_table_id': col_obj.fk_referenced_table_id,
+                    'left_column_id': col_obj.fk_referenced_column_id,
+                    'right_table_id': col['table_id'],
+                    'right_column_id': col['column_id'],
+                    'source': RelationshipSource.AUTO_FK,
+                    'confidence': 1.0,
+                    'cardinality': RelationshipCardinality.ONE_TO_MANY,  # FK -> PK is typically many-to-one (reversed: one-to-many)
+                    'details': {
+                        'reason': 'foreign_key_constraint',
+                        'constraint_name': col_obj.fk_constraint_name,
+                        'source': 'database_metadata'
+                    }
+                })
+                continue  # Skip legacy check
+            
+            # ==== Strategy 2: Legacy - Check properties for FK info ====
             props = col.get('properties', {})
             fk_info = props.get('foreign_key') or props.get('fk') or props.get('references')
             
@@ -237,7 +274,8 @@ class RelationshipDiscoveryService:
                                 'cardinality': RelationshipCardinality.ONE_TO_MANY,
                                 'details': {
                                     'reason': 'foreign_key_constraint',
-                                    'fk_info': fk_info
+                                    'fk_info': fk_info,
+                                    'source': 'column_properties'
                                 }
                             })
         
@@ -666,7 +704,7 @@ class RelationshipDiscoveryService:
             name=name,
             description=description,
             scope=scope,
-            source=RelationshipSource(suggestion.suggestion_reason.replace('_match', '').replace('_pattern', '')),
+            source=self._map_suggestion_reason_to_source(suggestion.suggestion_reason),
             cardinality=RelationshipCardinality(cardinality.value) if cardinality else None,
             default_join_type=JoinType(default_join_type.value) if default_join_type else JoinType.FULL,
             confidence_score=suggestion.confidence_score,
@@ -684,6 +722,35 @@ class RelationshipDiscoveryService:
         await self.db.refresh(relationship)
         
         return await self._build_relationship_response(relationship)
+    
+    def _map_suggestion_reason_to_source(self, reason: str) -> RelationshipSource:
+        """Map suggestion reason string to RelationshipSource enum."""
+        reason_mapping = {
+            'foreign_key_constraint': RelationshipSource.AUTO_FK,
+            'fk_constraint': RelationshipSource.AUTO_FK,
+            'auto_fk': RelationshipSource.AUTO_FK,
+            'name_match': RelationshipSource.AUTO_NAME,
+            'name_pattern': RelationshipSource.AUTO_NAME,
+            'auto_name': RelationshipSource.AUTO_NAME,
+            'data_match': RelationshipSource.AUTO_DATA,
+            'data_analysis': RelationshipSource.AUTO_DATA,
+            'auto_data': RelationshipSource.AUTO_DATA,
+            'manual': RelationshipSource.MANUAL,
+            'suggested': RelationshipSource.SUGGESTED,
+        }
+        
+        # Try direct mapping
+        if reason in reason_mapping:
+            return reason_mapping[reason]
+        
+        # Try lowercase
+        reason_lower = reason.lower()
+        if reason_lower in reason_mapping:
+            return reason_mapping[reason_lower]
+        
+        # Default to SUGGESTED if unknown
+        logger.warning(f"Unknown suggestion reason '{reason}', defaulting to SUGGESTED")
+        return RelationshipSource.SUGGESTED
     
     async def reject_suggestion(self, suggestion_id: int) -> None:
         """Reject a suggestion."""
@@ -898,6 +965,10 @@ class RelationshipDiscoveryService:
             ExternalColumn.column_name,
             ExternalColumn.data_type,
             ExternalColumn.is_primary_key,
+            ExternalColumn.is_foreign_key,
+            ExternalColumn.fk_referenced_table_id,
+            ExternalColumn.fk_referenced_column_id,
+            ExternalColumn.fk_constraint_name,
             ExternalColumn.properties,
             ExternalColumn.sample_values,
             ExternalTables.connection_id

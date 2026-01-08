@@ -1,6 +1,7 @@
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 import logging
 from typing import Dict, Any, List, Tuple, Optional
 from datetime import datetime
@@ -14,9 +15,184 @@ from ..utils.logger import logger
 # Import generic Trino extractor
 from .extractors.trino_extractor import TrinoExtractor
 
+
+async def _update_progress(
+    db: AsyncSession,
+    connection: core.DataConnection,
+    progress: int,
+    phase: str,
+    message: str,
+    current_item: Optional[str] = None,
+    items_done: int = 0,
+    total_items: int = 0
+):
+    """
+    Update sync progress in the database.
+    Progress phases:
+    - 0-5%: Setup
+    - 5-15%: Catalogs
+    - 15-30%: Schemas
+    - 30-70%: Tables
+    - 70-100%: Columns
+    """
+    connection.sync_progress = min(progress, 100)
+    connection.sync_progress_details = {
+        "phase": phase,
+        "message": message,
+        "current_item": current_item,
+        "items_done": items_done,
+        "total_items": total_items,
+        "updated_at": datetime.now().isoformat()
+    }
+    await db.commit()
+    logger.debug(f"Progress: {progress}% - {phase}: {message}")
+
+
+async def _get_or_create_catalog(
+    db: AsyncSession,
+    connection_id: int,
+    cat_info: Dict[str, Any]
+) -> int:
+    """
+    Get existing catalog or create new one. Handles race conditions gracefully.
+    Returns catalog_id.
+    """
+    cat_name = cat_info["catalog_name"]
+    
+    # First try to find existing
+    stmt = select(metadata.ExternalCatalogs).where(
+        (metadata.ExternalCatalogs.connection_id == connection_id) &
+        (metadata.ExternalCatalogs.catalog_name == cat_name)
+    )
+    existing = (await db.execute(stmt)).scalars().first()
+    
+    if existing:
+        existing.last_scanned = datetime.now()
+        return existing.id
+    
+    # Try to create
+    try:
+        cat_obj = metadata.ExternalCatalogs(
+            connection_id=connection_id,
+            catalog_name=cat_name,
+            catalog_type=cat_info.get("catalog_type"),
+            external_reference=cat_info.get("external_reference"),
+            properties=cat_info.get("properties", {})
+        )
+        db.add(cat_obj)
+        await db.flush()
+        return cat_obj.id
+    except IntegrityError:
+        # Race condition - another process created it, rollback and fetch
+        await db.rollback()
+        existing = (await db.execute(stmt)).scalars().first()
+        if existing:
+            return existing.id
+        raise  # Re-raise if still not found
+
+
+async def _get_or_create_schema(
+    db: AsyncSession,
+    connection_id: int,
+    catalog_id: Optional[int],
+    schema_info: Dict[str, Any]
+) -> metadata.ExternalSchema:
+    """
+    Get existing schema or create new one. Handles race conditions gracefully.
+    Returns schema object.
+    """
+    schema_name = schema_info["schema_name"]
+    
+    # First try to find existing
+    stmt = select(metadata.ExternalSchema).where(
+        (metadata.ExternalSchema.connection_id == connection_id) &
+        (metadata.ExternalSchema.schema_name == schema_name)
+    )
+    existing = (await db.execute(stmt)).scalars().first()
+    
+    if existing:
+        existing.last_scanned = datetime.now()
+        return existing
+    
+    # Try to create
+    try:
+        schema_obj = metadata.ExternalSchema(
+            connection_id=connection_id,
+            schema_name=schema_name,
+            catalog_id=catalog_id,
+            external_reference=schema_info.get("external_reference"),
+            properties=schema_info.get("properties", {})
+        )
+        db.add(schema_obj)
+        await db.flush()
+        return schema_obj
+    except IntegrityError:
+        # Race condition - another process created it, rollback and fetch
+        await db.rollback()
+        existing = (await db.execute(stmt)).scalars().first()
+        if existing:
+            return existing
+        raise  # Re-raise if still not found
+
+
+async def _get_or_create_table(
+    db: AsyncSession,
+    schema_id: int,
+    connection_id: int,
+    table_info: Dict[str, Any]
+) -> metadata.ExternalTables:
+    """
+    Get existing table or create new one. Handles race conditions gracefully.
+    Returns table object.
+    """
+    table_name = table_info["table_name"]
+    
+    # First try to find existing
+    stmt = select(metadata.ExternalTables).where(
+        (metadata.ExternalTables.schema_id == schema_id) &
+        (func.lower(metadata.ExternalTables.table_name) == table_name.lower())
+    )
+    existing = (await db.execute(stmt)).scalars().first()
+    
+    if existing:
+        # Update existing
+        existing.last_scanned = datetime.now()
+        existing.estimated_row_count = table_info.get("estimated_row_count")
+        existing.total_size_bytes = table_info.get("total_size_bytes")
+        existing.table_name = table_name
+        existing.external_reference = table_info.get("external_reference")
+        return existing
+    
+    # Try to create
+    try:
+        table_obj = metadata.ExternalTables(
+            schema_id=schema_id,
+            connection_id=connection_id,
+            table_name=table_name,
+            external_reference=table_info.get("external_reference"),
+            table_type=table_info.get("table_type", "table"),
+            estimated_row_count=table_info.get("estimated_row_count"),
+            total_size_bytes=table_info.get("total_size_bytes"),
+            description=table_info.get("description"),
+            properties=table_info.get("properties", {})
+        )
+        db.add(table_obj)
+        await db.flush()
+        return table_obj
+    except IntegrityError:
+        # Race condition - another process created it, rollback and fetch
+        await db.rollback()
+        existing = (await db.execute(stmt)).scalars().first()
+        if existing:
+            return existing
+        raise
+
+
 async def extract_metadata(connection_id: int) -> bool:
     """
     Extract metadata from a data connection and store it in the database.
+    Handles race conditions gracefully for concurrent syncs.
+    Tracks progress in sync_progress and sync_progress_details fields.
     """
     try:
         # Create a new session
@@ -46,17 +222,23 @@ async def extract_metadata(connection_id: int) -> bool:
                     logger.error(f"Cannot extract metadata from connection {connection_id} of type 'image'")
                     connection.sync_status = "failed"
                     connection.status = "error"
+                    connection.sync_progress = 0
+                    connection.sync_progress_details = {"phase": "error", "message": "Cannot sync image connections"}
                     await db.commit()
                     return False
                 
-                # Update connection status
+                # Update connection status - starting
                 connection.sync_status = "running"
-                await db.commit()
+                connection.sync_progress = 0
+                await _update_progress(db, connection, 0, "setup", "Initializing metadata extraction...")
                 
                 logger.info(f"Starting metadata extraction for connection {connection.name} ({connection_type.name})")
                 
                 # Use TrinoExtractor for all supported types
                 try:
+                    # Progress: 0-5% - Setup
+                    await _update_progress(db, connection, 2, "setup", "Creating Trino extractor...")
+                    
                     extractor = TrinoExtractor(
                         connection_params=connection.connection_params,
                         connection_type=connection_type.name,
@@ -64,124 +246,126 @@ async def extract_metadata(connection_id: int) -> bool:
                         connection_id=connection.id  # Pass ID for unique catalog name
                     )
                     
-                    # Extract Catalogs (usually just the one we created)
+                    await _update_progress(db, connection, 4, "setup", "Ensuring Trino catalog exists...")
+                    
+                    # Ensure catalog exists (async to not block event loop)
+                    await extractor.ensure_connection()
+                    
+                    await _update_progress(db, connection, 5, "setup", "Setup complete")
+                    
+                    # Progress: 5-15% - Extract Catalogs
+                    await _update_progress(db, connection, 6, "catalogs", "Extracting catalogs...")
+                    
                     catalogs = await extractor.extract_catalogs()
                     
                     # Map catalog_name -> catalog_id
                     catalog_map = {}
+                    total_catalogs = len(catalogs)
 
-                    for cat_info in catalogs:
-                        cat_name = cat_info["catalog_name"]
-                        stmt_cat = select(metadata.ExternalCatalogs).where(
-                            (metadata.ExternalCatalogs.connection_id == connection.id) &
-                            (metadata.ExternalCatalogs.catalog_name == cat_name)
+                    for i, cat_info in enumerate(catalogs):
+                        progress = 6 + int((i + 1) / max(total_catalogs, 1) * 9)  # 6-15%
+                        await _update_progress(
+                            db, connection, progress, "catalogs",
+                            f"Processing catalog: {cat_info['catalog_name']}",
+                            current_item=cat_info['catalog_name'],
+                            items_done=i + 1,
+                            total_items=total_catalogs
                         )
-                        existing_cat = (await db.execute(stmt_cat)).scalars().first()
-                        
-                        if existing_cat:
-                            cat_obj = existing_cat
-                            cat_obj.last_scanned = datetime.now()
-                        else:
-                            cat_obj = metadata.ExternalCatalogs(
-                                connection_id=connection.id,
-                                catalog_name=cat_name,
-                                catalog_type=cat_info.get("catalog_type"),
-                                external_reference=cat_info.get("external_reference"),
-                                properties=cat_info.get("properties", {})
-                            )
-                            db.add(cat_obj)
-                            await db.flush()
-                        
-                        catalog_map[cat_name] = cat_obj.id
+                        cat_id = await _get_or_create_catalog(db, connection.id, cat_info)
+                        catalog_map[cat_info["catalog_name"]] = cat_id
                     
-                    # Extract Schemas
+                    # Progress: 15-30% - Extract Schemas
+                    await _update_progress(db, connection, 15, "schemas", "Extracting schemas...")
+                    
                     schemas = await extractor.extract_schemas()
-                    logger.info(f"Extracted {len(schemas)} schemas")
+                    total_schemas = len(schemas)
+                    logger.info(f"Extracted {total_schemas} schemas")
+                    
+                    # Count total tables for progress calculation
+                    total_tables_estimate = total_schemas * 5  # Estimate avg 5 tables per schema
+                    tables_processed = 0
                     
                     # Store schemas and tables
-                    for schema_info in schemas:
-                        # Store Schema
+                    for schema_idx, schema_info in enumerate(schemas):
                         schema_name = schema_info["schema_name"]
+                        catalog_name = schema_info.get("catalog_name")
+                        catalog_id = catalog_map.get(catalog_name)
                         
-                        # Check if schema exists
-                        stmt = select(metadata.ExternalSchema).where(
-                            (metadata.ExternalSchema.connection_id == connection.id) &
-                            (metadata.ExternalSchema.schema_name == schema_name)
+                        # Progress: 15-30% for schemas
+                        schema_progress = 15 + int((schema_idx + 1) / max(total_schemas, 1) * 15)  # 15-30%
+                        await _update_progress(
+                            db, connection, schema_progress, "schemas",
+                            f"Processing schema: {schema_name}",
+                            current_item=schema_name,
+                            items_done=schema_idx + 1,
+                            total_items=total_schemas
                         )
-                        existing_schema = (await db.execute(stmt)).scalars().first()
                         
-                        if existing_schema:
-                            schema_obj = existing_schema
-                            schema_obj.last_scanned = datetime.now()
-                        else:
-                            # Look up catalog_id
-                            catalog_name_extracted = schema_info.get("catalog_name")
-                            catalog_id = catalog_map.get(catalog_name_extracted)
-                            
-                            schema_obj = metadata.ExternalSchema(
-                                connection_id=connection.id,
-                                schema_name=schema_name,
-                                catalog_id=catalog_id,
-                                external_reference=schema_info.get("external_reference"),
-                                properties=schema_info.get("properties", {})
-                            )
-                            db.add(schema_obj)
-                            await db.flush() # Get ID
+                        # Get or create schema (handles race conditions)
+                        schema_obj = await _get_or_create_schema(
+                            db, connection.id, catalog_id, schema_info
+                        )
                         
                         # Extract Tables for this schema
                         tables = await extractor.extract_tables(schema_name)
-                        logger.info(f"Extracted {len(tables)} tables for schema {schema_name}")
+                        total_tables_in_schema = len(tables)
+                        logger.info(f"Extracted {total_tables_in_schema} tables for schema {schema_name}")
                         
-                        for table_info in tables:
+                        # Update total estimate
+                        if schema_idx == 0 and total_tables_in_schema > 0:
+                            total_tables_estimate = total_schemas * total_tables_in_schema
+                        
+                        for table_idx, table_info in enumerate(tables):
+                            tables_processed += 1
+                            
+                            # Progress: 30-70% for tables
+                            table_progress = 30 + int(tables_processed / max(total_tables_estimate, 1) * 40)  # 30-70%
+                            table_progress = min(table_progress, 70)
+                            
                             table_name = table_info["table_name"]
-                            
-                            # Check if table exists
-                            stmt_table = select(metadata.ExternalTables).where(
-                                (metadata.ExternalTables.schema_id == schema_obj.id) &
-                                (func.lower(metadata.ExternalTables.table_name) == table_name.lower())
+                            await _update_progress(
+                                db, connection, table_progress, "tables",
+                                f"Processing table: {schema_name}.{table_name}",
+                                current_item=f"{schema_name}.{table_name}",
+                                items_done=tables_processed,
+                                total_items=total_tables_estimate
                             )
-                            existing_table = (await db.execute(stmt_table)).scalars().first()
                             
-                            if existing_table:
-                                table_obj = existing_table
-                                table_obj.last_scanned = datetime.now()
-                                table_obj.estimated_row_count = table_info.get("estimated_row_count")
-                                table_obj.total_size_bytes = table_info.get("total_size_bytes")
-                                # If extractor now returns canonical/mixed-case names, keep DB in sync
-                                table_obj.table_name = table_name
-                                table_obj.external_reference = table_info.get("external_reference")
-                            else:
-                                table_obj = metadata.ExternalTables(
-                                    schema_id=schema_obj.id,
-                                    connection_id=connection.id,
-                                    table_name=table_name,
-                                    external_reference=table_info.get("external_reference"),
-                                    table_type=table_info.get("table_type", "table"),
-                                    estimated_row_count=table_info.get("estimated_row_count"),
-                                    total_size_bytes=table_info.get("total_size_bytes"),
-                                    description=table_info.get("description"),
-                                    properties=table_info.get("properties", {})
-                                )
-                                db.add(table_obj)
-                                await db.flush()
+                            # Get or create table (handles race conditions)
+                            table_obj = await _get_or_create_table(
+                                db, schema_obj.id, connection.id, table_info
+                            )
                             
-                            # Extract Columns
+                            # Extract Columns - Progress: 70-100%
                             columns = await extractor.extract_columns(schema_name, table_name)
+                            total_columns = len(columns)
                             
-                            # Update columns
-                            # For simplicity, we might want to delete existing and recreate, or update
-                            # Here we'll update/insert
-                            existing_col_names = set()
-                            if existing_table:
-                                stmt_cols = select(metadata.ExternalColumn).where(metadata.ExternalColumn.table_id == table_obj.id)
-                                existing_cols = (await db.execute(stmt_cols)).scalars().all()
-                                existing_col_names = {c.column_name: c for c in existing_cols}
+                            # Get existing columns for this table
+                            stmt_cols = select(metadata.ExternalColumn).where(
+                                metadata.ExternalColumn.table_id == table_obj.id
+                            )
+                            existing_cols = (await db.execute(stmt_cols)).scalars().all()
+                            existing_col_map = {c.column_name: c for c in existing_cols}
                             
-                            for col_info in columns:
+                            for col_idx, col_info in enumerate(columns):
                                 col_name = col_info["column_name"]
                                 
-                                if col_name in existing_col_names:
-                                    col_obj = existing_col_names[col_name]
+                                # Progress within columns (70-100% spread across all tables)
+                                # We update less frequently for columns to avoid too many commits
+                                if col_idx == 0 or col_idx == total_columns - 1:
+                                    col_progress = 70 + int(tables_processed / max(total_tables_estimate, 1) * 30)
+                                    col_progress = min(col_progress, 99)
+                                    await _update_progress(
+                                        db, connection, col_progress, "columns",
+                                        f"Processing columns for: {schema_name}.{table_name}",
+                                        current_item=f"{schema_name}.{table_name}",
+                                        items_done=col_idx + 1,
+                                        total_items=total_columns
+                                    )
+                                
+                                if col_name in existing_col_map:
+                                    # Update existing column
+                                    col_obj = existing_col_map[col_name]
                                     col_obj.data_type = col_info["data_type"]
                                     col_obj.is_nullable = col_info["is_nullable"]
                                     col_obj.column_position = col_info.get("column_position", col_obj.column_position)
@@ -198,28 +382,43 @@ async def extract_metadata(connection_id: int) -> bool:
                                     col_obj.statistics = col_info.get("statistics", {})
                                     col_obj.properties = col_info.get("properties", {})
                                 else:
-                                    col_obj = metadata.ExternalColumn(
-                                        table_id=table_obj.id,
-                                        column_name=col_name,
-                                        external_reference=col_info.get("external_reference"),
-                                        data_type=col_info["data_type"],
-                                        is_nullable=col_info["is_nullable"],
-                                        column_position=col_info["column_position"],
-                                        max_length=col_info.get("max_length"),
-                                        numeric_precision=col_info.get("numeric_precision"),
-                                        numeric_scale=col_info.get("numeric_scale"),
-                                        is_primary_key=col_info.get("is_primary_key", False),
-                                        is_unique=col_info.get("is_unique", False),
-                                        is_indexed=col_info.get("is_indexed", False),
-                                        default_value=col_info.get("default_value"),
-                                        description=col_info.get("description"),
-                                        statistics=col_info.get("statistics", {}),
-                                        sample_values=col_info.get("sample_values", []),
-                                        properties=col_info.get("properties", {})
-                                    )
-                                    db.add(col_obj)
+                                    # Create new column
+                                    try:
+                                        col_obj = metadata.ExternalColumn(
+                                            table_id=table_obj.id,
+                                            column_name=col_name,
+                                            external_reference=col_info.get("external_reference"),
+                                            data_type=col_info["data_type"],
+                                            is_nullable=col_info["is_nullable"],
+                                            column_position=col_info["column_position"],
+                                            max_length=col_info.get("max_length"),
+                                            numeric_precision=col_info.get("numeric_precision"),
+                                            numeric_scale=col_info.get("numeric_scale"),
+                                            is_primary_key=col_info.get("is_primary_key", False),
+                                            is_unique=col_info.get("is_unique", False),
+                                            is_indexed=col_info.get("is_indexed", False),
+                                            default_value=col_info.get("default_value"),
+                                            description=col_info.get("description"),
+                                            statistics=col_info.get("statistics", {}),
+                                            sample_values=col_info.get("sample_values", []),
+                                            properties=col_info.get("properties", {})
+                                        )
+                                        db.add(col_obj)
+                                    except IntegrityError:
+                                        # Column already exists (race condition), skip
+                                        await db.rollback()
+                                        logger.debug(f"Column {col_name} already exists, skipping")
                             
+                    # Complete!
                     connection.sync_status = "success"
+                    connection.sync_progress = 100
+                    connection.sync_progress_details = {
+                        "phase": "complete",
+                        "message": "Metadata extraction completed successfully",
+                        "schemas_processed": total_schemas,
+                        "tables_processed": tables_processed,
+                        "completed_at": datetime.now().isoformat()
+                    }
                     connection.last_sync_time = datetime.now()
                     connection.status = "active"
                     await db.commit()
@@ -228,9 +427,22 @@ async def extract_metadata(connection_id: int) -> bool:
                     
                 except Exception as ext_error:
                     logger.error(f"Error during extraction logic: {str(ext_error)}")
-                    connection.sync_status = "failed"
-                    connection.status = "error"
-                    await db.commit()
+                    try:
+                        await db.rollback()
+                    except:
+                        pass
+                    # Try to update connection status in a fresh transaction
+                    try:
+                        connection.sync_status = "failed"
+                        connection.status = "error"
+                        connection.sync_progress_details = {
+                            "phase": "error",
+                            "message": f"Extraction failed: {str(ext_error)}",
+                            "failed_at": datetime.now().isoformat()
+                        }
+                        await db.commit()
+                    except:
+                        pass
                     return False
                 finally:
                     if 'extractor' in locals():
@@ -238,9 +450,10 @@ async def extract_metadata(connection_id: int) -> bool:
 
             except Exception as e:
                 logger.error(f"Database error during metadata extraction: {str(e)}")
-                if 'connection' in locals():
-                     connection.sync_status = "failed"
-                     await db.commit()
+                try:
+                    await db.rollback()
+                except:
+                    pass
                 return False
                 
     except Exception as e:

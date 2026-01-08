@@ -1,204 +1,309 @@
 """
-Cliente para comunicação com a API do Airflow.
-Usado para disparar DAGs dos microserviços.
+Airflow API Client for triggering DAGs
 """
+import os
+import logging
+from typing import Optional, Dict, Any
+from datetime import datetime
 
 import httpx
-import logging
-from typing import Dict, Any, Optional
-from datetime import datetime
-import os
+
+from ..core.config import (
+    AIRFLOW_BASE_URL,
+    AIRFLOW_USERNAME,
+    AIRFLOW_PASSWORD,
+    AIRFLOW_SYNC_DAG_ID
+)
 
 logger = logging.getLogger(__name__)
 
+# Pool configuration
+SYNC_POOL_NAME = "sync_pool"
+SYNC_POOL_SLOTS = 10
+SYNC_POOL_DESCRIPTION = "Pool para controlar concorrência de jobs de sincronização de metadados"
+
+# HTTP Connection configuration (for Airflow to call FastAPI)
+SYNC_CONN_ID = "sync_service_conn"
+SYNC_CONN_HOST = os.getenv("BACKEND_HOST", "host.docker.internal")
+SYNC_CONN_PORT = int(os.getenv("BACKEND_PORT", "8004"))
+
+# Cache para evitar verificações repetidas de pool/connection
+_resources_ensured = False
+
+
+class AirflowClientError(Exception):
+    """Exception raised when Airflow API call fails"""
+    pass
+
+
 class AirflowClient:
-    """Cliente para interagir com a API do Airflow"""
+    """Client for interacting with Airflow REST API"""
     
-    def __init__(self):
-        self.base_url = os.getenv("AIRFLOW_API_URL", "http://localhost:8080/api/v1")
-        self.username = os.getenv("AIRFLOW_USERNAME", "airflow")
-        self.password = os.getenv("AIRFLOW_PASSWORD", "airflow")
+    def __init__(
+        self,
+        base_url: str = AIRFLOW_BASE_URL,
+        username: str = AIRFLOW_USERNAME,
+        password: str = AIRFLOW_PASSWORD
+    ):
+        self.base_url = base_url.rstrip('/')
+        self.auth = (username, password)
         
     async def trigger_dag(
-        self, 
-        dag_id: str, 
-        dag_run_id: str, 
-        conf: Optional[Dict[str, Any]] = None
+        self,
+        dag_id: str,
+        conf: Optional[Dict[str, Any]] = None,
+        logical_date: Optional[datetime] = None
     ) -> Dict[str, Any]:
         """
-        Dispara um DAG do Airflow
+        Trigger a DAG run via Airflow REST API
         
         Args:
-            dag_id: ID do DAG a ser executado
-            dag_run_id: ID único para esta execução
-            conf: Configurações para passar ao DAG
+            dag_id: The DAG ID to trigger
+            conf: Configuration parameters to pass to the DAG
+            logical_date: Optional logical date for the DAG run
             
         Returns:
-            Resposta da API do Airflow com detalhes da execução
+            Dict with DAG run information
+            
+        Raises:
+            AirflowClientError: If the API call fails
         """
-        url = f"{self.base_url}/dags/{dag_id}/dagRuns"
+        url = f"{self.base_url}/api/v1/dags/{dag_id}/dagRuns"
         
-        from datetime import timezone, timedelta
-        
-        # São Paulo timezone (UTC-3)
-        sao_paulo_tz = timezone(timedelta(hours=-3))
-        
-        # Use current São Paulo time but convert to UTC for Airflow
-        local_time = datetime.now(sao_paulo_tz)
-        utc_time = local_time.astimezone(timezone.utc)
-        
-        payload = {
-            "dag_run_id": dag_run_id,
-            "conf": conf or {},
-            "execution_date": utc_time.isoformat(),
-            "note": f"Triggered via API at {local_time.strftime('%Y-%m-%d %H:%M:%S')} (São Paulo)"
-        }
+        payload = {}
+        if conf:
+            payload["conf"] = conf
+        if logical_date:
+            payload["logical_date"] = logical_date.isoformat()
+            
+        logger.info(f"Triggering DAG {dag_id} with conf: {conf}")
         
         try:
-            async with httpx.AsyncClient() as client:
-                logger.info(f"Triggering Airflow DAG: {dag_id} with run_id: {dag_run_id}")
-                
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 response = await client.post(
                     url,
                     json=payload,
-                    auth=(self.username, self.password),
-                    headers={"Content-Type": "application/json"},
-                    timeout=30.0
+                    auth=self.auth,
+                    headers={"Content-Type": "application/json"}
                 )
                 
                 if response.status_code == 200:
                     result = response.json()
-                    logger.info(f"✅ DAG {dag_id} triggered successfully: {dag_run_id}")
+                    logger.info(f"DAG {dag_id} triggered successfully. Run ID: {result.get('dag_run_id')}")
                     return result
+                elif response.status_code == 404:
+                    raise AirflowClientError(f"DAG '{dag_id}' not found in Airflow")
+                elif response.status_code == 401:
+                    raise AirflowClientError("Airflow authentication failed. Check credentials.")
                 elif response.status_code == 409:
-                    # DAG run already exists
-                    logger.warning(f"DAG run {dag_run_id} already exists for {dag_id}")
-                    raise ValueError(f"DAG run {dag_run_id} already exists")
+                    # DAG run already exists for this logical_date
+                    raise AirflowClientError(f"DAG run already exists: {response.text}")
                 else:
-                    error_msg = f"Failed to trigger DAG {dag_id}: {response.status_code} - {response.text}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    raise AirflowClientError(
+                        f"Failed to trigger DAG. Status: {response.status_code}, Response: {response.text}"
+                    )
                     
-        except httpx.RequestError as e:
-            error_msg = f"Network error triggering DAG {dag_id}: {str(e)}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
-        except Exception as e:
-            logger.error(f"Unexpected error triggering DAG {dag_id}: {str(e)}")
-            raise
-    
+        except httpx.ConnectError as e:
+            logger.error(f"Failed to connect to Airflow at {self.base_url}: {e}")
+            raise AirflowClientError(f"Cannot connect to Airflow at {self.base_url}") from e
+        except httpx.TimeoutException as e:
+            logger.error(f"Timeout connecting to Airflow: {e}")
+            raise AirflowClientError("Airflow request timed out") from e
+            
     async def get_dag_run_status(self, dag_id: str, dag_run_id: str) -> Dict[str, Any]:
         """
-        Obtém o status de uma execução de DAG
+        Get the status of a DAG run
         
         Args:
-            dag_id: ID do DAG
-            dag_run_id: ID da execução
+            dag_id: The DAG ID
+            dag_run_id: The DAG run ID
             
         Returns:
-            Status da execução do DAG
+            Dict with DAG run status information
         """
-        url = f"{self.base_url}/dags/{dag_id}/dagRuns/{dag_run_id}"
+        url = f"{self.base_url}/api/v1/dags/{dag_id}/dagRuns/{dag_run_id}"
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    url,
-                    auth=(self.username, self.password),
-                    timeout=10.0
-                )
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.get(url, auth=self.auth)
                 
                 if response.status_code == 200:
                     return response.json()
+                elif response.status_code == 404:
+                    raise AirflowClientError(f"DAG run '{dag_run_id}' not found")
                 else:
-                    error_msg = f"Failed to get DAG run status: {response.status_code} - {response.text}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    raise AirflowClientError(
+                        f"Failed to get DAG run status. Status: {response.status_code}"
+                    )
                     
-        except httpx.RequestError as e:
-            error_msg = f"Network error getting DAG run status: {str(e)}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
-    
-    async def get_dag_runs(self, dag_id: str, limit: int = 10) -> Dict[str, Any]:
+        except httpx.ConnectError as e:
+            raise AirflowClientError(f"Cannot connect to Airflow") from e
+            
+    async def ensure_connection_exists(
+        self,
+        conn_id: str,
+        host: str,
+        port: int,
+        conn_type: str = "http",
+        schema: str = "http"
+    ) -> bool:
         """
-        Lista execuções recentes de um DAG
+        Ensure an HTTP connection exists in Airflow, creating it if necessary.
         
         Args:
-            dag_id: ID do DAG
-            limit: Número máximo de execuções para retornar
+            conn_id: Connection ID
+            host: Host address
+            port: Port number
+            conn_type: Connection type (default: http)
+            schema: URL schema (default: http)
             
         Returns:
-            Lista de execuções do DAG
+            True if connection exists or was created, False on error
         """
-        url = f"{self.base_url}/dags/{dag_id}/dagRuns"
+        url = f"{self.base_url}/api/v1/connections/{conn_id}"
         
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    url,
-                    params={"limit": limit, "order_by": "-execution_date"},
-                    auth=(self.username, self.password),
-                    timeout=10.0
-                )
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Check if connection exists
+                response = await client.get(url, auth=self.auth)
                 
                 if response.status_code == 200:
-                    return response.json()
-                else:
-                    error_msg = f"Failed to get DAG runs: {response.status_code} - {response.text}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    logger.debug(f"Connection '{conn_id}' already exists")
+                    return True
+                elif response.status_code == 404:
+                    # Connection doesn't exist, create it
+                    logger.info(f"Creating HTTP connection '{conn_id}' -> {host}:{port}")
                     
-        except httpx.RequestError as e:
-            error_msg = f"Network error getting DAG runs: {str(e)}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
-    
-    async def get_task_instances(self, dag_id: str, dag_run_id: str) -> Dict[str, Any]:
-        """
-        Obtém instâncias de tasks de uma execução de DAG
-        
-        Args:
-            dag_id: ID do DAG
-            dag_run_id: ID da execução
-            
-        Returns:
-            Lista de task instances
-        """
-        url = f"{self.base_url}/dags/{dag_id}/dagRuns/{dag_run_id}/taskInstances"
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    url,
-                    auth=(self.username, self.password),
-                    timeout=10.0
-                )
-                
-                if response.status_code == 200:
-                    return response.json()
-                else:
-                    error_msg = f"Failed to get task instances: {response.status_code} - {response.text}"
-                    logger.error(error_msg)
-                    raise Exception(error_msg)
+                    create_url = f"{self.base_url}/api/v1/connections"
+                    create_response = await client.post(
+                        create_url,
+                        json={
+                            "connection_id": conn_id,
+                            "conn_type": conn_type,
+                            "host": host,
+                            "port": port,
+                            "schema": schema,
+                            "description": f"Auto-created connection to FastAPI backend at {host}:{port}"
+                        },
+                        auth=self.auth,
+                        headers={"Content-Type": "application/json"}
+                    )
                     
-        except httpx.RequestError as e:
-            error_msg = f"Network error getting task instances: {str(e)}"
-            logger.error(error_msg)
-            raise Exception(error_msg)
-    
-    async def health_check(self) -> bool:
-        """
-        Verifica se o Airflow está disponível
-        
-        Returns:
-            True se o Airflow estiver disponível, False caso contrário
-        """
-        url = f"{self.base_url.replace('/api/v1', '')}/health"
-        
-        try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(url, timeout=5.0)
-                return response.status_code == 200
-        except Exception:
+                    if create_response.status_code == 200:
+                        logger.info(f"Connection '{conn_id}' created successfully")
+                        return True
+                    else:
+                        logger.error(f"Failed to create connection: {create_response.status_code} - {create_response.text}")
+                        return False
+                else:
+                    logger.error(f"Unexpected response checking connection: {response.status_code}")
+                    return False
+                    
+        except Exception as e:
+            logger.warning(f"Could not ensure connection exists: {e}")
             return False
+
+    async def ensure_pool_exists(self, pool_name: str, slots: int, description: str) -> bool:
+        """
+        Ensure a pool exists in Airflow, creating it if necessary.
+        
+        Args:
+            pool_name: Name of the pool
+            slots: Number of slots for the pool
+            description: Pool description
+            
+        Returns:
+            True if pool exists or was created, False on error
+        """
+        url = f"{self.base_url}/api/v1/pools/{pool_name}"
+        
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                # Check if pool exists
+                response = await client.get(url, auth=self.auth)
+                
+                if response.status_code == 200:
+                    logger.debug(f"Pool '{pool_name}' already exists")
+                    return True
+                elif response.status_code == 404:
+                    # Pool doesn't exist, create it
+                    logger.info(f"Creating pool '{pool_name}' with {slots} slots")
+                    
+                    create_url = f"{self.base_url}/api/v1/pools"
+                    create_response = await client.post(
+                        create_url,
+                        json={
+                            "name": pool_name,
+                            "slots": slots,
+                            "description": description
+                        },
+                        auth=self.auth,
+                        headers={"Content-Type": "application/json"}
+                    )
+                    
+                    if create_response.status_code == 200:
+                        logger.info(f"Pool '{pool_name}' created successfully")
+                        return True
+                    else:
+                        logger.error(f"Failed to create pool: {create_response.status_code} - {create_response.text}")
+                        return False
+                else:
+                    logger.error(f"Unexpected response checking pool: {response.status_code}")
+                    return False
+                    
+        except Exception as e:
+            logger.warning(f"Could not ensure pool exists: {e}")
+            return False
+
+    async def trigger_sync_dag(self, connection_id: int, priority: int = 1) -> Dict[str, Any]:
+        """
+        Convenience method to trigger the sync_data_connection DAG
+        
+        Args:
+            connection_id: The data connection ID to sync
+            priority: Job priority (1-10)
+            
+        Returns:
+            Dict with DAG run information
+        """
+        global _resources_ensured
+        
+        # Verificar pool/connection apenas uma vez por instância do app
+        if not _resources_ensured:
+            # Ensure the HTTP connection exists (for DAG to call FastAPI)
+            await self.ensure_connection_exists(
+                SYNC_CONN_ID,
+                SYNC_CONN_HOST,
+                SYNC_CONN_PORT
+            )
+            
+            # Ensure the sync pool exists before triggering
+            await self.ensure_pool_exists(
+                SYNC_POOL_NAME,
+                SYNC_POOL_SLOTS,
+                SYNC_POOL_DESCRIPTION
+            )
+            _resources_ensured = True
+            logger.info("Airflow resources (pool + connection) verified - will not check again")
+        
+        job_id = f"sync_{connection_id}_{int(datetime.now().timestamp())}"
+        
+        conf = {
+            "connection_id": connection_id,
+            "job_id": job_id,
+            "priority": priority
+        }
+        
+        return await self.trigger_dag(AIRFLOW_SYNC_DAG_ID, conf=conf)
+
+
+# Singleton instance
+_airflow_client: Optional[AirflowClient] = None
+
+
+def get_airflow_client() -> AirflowClient:
+    """Get or create the Airflow client singleton"""
+    global _airflow_client
+    if _airflow_client is None:
+        _airflow_client = AirflowClient()
+    return _airflow_client

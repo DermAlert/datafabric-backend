@@ -82,16 +82,45 @@ async def create_delta_on_minio():
     return [row.asDict() for row in df_male.collect()]
 
 #general minio read delta bucket, input bucket path
-#general minio read delta bucket, input bucket path
 @router.get("/read_delta_minio/{path:path}")
-async def read_delta_minio(path: str):
+async def read_delta_minio(path: str, limit: int = 100, offset: int = 0):
     """
     Read Delta table from MinIO bucket.
+    
+    Args:
+        path: Path to Delta table (e.g., "bucket/path/to/table")
+        limit: Maximum number of rows to return (default: 100, max: 10000)
+        offset: Number of rows to skip (default: 0)
     """
-    print(f"Reading Delta table from path: s3a://{path}")
+    # Cap limit to prevent memory issues
+    limit = min(limit, 10000)
+    
+    print(f"Reading Delta table from path: s3a://{path} (limit={limit}, offset={offset})")
     try:
         delta_df = spark.read.format("delta").load(f"s3a://{path}")
-        return [row.asDict() for row in delta_df.collect()]
+        
+        # Get total count (cached for schema info)
+        total_count = delta_df.count()
+        
+        # Apply offset and limit
+        if offset > 0:
+            # Use row_number for offset (Spark doesn't have native offset)
+            from pyspark.sql.window import Window
+            from pyspark.sql.functions import row_number, monotonically_increasing_id
+            
+            delta_df = delta_df.withColumn("_row_num", monotonically_increasing_id())
+            delta_df = delta_df.filter(delta_df._row_num >= offset).drop("_row_num")
+        
+        limited_df = delta_df.limit(limit)
+        rows = [row.asDict() for row in limited_df.collect()]
+        
+        return {
+            "total_count": total_count,
+            "returned_count": len(rows),
+            "limit": limit,
+            "offset": offset,
+            "data": rows
+        }
     except Exception as e:
         return {"error": str(e)}
     
