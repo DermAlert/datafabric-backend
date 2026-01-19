@@ -55,3 +55,9 @@ class ConnectionTestResult(BaseModel):
     success: bool
     message: str
     details: Optional[Dict[str, Any]] = None
+
+
+class ConnectionTestRequest(BaseModel):
+    """Request para testar conexão ANTES de salvar no banco"""
+    connection_type_id: int
+    connection_params: Dict[str, Any]

@@ -355,3 +355,360 @@ class BronzeVirtualizedResponse(BaseModel):
     warnings: List[str] = []
     message: str
 
+
+# ==================== BRONZE CONFIG ARCHITECTURE ====================
+# These schemas mirror the Silver layer architecture for consistency.
+# - VirtualizedConfig: Query original sources (no persistence)
+# - PersistentConfig: Materialize raw data to Delta Lake
+
+class BronzeExecutionStatusEnum(str, Enum):
+    """Status of a Bronze execution"""
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    PARTIAL = "partial"
+    FAILED = "failed"
+
+
+# ==================== VIRTUALIZED CONFIG ====================
+
+class BronzeVirtualizedConfigCreate(BaseModel):
+    """
+    Create a virtualized config for querying original data sources via Trino.
+    Data is NOT saved - returned as JSON (use for exploration, APIs, etc.).
+    
+    This is like a "saved query" that can be executed multiple times.
+    
+    ---
+    
+    ## **Request Fields:**
+    
+    | Field | Type | Required | Description |
+    |-------|------|----------|-------------|
+    | `name` | string | ✅ | Unique name for the config |
+    | `description` | string | ❌ | Optional description |
+    | `tables` | object[] | ✅ | Tables and columns to include |
+    | `relationship_ids` | int[] | ❌ | Relationships for JOINs. `null`=auto-discover, `[]`=CROSS JOIN |
+    | `enable_federated_joins` | bool | ❌ | Enable cross-database JOINs (default: false) |
+    
+    ---
+    
+    ## **tables Structure:**
+    
+    ```json
+    "tables": [
+      {"table_id": 1, "select_all": true},
+      {"table_id": 2, "column_ids": [10, 11, 12]}
+    ]
+    ```
+    
+    | Field | Type | Description |
+    |-------|------|-------------|
+    | `table_id` | int | ID from GET /api/metadata/tables |
+    | `select_all` | bool | If true, includes all columns (default: false) |
+    | `column_ids` | int[] | Specific columns (required if select_all=false) |
+    
+    ---
+    
+    ## **Example 1: Minimal (all columns from one table)**
+    ```json
+    {
+      "name": "users_exploration",
+      "tables": [{"table_id": 1, "select_all": true}]
+    }
+    ```
+    
+    ## **Example 2: Multiple tables with auto-discovered relationships**
+    ```json
+    {
+      "name": "users_orders_view",
+      "description": "Users with their orders",
+      "tables": [
+        {"table_id": 1, "select_all": true},
+        {"table_id": 2, "column_ids": [10, 11, 12]}
+      ]
+    }
+    ```
+    
+    ## **Example 3: With federated joins (cross-database)**
+    ```json
+    {
+      "name": "unified_clinical_view",
+      "tables": [
+        {"table_id": 1, "select_all": true},
+        {"table_id": 10, "select_all": true}
+      ],
+      "enable_federated_joins": true
+    }
+    ```
+    """
+    name: str = Field(..., min_length=1, max_length=255, description="Unique name for the config")
+    description: Optional[str] = Field(None, description="Optional description")
+    
+    tables: List[TableColumnSelection] = Field(
+        ..., 
+        min_items=1,
+        description="Tables and columns to include"
+    )
+    
+    relationship_ids: Optional[List[int]] = Field(
+        None,
+        description="Relationship IDs for JOINs. null=auto-discover, []=CROSS JOIN (not recommended)"
+    )
+    
+    enable_federated_joins: bool = Field(
+        False,
+        description="Enable Trino federated JOINs between different databases"
+    )
+
+
+class BronzeVirtualizedConfigUpdate(BaseModel):
+    """Update a virtualized config."""
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    tables: Optional[List[TableColumnSelection]] = None
+    relationship_ids: Optional[List[int]] = None
+    enable_federated_joins: Optional[bool] = None
+    is_active: Optional[bool] = None
+
+
+class BronzeVirtualizedConfigResponse(BaseModel):
+    """Response for a virtualized config."""
+    id: int
+    name: str
+    description: Optional[str]
+    tables: List[Dict[str, Any]]
+    relationship_ids: Optional[List[int]]
+    enable_federated_joins: bool
+    generated_sql: Optional[str]
+    is_active: bool
+    last_query_time: Optional[datetime]
+    last_query_rows: Optional[int]
+    data_criacao: Optional[datetime] = None
+    data_atualizacao: Optional[datetime] = None
+    
+    model_config = {"from_attributes": True}
+
+
+class BronzeVirtualizedQueryResponse(BaseModel):
+    """Response for executing a virtualized config query."""
+    config_id: int
+    config_name: str
+    total_tables: int
+    total_columns: int
+    groups: List[BronzeVirtualizedGroupResult]
+    total_rows: int
+    execution_time_seconds: float
+    warnings: List[str] = []
+
+
+# ==================== PERSISTENT CONFIG ====================
+
+class BronzePersistentConfigCreate(BaseModel):
+    """
+    Create a persistent config for materializing raw data to Bronze Delta Lake.
+    
+    This is like a "saved ETL job" that can be executed multiple times.
+    On each execution, data is extracted from sources and saved to Delta Lake.
+    
+    ---
+    
+    ## **Request Fields:**
+    
+    | Field | Type | Required | Description |
+    |-------|------|----------|-------------|
+    | `name` | string | ✅ | Unique name for the config |
+    | `description` | string | ❌ | Optional description |
+    | `tables` | object[] | ✅ | Tables and columns to include |
+    | `relationship_ids` | int[] | ❌ | Relationships for JOINs. `null`=auto-discover |
+    | `enable_federated_joins` | bool | ❌ | Enable cross-database JOINs (default: false) |
+    | `output_format` | string | ❌ | "parquet" or "delta" (default: "parquet") |
+    | `output_bucket` | string | ❌ | MinIO bucket (defaults to system bronze bucket) |
+    | `output_path_prefix` | string | ❌ | Custom path prefix |
+    | `partition_columns` | string[] | ❌ | Columns to partition by |
+    
+    ---
+    
+    ## **Example 1: Minimal**
+    ```json
+    {
+      "name": "users_bronze",
+      "tables": [{"table_id": 1, "select_all": true}]
+    }
+    ```
+    
+    ## **Example 2: Multiple tables with specific columns**
+    ```json
+    {
+      "name": "clinical_bronze",
+      "description": "Clinical data from hospital databases",
+      "tables": [
+        {"table_id": 1, "select_all": true},
+        {"table_id": 2, "column_ids": [10, 11, 12]},
+        {"table_id": 3, "select_all": true}
+      ],
+      "output_format": "delta"
+    }
+    ```
+    
+    ## **Example 3: With partitioning**
+    ```json
+    {
+      "name": "events_bronze",
+      "tables": [{"table_id": 5, "select_all": true}],
+      "output_format": "parquet",
+      "partition_columns": ["year", "month"]
+    }
+    ```
+    
+    ## **Example 4: Complete**
+    ```json
+    {
+      "name": "unified_clinical_bronze",
+      "description": "All clinical data unified from multiple sources",
+      "tables": [
+        {"table_id": 1, "select_all": true},
+        {"table_id": 10, "select_all": true}
+      ],
+      "relationship_ids": [1, 2],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "output_bucket": "my-bronze-bucket",
+      "output_path_prefix": "clinical/v1",
+      "partition_columns": ["hospital_id"]
+    }
+    ```
+    
+    ---
+    
+    ## **Workflow:**
+    1. **Create config** → POST /api/bronze/configs/persistent
+    2. **Preview** → POST /api/bronze/configs/persistent/{id}/preview
+    3. **Execute** → POST /api/bronze/configs/persistent/{id}/execute
+    4. **Query** → GET /api/bronze/configs/persistent/{id}/data
+    """
+    name: str = Field(..., min_length=1, max_length=255, description="Unique name for the config")
+    description: Optional[str] = Field(None, description="Optional description")
+    
+    tables: List[TableColumnSelection] = Field(
+        ..., 
+        min_items=1,
+        description="Tables and columns to include"
+    )
+    
+    relationship_ids: Optional[List[int]] = Field(
+        None,
+        description="Relationship IDs for JOINs. null=auto-discover"
+    )
+    
+    enable_federated_joins: bool = Field(
+        False,
+        description="Enable Trino federated JOINs between different databases"
+    )
+    
+    output_format: OutputFormatEnum = Field(
+        OutputFormatEnum.PARQUET,
+        description="Output format for the Bronze data"
+    )
+    
+    output_bucket: Optional[str] = Field(
+        None,
+        description="MinIO bucket for output (defaults to system bronze bucket)"
+    )
+    
+    output_path_prefix: Optional[str] = Field(
+        None,
+        description="Custom path prefix for output"
+    )
+    
+    partition_columns: Optional[List[str]] = Field(
+        None,
+        description="Columns to partition by"
+    )
+    
+    properties: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Additional properties"
+    )
+
+
+class BronzePersistentConfigUpdate(BaseModel):
+    """Update a persistent config."""
+    name: Optional[str] = Field(None, min_length=1, max_length=255)
+    description: Optional[str] = None
+    tables: Optional[List[TableColumnSelection]] = None
+    relationship_ids: Optional[List[int]] = None
+    enable_federated_joins: Optional[bool] = None
+    output_format: Optional[OutputFormatEnum] = None
+    output_bucket: Optional[str] = None
+    output_path_prefix: Optional[str] = None
+    partition_columns: Optional[List[str]] = None
+    properties: Optional[Dict[str, Any]] = None
+    is_active: Optional[bool] = None
+
+
+class BronzePersistentConfigResponse(BaseModel):
+    """Response for a persistent config."""
+    id: int
+    name: str
+    description: Optional[str]
+    tables: List[Dict[str, Any]]
+    relationship_ids: Optional[List[int]]
+    enable_federated_joins: bool
+    output_format: str
+    output_bucket: Optional[str]
+    output_path_prefix: Optional[str]
+    partition_columns: Optional[List[str]]
+    properties: Optional[Dict[str, Any]]
+    is_active: bool
+    last_execution_time: Optional[datetime]
+    last_execution_status: Optional[str]
+    last_execution_rows: Optional[int]
+    dataset_id: Optional[int]
+    data_criacao: Optional[datetime] = None
+    data_atualizacao: Optional[datetime] = None
+    
+    model_config = {"from_attributes": True}
+
+
+class BronzePersistentPreviewResponse(BaseModel):
+    """Preview of persistent config execution."""
+    config_id: int
+    config_name: str
+    ingestion_groups: List[IngestionGroupPreview]
+    inter_db_links: List[Dict[str, Any]]
+    estimated_output_paths: List[str]
+    total_tables: int
+    total_columns: int
+    warnings: List[str] = []
+
+
+class BronzePersistentExecuteResponse(BaseModel):
+    """Response for persistent config execution."""
+    config_id: int
+    config_name: str
+    execution_id: int
+    status: BronzeExecutionStatusEnum
+    groups: List[IngestionGroupResult]
+    total_rows_ingested: int
+    bronze_paths: List[str]
+    execution_time_seconds: float
+    message: str
+
+
+# ==================== EXECUTION HISTORY ====================
+
+class BronzeExecutionResponse(BaseModel):
+    """Response for a Bronze execution history entry."""
+    id: int
+    config_id: int
+    status: str
+    started_at: Optional[datetime]
+    finished_at: Optional[datetime]
+    group_results: Optional[List[Dict[str, Any]]]
+    rows_ingested: Optional[int]
+    output_paths: Optional[List[str]]
+    error_message: Optional[str]
+    
+    model_config = {"from_attributes": True}
+

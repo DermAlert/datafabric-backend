@@ -12,16 +12,17 @@ from .bronze import (
     IngestionGroupTable,
     InterSourceLink,
     BronzeColumnMapping,
+    # Bronze Config Architecture
+    BronzeExecutionStatus,
+    BronzeVirtualizedConfig,
+    BronzePersistentConfig,
+    BronzeExecution,
 )
 
 from .silver import (
     NormalizationType,
-    FilterOperator,
-    FilterLogic,
     TransformStatus,
     NormalizationRule,
-    SilverFilter,
-    SilverFilterCondition,
     VirtualizedConfig,
     TransformConfig,
     TransformExecution,
@@ -38,18 +39,16 @@ __all__ = [
     "IngestionGroupTable",
     "InterSourceLink",
     "BronzeColumnMapping",
+    # Bronze Config Architecture
+    "BronzeExecutionStatus",
+    "BronzeVirtualizedConfig",
+    "BronzePersistentConfig",
+    "BronzeExecution",
     # Silver
     "NormalizationType",
-    "FilterOperator",
-    "FilterLogic",
     "TransformStatus",
     "NormalizationRule",
-    "SilverFilter",
-    "SilverFilterCondition",
     "VirtualizedConfig",
     "TransformConfig",
     "TransformExecution",
 ]
-
-
-

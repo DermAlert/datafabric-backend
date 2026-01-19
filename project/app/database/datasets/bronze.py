@@ -274,4 +274,146 @@ class BronzeColumnMapping(Base):
     ingestion_group = relationship("DatasetIngestionGroup")
 
 
+# ==================== BRONZE CONFIG ARCHITECTURE ====================
+# These models mirror the Silver layer architecture for consistency.
+# - BronzeVirtualizedConfig: Query original sources via Trino (no persistence)
+# - BronzePersistentConfig: Materialize raw data to Delta Lake
+# - BronzeExecution: Track execution history
+
+class BronzeExecutionStatus(enum.Enum):
+    """Status of a Bronze execution"""
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    PARTIAL = "partial"  # Some groups succeeded, some failed
+    FAILED = "failed"
+
+
+class BronzeVirtualizedConfig(AuditMixin, Base):
+    """
+    Configuration for virtualized Bronze queries via Trino.
+    
+    Data is NOT saved - returned as JSON for exploration, APIs, etc.
+    Uses the same table/column selection as persistent, but executes
+    on-demand without materialization.
+    
+    This mirrors VirtualizedConfig from Silver but for raw data access.
+    """
+    __tablename__ = "bronze_virtualized_configs"
+    __table_args__ = (
+        UniqueConstraint('name'),
+        {'schema': 'datasets'}
+    )
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # Table and column selection
+    # [{table_id: 1, select_all: true}, {table_id: 2, column_ids: [10, 11]}]
+    tables = Column(JSON, nullable=False)
+    
+    # Relationship filtering (optional - auto-discovered if null)
+    # If [], uses CROSS JOIN (not recommended)
+    # If null, auto-discovers relationships for selected tables
+    relationship_ids = Column(JSON, nullable=True)
+    
+    # Federated joins configuration
+    enable_federated_joins = Column(Boolean, default=False)
+    
+    # Generated SQL (for debugging/audit)
+    generated_sql = Column(Text, nullable=True)
+    
+    # Metadata
+    is_active = Column(Boolean, default=True)
+    
+    # Execution stats (last query)
+    last_query_time = Column(TIMESTAMP(timezone=True), nullable=True)
+    last_query_rows = Column(Integer, nullable=True)
+
+
+class BronzePersistentConfig(AuditMixin, Base):
+    """
+    Configuration for materializing raw data to Bronze Delta Lake.
+    
+    Stores the "definition" of how data should be extracted from sources
+    and saved to Delta Lake. Similar to DatasetBronzeConfig but as a
+    reusable config that can be executed multiple times.
+    
+    This mirrors TransformConfig from Silver but for raw data ingestion.
+    """
+    __tablename__ = "bronze_persistent_configs"
+    __table_args__ = (
+        UniqueConstraint('name'),
+        {'schema': 'datasets'}
+    )
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # Table and column selection
+    # [{table_id: 1, select_all: true}, {table_id: 2, column_ids: [10, 11]}]
+    tables = Column(JSON, nullable=False)
+    
+    # Relationship filtering (optional - auto-discovered if null)
+    relationship_ids = Column(JSON, nullable=True)
+    
+    # Federated joins configuration
+    enable_federated_joins = Column(Boolean, default=False)
+    
+    # Output configuration
+    output_format = Column(String(50), nullable=False, default='parquet')  # parquet, delta
+    output_bucket = Column(String(255), nullable=True)  # Defaults to system bronze bucket
+    output_path_prefix = Column(String(500), nullable=True)  # Custom path prefix
+    partition_columns = Column(JSON, nullable=True)  # ["year", "month"]
+    
+    # Additional properties
+    properties = Column(JSON, nullable=True)
+    
+    # Full config snapshot (for reproducibility)
+    config_snapshot = Column(JSON, nullable=True)
+    
+    # Execution status
+    last_execution_time = Column(TIMESTAMP(timezone=True), nullable=True)
+    last_execution_status = Column(SQLEnum(BronzeExecutionStatus), nullable=True)
+    last_execution_rows = Column(Integer, nullable=True)
+    last_execution_error = Column(Text, nullable=True)
+    
+    is_active = Column(Boolean, default=True)
+    
+    # Link to generated dataset (after first successful execution)
+    dataset_id = Column(Integer, ForeignKey('core.datasets.id', ondelete='SET NULL'), nullable=True)
+
+
+class BronzeExecution(AuditMixin, Base):
+    """
+    Execution history for Bronze persistent configs.
+    
+    Tracks each execution of a BronzePersistentConfig, including
+    status, timing, and any errors.
+    """
+    __tablename__ = "bronze_executions"
+    __table_args__ = {'schema': 'datasets'}
+
+    id = Column(Integer, primary_key=True)
+    config_id = Column(Integer, ForeignKey('datasets.bronze_persistent_configs.id', ondelete='CASCADE'), nullable=False)
+    
+    status = Column(SQLEnum(BronzeExecutionStatus), nullable=False, default=BronzeExecutionStatus.PENDING)
+    started_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    finished_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    
+    # Group-level results
+    # [{group_name: "...", status: "success", rows: 1000, path: "..."}]
+    group_results = Column(JSON, nullable=True)
+    
+    rows_ingested = Column(Integer, nullable=True)
+    output_paths = Column(JSON, nullable=True)  # List of output paths
+    
+    error_message = Column(Text, nullable=True)
+    
+    # Execution details
+    execution_details = Column(JSON, nullable=True)
+
+
 

@@ -382,3 +382,5 @@ class SparkManager:
         except Exception as e:
             logger.warning(f"Could not vacuum table {path}: {e}")
 
+
+
