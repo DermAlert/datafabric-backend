@@ -3,12 +3,13 @@ Silver Layer API Routes
 
 This module provides endpoints for:
 - Normalization rules management
-- Filters management
-- Virtualized configs (sources → JSON)
-- Transform configs (Bronze → Silver Delta)
+- Virtualized configs (sources → JSON) with inline filters
+- Transform configs (Bronze → Silver Delta) with inline filters
 
 NOTE: Semantic mappings are managed by the Equivalence module (/api/equivalence).
 Use ColumnGroup and ColumnMapping from Equivalence for semantic unification.
+
+NOTE: Filters are now defined inline within each config (not as separate entities).
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -23,10 +24,11 @@ from ..schemas.silver_schemas import (
     NormalizationRuleTest,
     NormalizationRuleTestResult,
     NormalizationTypeEnum,
-    # Filters
-    SilverFilterCreate,
-    SilverFilterUpdate,
-    SilverFilterResponse,
+    # Filter schemas (for documentation)
+    FilterOperatorEnum,
+    FilterLogicEnum,
+    InlineFilter,
+    FilterCondition,
     # Virtualized
     VirtualizedConfigCreate,
     VirtualizedConfigUpdate,
@@ -121,6 +123,115 @@ async def list_transformation_types():
             "For custom regex patterns, create a normalization rule first via POST /api/silver/normalization-rules",
             "For value mappings (M→Masculino), use /api/equivalence (ValueMappings)",
             "Multiple transformations on same column are applied in order"
+        ]
+    }
+
+
+@router.get(
+    "/filter-operators",
+    summary="List available filter operators",
+    description="Returns all available operators for inline filter conditions with examples."
+)
+async def list_filter_operators():
+    """
+    List all available filter operators for use in inline filters.
+    """
+    return {
+        "operators": [
+            {
+                "operator": "=",
+                "category": "comparison",
+                "description": "Equal to",
+                "example": {"column_name": "status", "operator": "=", "value": "active"}
+            },
+            {
+                "operator": "!=",
+                "category": "comparison",
+                "description": "Not equal to",
+                "example": {"column_name": "status", "operator": "!=", "value": "deleted"}
+            },
+            {
+                "operator": ">",
+                "category": "comparison",
+                "description": "Greater than",
+                "example": {"column_name": "age", "operator": ">", "value": 18}
+            },
+            {
+                "operator": ">=",
+                "category": "comparison",
+                "description": "Greater than or equal to",
+                "example": {"column_name": "age", "operator": ">=", "value": 18}
+            },
+            {
+                "operator": "<",
+                "category": "comparison",
+                "description": "Less than",
+                "example": {"column_name": "price", "operator": "<", "value": 100}
+            },
+            {
+                "operator": "<=",
+                "category": "comparison",
+                "description": "Less than or equal to",
+                "example": {"column_name": "price", "operator": "<=", "value": 100}
+            },
+            {
+                "operator": "LIKE",
+                "category": "pattern",
+                "description": "Case-sensitive pattern match (use % as wildcard)",
+                "example": {"column_name": "name", "operator": "LIKE", "value": "John%"}
+            },
+            {
+                "operator": "ILIKE",
+                "category": "pattern",
+                "description": "Case-insensitive pattern match",
+                "example": {"column_name": "email", "operator": "ILIKE", "value": "%@gmail.com"}
+            },
+            {
+                "operator": "IN",
+                "category": "set",
+                "description": "Value is in a list",
+                "example": {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+            },
+            {
+                "operator": "NOT IN",
+                "category": "set",
+                "description": "Value is not in a list",
+                "example": {"column_name": "status", "operator": "NOT IN", "value": ["deleted", "archived"]}
+            },
+            {
+                "operator": "IS NULL",
+                "category": "null",
+                "description": "Value is null",
+                "example": {"column_name": "deleted_at", "operator": "IS NULL"}
+            },
+            {
+                "operator": "IS NOT NULL",
+                "category": "null",
+                "description": "Value is not null",
+                "example": {"column_name": "email", "operator": "IS NOT NULL"}
+            },
+            {
+                "operator": "BETWEEN",
+                "category": "range",
+                "description": "Value is between min and max (inclusive)",
+                "example": {"column_name": "price", "operator": "BETWEEN", "value_min": 10, "value_max": 100}
+            }
+        ],
+        "logic_options": ["AND", "OR"],
+        "example_filter": {
+            "logic": "AND",
+            "conditions": [
+                {"column_name": "age", "operator": ">=", "value": 18},
+                {"column_name": "status", "operator": "=", "value": "active"},
+                {"column_name": "deleted_at", "operator": "IS NULL"}
+            ]
+        },
+        "notes": [
+            "Filters are defined inline within VirtualizedConfig and TransformConfig",
+            "Use column_id for external_column.id or column_name for direct reference",
+            "Multiple conditions are combined using the specified logic (AND/OR)",
+            "For BETWEEN, use value_min and value_max instead of value",
+            "For IS NULL and IS NOT NULL, value is not required"
         ]
     }
 
@@ -294,95 +405,6 @@ async def test_normalization_rule(
 
 
 # ==============================================================================
-# FILTERS
-# ==============================================================================
-
-@router.get(
-    "/filters",
-    response_model=List[SilverFilterResponse],
-    summary="List filters",
-    description="List all reusable filters."
-)
-async def list_filters(
-    include_inactive: bool = Query(False, description="Include inactive filters"),
-    service: SilverTransformationService = Depends(get_service)
-):
-    return await service.list_filters(include_inactive=include_inactive)
-
-
-@router.post(
-    "/filters",
-    response_model=SilverFilterResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Create filter",
-    description="""
-Create a reusable filter with conditions.
-
-**Operators:**
-`=`, `!=`, `>`, `>=`, `<`, `<=`, `LIKE`, `ILIKE`, `IN`, `NOT IN`, `IS NULL`, `IS NOT NULL`, `BETWEEN`
-
-**Example:**
-```json
-{
-  "name": "adults_active",
-  "description": "Adult active patients",
-  "logic": "AND",
-  "conditions": [
-    {"column_name": "age", "operator": ">=", "value": 18},
-    {"column_name": "status", "operator": "=", "value": "active"}
-  ]
-}
-```
-"""
-)
-async def create_filter(
-    data: SilverFilterCreate,
-    service: SilverTransformationService = Depends(get_service)
-):
-    return await service.create_filter(data)
-
-
-@router.get(
-    "/filters/{filter_id}",
-    response_model=SilverFilterResponse,
-    summary="Get filter",
-    description="Get details of a specific filter with all conditions."
-)
-async def get_filter(
-    filter_id: int,
-    service: SilverTransformationService = Depends(get_service)
-):
-    return await service.get_filter(filter_id)
-
-
-@router.put(
-    "/filters/{filter_id}",
-    response_model=SilverFilterResponse,
-    summary="Update filter",
-    description="Update a filter's metadata."
-)
-async def update_filter(
-    filter_id: int,
-    data: SilverFilterUpdate,
-    service: SilverTransformationService = Depends(get_service)
-):
-    return await service.update_filter(filter_id, data)
-
-
-@router.delete(
-    "/filters/{filter_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete filter",
-    description="Delete a filter."
-)
-async def delete_filter(
-    filter_id: int,
-    service: SilverTransformationService = Depends(get_service)
-):
-    await service.delete_filter(filter_id)
-
-
-# ==============================================================================
 # VIRTUALIZED CONFIGS
 # ==============================================================================
 
@@ -419,7 +441,7 @@ Data is NOT saved - returned as JSON (use for exploration, APIs, etc.).
 | `tables` | object[] | ✅ | Tables and columns (same structure as Bronze) |
 | `column_group_ids` | int[] | ❌ | Semantic groups from Equivalence (auto-loads ColumnMappings + ValueMappings) |
 | `relationship_ids` | int[] | ❌ | Relationship IDs for JOINs. `null`=auto-discover, `[]`=CROSS JOIN (not recommended) |
-| `filter_ids` | int[] | ❌ | Filter IDs from POST /api/silver/filters |
+| `filters` | object | ❌ | Inline filter conditions (see below) |
 | `column_transformations` | object[] | ❌ | Text transformations per column |
 | `exclude_unified_source_columns` | bool | ❌ | When `true`, excludes original source columns after semantic unification. Default: `false` |
 
@@ -439,6 +461,27 @@ Data is NOT saved - returned as JSON (use for exploration, APIs, etc.).
 | `table_id` | int | ID from GET /api/metadata/tables |
 | `select_all` | bool | If true, includes all columns (default: true) |
 | `column_ids` | int[] | Specific columns (required if select_all=false) |
+
+---
+
+## **filters Structure (inline):**
+
+Filters are defined directly in the config, not as separate entities.
+
+```json
+"filters": {
+  "logic": "AND",
+  "conditions": [
+    {"column_name": "age", "operator": ">=", "value": 18},
+    {"column_name": "status", "operator": "=", "value": "active"},
+    {"column_name": "deleted_at", "operator": "IS NULL"}
+  ]
+}
+```
+
+**Operators:** `=`, `!=`, `>`, `>=`, `<`, `<=`, `LIKE`, `ILIKE`, `IN`, `NOT IN`, `IS NULL`, `IS NOT NULL`, `BETWEEN`
+
+See GET /api/silver/filter-operators for full documentation.
 
 ---
 
@@ -469,11 +512,18 @@ See GET /api/silver/transformation-types for full documentation.
 
 ---
 
-## **Example 2: Specific columns**
+## **Example 2: With Inline Filters**
 ```json
 {
-  "name": "patient_subset",
-  "tables": [{"table_id": 14, "column_ids": [160, 161, 162]}]
+  "name": "active_adult_patients",
+  "tables": [{"table_id": 14, "select_all": true}],
+  "filters": {
+    "logic": "AND",
+    "conditions": [
+      {"column_name": "age", "operator": ">=", "value": 18},
+      {"column_name": "status", "operator": "=", "value": "active"}
+    ]
+  }
 }
 ```
 
@@ -496,22 +546,7 @@ See GET /api/silver/transformation-types for full documentation.
 
 ---
 
-## **Example 4: With Filters**
-```json
-{
-  "name": "young_patients",
-  "tables": [
-    {"table_id": 2, "select_all": true},
-    {"table_id": 14, "select_all": true}
-  ],
-  "filter_ids": [1]
-}
-```
-*filter_ids* apply WHERE conditions created via POST /api/silver/filters.
-
----
-
-## **Example 5: With Column Transformations**
+## **Example 4: With Column Transformations**
 ```json
 {
   "name": "normalized_patients",
@@ -519,17 +554,14 @@ See GET /api/silver/transformation-types for full documentation.
   "column_transformations": [
     {"column_id": 160, "type": "uppercase"},
     {"column_id": 161, "type": "trim"},
-    {"column_id": 162, "type": "template", "rule_id": 1},
-    {"column_id": 163, "type": "normalize_spaces"},
-    {"column_id": 164, "type": "remove_accents"},
-    {"column_id": 165, "type": "lowercase"}
+    {"column_id": 162, "type": "template", "rule_id": 1}
   ]
 }
 ```
 
 ---
 
-## **Example 6: Complete (all features)**
+## **Example 5: Complete (all features)**
 ```json
 {
   "name": "full_patient_exploration",
@@ -540,29 +572,29 @@ See GET /api/silver/transformation-types for full documentation.
   ],
   "column_group_ids": [1, 2],
   "relationship_ids": [4, 5],
-  "filter_ids": [1, 2],
+  "filters": {
+    "logic": "AND",
+    "conditions": [
+      {"column_name": "age", "operator": ">=", "value": 18},
+      {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+    ]
+  },
   "column_transformations": [
     {"column_id": 162, "type": "template", "rule_id": 1},
-    {"column_id": 160, "type": "uppercase"},
-    {"column_id": 161, "type": "trim"}
+    {"column_id": 160, "type": "uppercase"}
   ],
   "exclude_unified_source_columns": true
 }
 ```
 
-*exclude_unified_source_columns*: when `true`, only the unified column appears (e.g., only `sex_group` instead of `clinical_sex` + `sexo` + `sex_group`)
-
-*relationship_ids*: specify which relationships to use for JOINs. If `null`, auto-discovers. If `[]`, forces CROSS JOIN.
-
 ---
 
 ## **Notes:**
 - Use GET /api/metadata/tables to find `table_id`
-- Use GET /api/metadata/tables/{id}/columns to find `column_id` for column_ids and column_transformations
+- Use GET /api/metadata/tables/{id}/columns to find `column_id`
 - Create rules first via POST /api/silver/normalization-rules for `template` type
-- Create filters first via POST /api/silver/filters for `filter_ids`
+- Filters are now inline (not separate entities)
 - For value mappings (M→Masculino), use /api/equivalence (not column_transformations)
-- Python-based transformations are NOT available (use Transform for that)
 """
 )
 async def create_virtualized_config(
@@ -650,7 +682,7 @@ async def query_virtualized_config(
 # ==============================================================================
 
 @router.get(
-    "/transform/configs",
+    "/persistent/configs",
     response_model=List[TransformConfigResponse],
     summary="List transform configs",
     description="List all transform configs. These configs transform Bronze data to Silver Delta."
@@ -663,7 +695,7 @@ async def list_transform_configs(
 
 
 @router.post(
-    "/transform/configs",
+    "/persistent/configs",
     response_model=TransformConfigResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create transform config",
@@ -697,9 +729,29 @@ Unlike VirtualizedConfig (which queries data on-demand via Trino), TransformConf
 | `silver_bucket` | string | ❌ | Output bucket (defaults to system silver bucket) |
 | `silver_path_prefix` | string | ❌ | Output path prefix |
 | `column_group_ids` | int[] | ❌ | Semantic groups from Equivalence (column unification + value mappings) |
-| `filter_ids` | int[] | ❌ | Filter IDs from POST /api/silver/filters |
+| `filters` | object | ❌ | Inline filter conditions (same structure as Virtualized) |
 | `column_transformations` | object[] | ❌ | **Same format as Virtualized** (uses `column_id`) |
 | `exclude_unified_source_columns` | bool | ❌ | When `true`, excludes original source columns after semantic unification. Default: `false` |
+
+---
+
+## **filters Structure (inline):**
+
+Filters are defined directly in the config, not as separate entities.
+
+```json
+"filters": {
+  "logic": "AND",
+  "conditions": [
+    {"column_name": "age", "operator": ">=", "value": 18},
+    {"column_name": "status", "operator": "=", "value": "active"}
+  ]
+}
+```
+
+**Operators:** `=`, `!=`, `>`, `>=`, `<`, `<=`, `LIKE`, `ILIKE`, `IN`, `NOT IN`, `IS NULL`, `IS NOT NULL`, `BETWEEN`
+
+See GET /api/silver/filter-operators for full documentation.
 
 ---
 
@@ -723,8 +775,6 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
 | `normalize_spaces` | Collapse multiple spaces | - |
 | `remove_accents` | Remove accents (á→a) | - |
 
-**For regex or complex transformations:** Create a rule via `POST /api/silver/normalization-rules` first, then reference via `rule_id`.
-
 ---
 
 ## **Example 1: Minimal**
@@ -737,7 +787,24 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
 
 ---
 
-## **Example 2: With column_transformations (same as Virtualized)**
+## **Example 2: With Inline Filters**
+```json
+{
+  "name": "active_patients_silver",
+  "source_bronze_dataset_id": 15,
+  "filters": {
+    "logic": "AND",
+    "conditions": [
+      {"column_name": "status", "operator": "=", "value": "active"},
+      {"column_name": "deleted_at", "operator": "IS NULL"}
+    ]
+  }
+}
+```
+
+---
+
+## **Example 3: With column_transformations**
 ```json
 {
   "name": "patients_normalized",
@@ -752,7 +819,7 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
 
 ---
 
-## **Example 3: With Semantic Equivalence**
+## **Example 4: With Semantic Equivalence**
 ```json
 {
   "name": "unified_patients_silver",
@@ -766,17 +833,6 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
 
 ---
 
-## **Example 4: With Filters**
-```json
-{
-  "name": "active_patients_silver",
-  "source_bronze_dataset_id": 15,
-  "filter_ids": [1, 2]
-}
-```
-
----
-
 ## **Example 5: Complete (all features)**
 ```json
 {
@@ -784,7 +840,13 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
   "description": "Complete patient transformation with all features",
   "source_bronze_dataset_id": 15,
   "column_group_ids": [1],
-  "filter_ids": [1],
+  "filters": {
+    "logic": "AND",
+    "conditions": [
+      {"column_name": "age", "operator": ">=", "value": 18},
+      {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+    ]
+  },
   "column_transformations": [
     {"column_id": 160, "type": "uppercase"},
     {"column_id": 162, "type": "template", "rule_id": 1}
@@ -792,27 +854,22 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
   "exclude_unified_source_columns": true
 }
 ```
-*column_group_ids* loads from Equivalence module both:
-- **ColumnMappings**: unify columns under same name (COALESCE)
-- **ValueMappings**: normalize values (M→Masculino, F→Feminino)
-
-*exclude_unified_source_columns*: when `true`, only the unified column appears (e.g., only `sex_group` instead of `clinical_sex` + `sexo` + `sex_group`)
 
 ---
 
 ## **Workflow:**
-1. **Create config** → POST /api/silver/transform/configs
-2. **Preview** → POST /api/silver/transform/configs/{id}/preview
-3. **Execute** → POST /api/silver/transform/configs/{id}/execute
-4. **Query** → GET /api/silver/transform/configs/{id}/query
+1. **Create config** → POST /api/silver/persistent/configs
+2. **Preview** → POST /api/silver/persistent/configs/{id}/preview
+3. **Execute** → POST /api/silver/persistent/configs/{id}/execute
+4. **Query** → GET /api/silver/persistent/configs/{id}/query
 
 ---
 
 ## **Notes:**
 - Use GET /api/bronze/datasets to find `source_bronze_dataset_id`
 - Use GET /api/metadata/tables/{id}/columns to find `column_id` for column_transformations
-- Create rules first via POST /api/silver/normalization-rules for `template` type (regex, formatting)
-- Create filters first via POST /api/silver/filters for `filter_ids`
+- Create rules first via POST /api/silver/normalization-rules for `template` type
+- Filters are now inline (not separate entities)
 - For semantic unification + value mappings, use /api/equivalence to create ColumnGroups
 - After execute, the Silver table is auto-registered in Trino for SQL queries
 """
@@ -825,7 +882,7 @@ async def create_transform_config(
 
 
 @router.get(
-    "/transform/configs/{config_id}",
+    "/persistent/configs/{config_id}",
     response_model=TransformConfigResponse,
     summary="Get transform config",
     description="Get details of a specific transform config."
@@ -838,7 +895,7 @@ async def get_transform_config(
 
 
 @router.put(
-    "/transform/configs/{config_id}",
+    "/persistent/configs/{config_id}",
     response_model=TransformConfigResponse,
     summary="Update transform config",
     description="Update a transform config."
@@ -852,7 +909,7 @@ async def update_transform_config(
 
 
 @router.delete(
-    "/transform/configs/{config_id}",
+    "/persistent/configs/{config_id}",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Delete transform config",
     description="Delete a transform config."
@@ -865,7 +922,7 @@ async def delete_transform_config(
 
 
 @router.post(
-    "/transform/configs/{config_id}/preview",
+    "/persistent/configs/{config_id}/preview",
     response_model=TransformPreviewResponse,
     summary="Preview transform config",
     description="Preview the transformation plan without executing it."
@@ -878,7 +935,7 @@ async def preview_transform_config(
 
 
 @router.post(
-    "/transform/configs/{config_id}/execute",
+    "/persistent/configs/{config_id}/execute",
     response_model=TransformExecuteResponse,
     summary="Execute transform (Bronze → Silver)",
     description="""
@@ -891,39 +948,11 @@ Execute a transform to materialize Bronze data to Silver Delta Lake using **Apac
 | Step | Description |
 |------|-------------|
 | 1️⃣ | **Read Bronze**: Load data from Bronze Delta Lake via Spark |
-| 2️⃣ | **Apply column_transformations**: Same as Virtualized (lowercase, uppercase, trim, etc.) |
-| 3️⃣ | **Apply column_group_ids**: Semantic unification + value mappings from Equivalence |
-| 4️⃣ | **Apply filter_ids**: Filter rows based on conditions |
+| 2️⃣ | **Apply filters**: Filter rows based on inline conditions |
+| 3️⃣ | **Apply column_transformations**: Same as Virtualized (lowercase, uppercase, trim, etc.) |
+| 4️⃣ | **Apply column_group_ids**: Semantic unification + value mappings from Equivalence |
 | 5️⃣ | **Write Silver**: Persist to Silver Delta Lake with ACID transactions |
 | 6️⃣ | **Register in Trino**: Auto-register table for SQL queries |
-
----
-
-## **Supported Transformations:**
-
-### column_transformations (same format as Virtualized)
-Uses `column_id` (external_column.id), auto-resolved to bronze_column_name.
-
-| Type | Description | Example |
-|------|-------------|---------|
-| `lowercase` | Convert to lowercase | `{"column_id": 10, "type": "lowercase"}` |
-| `uppercase` | Convert to uppercase | `{"column_id": 10, "type": "uppercase"}` |
-| `trim` | Remove leading/trailing spaces | `{"column_id": 10, "type": "trim"}` |
-| `normalize_spaces` | Collapse multiple spaces | `{"column_id": 10, "type": "normalize_spaces"}` |
-| `remove_accents` | Remove diacritics | `{"column_id": 10, "type": "remove_accents"}` |
-| `template` | Apply normalization rule (regex or Python) | `{"column_id": 10, "type": "template", "rule_id": 1}` |
-
-**For regex/complex transformations:** Create a rule via `POST /api/silver/normalization-rules` first, then use `type: "template"` with `rule_id`.
-
-### column_group_ids (Semantic Unification + Value Mappings)
-Loads from Equivalence module:
-- **ColumnMappings**: Unify columns under same name (COALESCE)
-- **ValueMappings**: Normalize values (M→Masculino, F→Feminino)
-
-Use `/api/equivalence` to create ColumnGroups, ColumnMappings, and ValueMappings.
-
-### filter_ids (Row Filtering)
-Apply pre-created filters (POST /api/silver/filters).
 
 ---
 
@@ -945,23 +974,11 @@ Apply pre-created filters (POST /api/silver/filters).
 
 ---
 
-## **Why Spark (not Trino)?**
-
-| Aspect | Spark | Trino |
-|--------|-------|-------|
-| **ETL Write** | ✅ Native Delta Lake writes | ❌ Limited write support |
-| **ACID** | ✅ Full transaction support | ⚠️ Partial |
-| **UDFs** | ✅ Python UDFs (normalization rules) | ❌ Limited |
-| **Scale** | ✅ Optimized for large batch jobs | ✅ Optimized for queries |
-| **Parallelism** | ✅ Partition-level parallelism | ⚠️ Query-level |
-
----
-
 ## **After Execution:**
 
 The Silver table is automatically registered in Trino. You can:
 
-1. **Query via API**: `GET /api/silver/transform/configs/{id}/query?limit=1000`
+1. **Query via API**: `GET /api/silver/persistent/configs/{id}/query?limit=1000`
 2. **Query via Trino SQL**: 
    ```sql
    SELECT * FROM silver.default.{config_id}_{config_name} LIMIT 100
@@ -973,7 +990,6 @@ The Silver table is automatically registered in Trino. You can:
 - This is a **long-running operation** for large datasets
 - Use `/preview` first to validate transformations
 - Output overwrites previous execution (mode=overwrite)
-- Check `/executions` endpoint for execution history
 """
 )
 async def execute_transform_config(
@@ -984,7 +1000,7 @@ async def execute_transform_config(
 
 
 @router.get(
-    "/transform/configs/{config_id}/table-info",
+    "/persistent/configs/{config_id}/table-info",
     summary="Get Silver table info",
     description="Get information about the Silver Delta table including schema and row count."
 )
@@ -1002,7 +1018,7 @@ async def get_silver_table_info(
 
 
 @router.get(
-    "/transform/configs/{config_id}/query",
+    "/persistent/configs/{config_id}/query",
     summary="Query Silver table (after execute)",
     description="""
 Query the materialized Silver Delta table via Trino.
@@ -1011,17 +1027,7 @@ Query the materialized Silver Delta table via Trino.
 
 ## **Prerequisites:**
 
-⚠️ **You must execute the transform first!** Use `POST /api/silver/transform/configs/{id}/execute`
-
----
-
-## **How it Works:**
-
-| Step | Description |
-|------|-------------|
-| 1️⃣ | After `/execute`, the Silver Delta table is created in S3 |
-| 2️⃣ | The table is auto-registered in Trino catalog `silver.default.{id}_{name}` |
-| 3️⃣ | This endpoint queries the registered table via Trino SQL |
+⚠️ **You must execute the transform first!** Use `POST /api/silver/persistent/configs/{id}/execute`
 
 ---
 
@@ -1053,17 +1059,6 @@ Query the materialized Silver Delta table via Trino.
 
 ---
 
-## **Special Columns:**
-
-Silver tables include metadata columns added during transformation:
-
-| Column | Description |
-|--------|-------------|
-| `_silver_timestamp` | When the row was transformed |
-| `_transform_config_id` | ID of the transform config |
-
----
-
 ## **Alternative: Direct Trino SQL:**
 
 You can also query directly via Trino:
@@ -1072,16 +1067,6 @@ SELECT * FROM silver.default.{config_id}_{config_name}
 WHERE gender_unified = 'Masculino'
 LIMIT 100
 ```
-
----
-
-## **Errors:**
-
-| Code | Description |
-|------|-------------|
-| 404 | Config not found |
-| 400 | Transform not executed yet (no Silver table) |
-| 500 | Query execution error |
 """
 )
 async def query_silver_table(
@@ -1097,4 +1082,3 @@ async def query_silver_table(
             detail=f"Silver table for config {config_id} not found. Execute the transform first."
         )
     return result
-

@@ -7,9 +7,8 @@ The Silver layer focuses on data transformation, normalization, and semantic uni
 Key concepts:
 - NormalizationRule: Reusable rules for formatting data (CPF, phone, etc.)
 - SemanticMapping: Maps columns from different sources to unified names
-- SilverFilter: Reusable filter conditions
-- VirtualizedConfig: Config for virtualized queries (sources → JSON)
-- TransformConfig: Config for materialization (Bronze → Silver Delta)
+- VirtualizedConfig: Config for virtualized queries (sources → JSON) with inline filters
+- TransformConfig: Config for materialization (Bronze → Silver Delta) with inline filters
 """
 
 from sqlalchemy import Column, Integer, String, ForeignKey, JSON, Boolean, Text, Enum as SQLEnum, Float
@@ -29,29 +28,6 @@ class NormalizationType(enum.Enum):
     SQL_REGEX = "sql_regex"        # Uses SQL regexp_replace
     CASE_MAPPING = "case_mapping"  # CASE WHEN value mappings
     PYTHON_RULE = "python_rule"    # Uses Python Normalizer (only for transform)
-
-
-class FilterOperator(enum.Enum):
-    """Operators for filter conditions"""
-    EQ = "="
-    NEQ = "!="
-    GT = ">"
-    GTE = ">="
-    LT = "<"
-    LTE = "<="
-    LIKE = "LIKE"
-    ILIKE = "ILIKE"
-    IN = "IN"
-    NOT_IN = "NOT IN"
-    IS_NULL = "IS NULL"
-    IS_NOT_NULL = "IS NOT NULL"
-    BETWEEN = "BETWEEN"
-
-
-class FilterLogic(enum.Enum):
-    """Logic for combining filter conditions"""
-    AND = "AND"
-    OR = "OR"
 
 
 class TransformStatus(enum.Enum):
@@ -111,51 +87,6 @@ class NormalizationRule(AuditMixin, Base):
 # The Silver layer references column_group_ids from Equivalence.
 
 
-# ==================== FILTERS ====================
-
-class SilverFilter(AuditMixin, Base):
-    """
-    Reusable filter definition.
-    """
-    __tablename__ = "silver_filters"
-    __table_args__ = (
-        UniqueConstraint('name'),
-        {'schema': 'datasets'}
-    )
-
-    id = Column(Integer, primary_key=True)
-    name = Column(String(100), nullable=False)
-    description = Column(Text, nullable=True)
-    logic = Column(SQLEnum(FilterLogic), default=FilterLogic.AND)  # How to combine conditions
-    
-    is_active = Column(Boolean, default=True)
-
-
-class SilverFilterCondition(AuditMixin, Base):
-    """
-    A single condition in a filter.
-    """
-    __tablename__ = "silver_filter_conditions"
-    __table_args__ = {'schema': 'datasets'}
-
-    id = Column(Integer, primary_key=True)
-    filter_id = Column(Integer, ForeignKey('datasets.silver_filters.id', ondelete='CASCADE'), nullable=False)
-    
-    # Column reference (can be column_id or column_name depending on config type)
-    column_id = Column(Integer, ForeignKey('metadata.external_columns.id', ondelete='CASCADE'), nullable=True)
-    column_name = Column(String(255), nullable=True)  # For Bronze-based filters
-    
-    operator = Column(SQLEnum(FilterOperator), nullable=False)
-    value = Column(Text, nullable=True)  # JSON-encoded for complex values (arrays, etc.)
-    
-    # For BETWEEN operator
-    value_min = Column(Text, nullable=True)
-    value_max = Column(Text, nullable=True)
-    
-    # Order within filter
-    condition_order = Column(Integer, default=0)
-
-
 # ==================== VIRTUALIZED CONFIG ====================
 
 class VirtualizedConfig(AuditMixin, Base):
@@ -170,6 +101,7 @@ class VirtualizedConfig(AuditMixin, Base):
     - ColumnMappings: which columns to unify
     - ValueMappings: how to normalize values (male→Masculino, etc.)
     
+    Filters are defined inline in the config (not referenced by ID).
     column_transformations is for text transformations (lowercase, trim, etc.)
     and normalization rules (template). For value mappings, use /api/equivalence.
     """
@@ -196,8 +128,15 @@ class VirtualizedConfig(AuditMixin, Base):
     # If None/empty, auto-discovers applicable relationships for selected tables
     relationship_ids = Column(JSON, nullable=True)  # List of table_relationship IDs
     
-    # Filters to apply
-    filter_ids = Column(JSON, nullable=True)  # List of silver_filter IDs
+    # Inline filters (conditions applied to the query)
+    # {
+    #   "logic": "AND",  # AND or OR
+    #   "conditions": [
+    #     {"column_id": 10, "operator": "=", "value": "active"},
+    #     {"column_name": "age", "operator": ">=", "value": 18}
+    #   ]
+    # }
+    filters = Column(JSON, nullable=True)
     
     # Column transformations: template, lowercase, uppercase, trim, normalize_spaces, remove_accents
     # [{column_id: 100, type: "template", rule_id: 1}]
@@ -223,6 +162,8 @@ class TransformConfig(AuditMixin, Base):
     
     Uses Bronze dataset as source, applies transformations (SQL + Python).
     Materializes to Silver Delta Lake.
+    
+    Filters are defined inline in the config (not referenced by ID).
     """
     __tablename__ = "transform_configs"
     __table_args__ = (
@@ -245,8 +186,15 @@ class TransformConfig(AuditMixin, Base):
     # Uses BronzeColumnMapping to resolve external_column.id → bronze_column_name
     column_group_ids = Column(JSON, nullable=True)  # List of equivalence.column_groups IDs
     
-    # Filters to apply
-    filter_ids = Column(JSON, nullable=True)
+    # Inline filters (conditions applied to the data)
+    # {
+    #   "logic": "AND",  # AND or OR
+    #   "conditions": [
+    #     {"column_id": 10, "operator": "=", "value": "active"},
+    #     {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+    #   ]
+    # }
+    filters = Column(JSON, nullable=True)
     
     # Column transformations (same format as VirtualizedConfig)
     # [{column_id: 100, type: "template", rule_id: 1}]
@@ -298,4 +246,3 @@ class TransformExecution(AuditMixin, Base):
     
     # Execution details
     execution_details = Column(JSON, nullable=True)
-

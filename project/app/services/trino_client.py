@@ -62,3 +62,5 @@ class TrinoClient:
         finally:
             await conn.close()
 
+
+

@@ -5,7 +5,7 @@ from datetime import datetime
 import logging
 from app.database.database import get_db
 from app.api.schemas.data_connection import (
-    DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult, SearchDataConnection
+    DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult, SearchDataConnection, ConnectionTestRequest
 )
 from app.api.schemas.search import SearchResult
 from app.api.service.data_connection_service import DataConnectionService
@@ -65,6 +65,19 @@ async def delete_data_connection(
     db: AsyncSession = Depends(get_db),
 ):
     await DataConnectionService(db).delete(id)
+
+@router.post("/test", response_model=ConnectionTestResult)
+async def test_connection_params(
+    data: ConnectionTestRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Testa a conexão ANTES de salvar no banco.
+    
+    Útil para o frontend validar os parâmetros de conexão
+    antes de clicar em "Create Connection".
+    """
+    return await DataConnectionService(db).test_params(data)
 
 @router.post("/{id}/test", response_model=ConnectionTestResult)
 async def test_data_connection(

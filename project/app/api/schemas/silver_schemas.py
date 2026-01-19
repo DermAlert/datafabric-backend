@@ -4,7 +4,7 @@ Pydantic Schemas for Silver Layer
 These schemas define the API contracts for the Silver layer transformation system.
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -42,6 +42,32 @@ class NormalizationTypeEnum(str, Enum):
 
 
 class FilterOperatorEnum(str, Enum):
+    """
+    Available operators for filter conditions.
+    
+    Comparison:
+        - = : Equal to
+        - != : Not equal to
+        - > : Greater than
+        - >= : Greater than or equal
+        - < : Less than
+        - <= : Less than or equal
+    
+    Pattern Matching:
+        - LIKE : Case-sensitive pattern match (use % as wildcard)
+        - ILIKE : Case-insensitive pattern match
+    
+    Set Operations:
+        - IN : Value is in a list
+        - NOT IN : Value is not in a list
+    
+    Null Checks:
+        - IS NULL : Value is null
+        - IS NOT NULL : Value is not null
+    
+    Range:
+        - BETWEEN : Value is between min and max (inclusive)
+    """
     EQ = "="
     NEQ = "!="
     GT = ">"
@@ -55,6 +81,19 @@ class FilterOperatorEnum(str, Enum):
     IS_NULL = "IS NULL"
     IS_NOT_NULL = "IS NOT NULL"
     BETWEEN = "BETWEEN"
+
+
+class FilterLogicEnum(str, Enum):
+    """Logic to combine multiple filter conditions."""
+    AND = "AND"
+    OR = "OR"
+
+
+class TransformStatusEnum(str, Enum):
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
 
 
 # ==================== TABLE SELECTION ====================
@@ -74,23 +113,12 @@ class TableColumnSelection(BaseModel):
     select_all: bool = Field(True, description="If True, select all columns from this table")
     column_ids: Optional[List[int]] = Field(None, description="Specific column IDs to include (ignored if select_all=True)")
     
-    @validator('column_ids')
-    def validate_columns(cls, v, values):
-        if not values.get('select_all') and not v:
+    @field_validator('column_ids')
+    @classmethod
+    def validate_columns(cls, v, info):
+        if not info.data.get('select_all') and not v:
             raise ValueError("column_ids is required when select_all is False")
         return v
-
-
-class FilterLogicEnum(str, Enum):
-    AND = "AND"
-    OR = "OR"
-
-
-class TransformStatusEnum(str, Enum):
-    PENDING = "pending"
-    RUNNING = "running"
-    SUCCESS = "success"
-    FAILED = "failed"
 
 
 # ==================== NORMALIZATION RULES ====================
@@ -152,71 +180,73 @@ class NormalizationRuleTestResult(BaseModel):
     error: Optional[str] = None
 
 
-# ==================== SEMANTIC MAPPINGS ====================
-# NOTE: Semantic mappings are managed by the Equivalence module.
-# Use equivalence.ColumnGroup and equivalence.ColumnMapping via /api/equivalence endpoints.
-# VirtualizedConfig and TransformConfig reference column_group_ids from Equivalence.
-# This provides: ColumnMappings (column unification) + ValueMappings (value normalization)
+# ==================== INLINE FILTERS ====================
 
-
-# ==================== FILTERS ====================
-
-class FilterConditionCreate(BaseModel):
-    """A single filter condition."""
-    column_id: Optional[int] = Field(None, description="external_column.id (for virtualized)")
-    column_name: Optional[str] = Field(None, description="Column name (for transform)")
-    operator: FilterOperatorEnum
-    value: Optional[Any] = Field(None, description="Value to compare")
-    value_min: Optional[Any] = Field(None, description="Min value for BETWEEN")
-    value_max: Optional[Any] = Field(None, description="Max value for BETWEEN")
-
-
-class SilverFilterCreate(BaseModel):
-    """Create a reusable filter."""
-    name: str = Field(..., min_length=1, max_length=100)
-    description: Optional[str] = None
-    logic: FilterLogicEnum = Field(FilterLogicEnum.AND, description="How to combine conditions")
-    conditions: List[FilterConditionCreate] = Field(..., min_items=1)
-
-
-class SilverFilterUpdate(BaseModel):
-    """Update a filter."""
-    name: Optional[str] = Field(None, min_length=1, max_length=100)
-    description: Optional[str] = None
-    logic: Optional[FilterLogicEnum] = None
-    is_active: Optional[bool] = None
-
-
-class FilterConditionResponse(BaseModel):
-    """Response for a filter condition."""
-    id: int
-    column_id: Optional[int]
-    column_name: Optional[str]
-    operator: str
-    value: Optional[Any]
-    value_min: Optional[Any]
-    value_max: Optional[Any]
-    
-    model_config = {"from_attributes": True}
-
-
-class SilverFilterResponse(BaseModel):
-    """Response for a filter."""
-    id: int
-    name: str
-    description: Optional[str]
-    logic: str
-    is_active: bool
-    conditions: List[FilterConditionResponse] = []
-    
-    model_config = {"from_attributes": True}
-
-
-# ==================== VIRTUALIZED CONFIG ====================
-
-class VirtualizedColumnTransformation(BaseModel):
+class FilterCondition(BaseModel):
     """
-    Column transformation for virtualized queries (SQL only).
+    A single filter condition for inline filters.
+    
+    Use either column_id (for external_column.id) or column_name (for direct reference).
+    
+    Examples:
+        {"column_id": 10, "operator": "=", "value": "active"}
+        {"column_name": "age", "operator": ">=", "value": 18}
+        {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+        {"column_name": "deleted_at", "operator": "IS NULL"}
+        {"column_name": "price", "operator": "BETWEEN", "value_min": 10, "value_max": 100}
+    """
+    column_id: Optional[int] = Field(None, description="external_column.id (for virtualized)")
+    column_name: Optional[str] = Field(None, description="Column name (for transform or direct reference)")
+    operator: FilterOperatorEnum = Field(..., description="Comparison operator")
+    value: Optional[Any] = Field(None, description="Value to compare (not needed for IS NULL/IS NOT NULL)")
+    value_min: Optional[Any] = Field(None, description="Min value for BETWEEN operator")
+    value_max: Optional[Any] = Field(None, description="Max value for BETWEEN operator")
+    
+    @field_validator('value_min', 'value_max')
+    @classmethod
+    def validate_between_values(cls, v, info):
+        if info.field_name in ('value_min', 'value_max'):
+            operator = info.data.get('operator')
+            if operator == FilterOperatorEnum.BETWEEN and v is None:
+                raise ValueError(f"{info.field_name} is required for BETWEEN operator")
+        return v
+
+
+class InlineFilter(BaseModel):
+    """
+    Inline filter configuration for VirtualizedConfig and TransformConfig.
+    
+    Filters are applied as WHERE conditions in the query.
+    Multiple conditions are combined using the specified logic (AND/OR).
+    
+    Example:
+    ```json
+    {
+        "logic": "AND",
+        "conditions": [
+            {"column_name": "age", "operator": ">=", "value": 18},
+            {"column_name": "status", "operator": "=", "value": "active"},
+            {"column_name": "deleted_at", "operator": "IS NULL"}
+        ]
+    }
+    ```
+    
+    Operators:
+        - `=`, `!=`, `>`, `>=`, `<`, `<=` : Comparison
+        - `LIKE`, `ILIKE` : Pattern matching (use % as wildcard)
+        - `IN`, `NOT IN` : Set membership (value should be a list)
+        - `IS NULL`, `IS NOT NULL` : Null checks
+        - `BETWEEN` : Range check (requires value_min and value_max)
+    """
+    logic: FilterLogicEnum = Field(FilterLogicEnum.AND, description="How to combine conditions (AND/OR)")
+    conditions: List[FilterCondition] = Field(..., min_length=1, description="List of filter conditions")
+
+
+# ==================== COLUMN TRANSFORMATIONS ====================
+
+class ColumnTransformation(BaseModel):
+    """
+    Column transformation for queries.
     
     Available Types:
         Rule-based:
@@ -241,9 +271,12 @@ class VirtualizedColumnTransformation(BaseModel):
     rule_id: Optional[int] = Field(None, description="normalization_rule.id (required for type=template)")
 
 
+# ==================== VIRTUALIZED CONFIG ====================
+
 class VirtualizedConfigCreate(BaseModel):
     """
-    Create a virtualized config.
+    Create a virtualized config for querying original data sources via Trino.
+    Data is NOT saved - returned as JSON (use for exploration, APIs, etc.).
     
     When column_group_ids is provided, the system automatically loads from Equivalence:
     - ColumnMappings: which columns to unify under the same name
@@ -257,7 +290,7 @@ class VirtualizedConfigCreate(BaseModel):
     
     tables: List[TableColumnSelection] = Field(
         ..., 
-        min_items=1, 
+        min_length=1, 
         description="Tables and columns to include (same structure as Bronze)"
     )
     
@@ -271,9 +304,13 @@ class VirtualizedConfigCreate(BaseModel):
                     "If None, auto-discovers relationships for selected tables. "
                     "If empty list [], uses CROSS JOIN (not recommended)."
     )
-    filter_ids: Optional[List[int]] = Field(None, description="Filter IDs (from POST /api/silver/filters)")
     
-    column_transformations: Optional[List[VirtualizedColumnTransformation]] = Field(
+    filters: Optional[InlineFilter] = Field(
+        None, 
+        description="Inline filter conditions applied as WHERE clause"
+    )
+    
+    column_transformations: Optional[List[ColumnTransformation]] = Field(
         None,
         description="Text transformations: template, lowercase, uppercase, trim, normalize_spaces, remove_accents"
     )
@@ -292,8 +329,8 @@ class VirtualizedConfigUpdate(BaseModel):
     tables: Optional[List[TableColumnSelection]] = None
     column_group_ids: Optional[List[int]] = None
     relationship_ids: Optional[List[int]] = None
-    filter_ids: Optional[List[int]] = None
-    column_transformations: Optional[List[VirtualizedColumnTransformation]] = None
+    filters: Optional[InlineFilter] = None
+    column_transformations: Optional[List[ColumnTransformation]] = None
     exclude_unified_source_columns: Optional[bool] = None
     is_active: Optional[bool] = None
 
@@ -306,7 +343,7 @@ class VirtualizedConfigResponse(BaseModel):
     tables: List[Dict[str, Any]]
     column_group_ids: Optional[List[int]]
     relationship_ids: Optional[List[int]]
-    filter_ids: Optional[List[int]]
+    filters: Optional[Dict[str, Any]]
     column_transformations: Optional[List[Dict[str, Any]]]
     exclude_unified_source_columns: bool = False
     is_active: bool
@@ -355,7 +392,7 @@ class TransformConfigCreate(BaseModel):
     Supports the same transformations as VirtualizedConfig:
     - column_transformations: Same format (column_id + type)
     - column_group_ids: Semantic unification + value mappings from Equivalence
-    - filter_ids: Reusable filters
+    - filters: Inline filter conditions
     
     The system automatically resolves external_column_id to bronze_column_name
     using BronzeColumnMapping.
@@ -373,10 +410,14 @@ class TransformConfigCreate(BaseModel):
         None, 
         description="Column groups from Equivalence. Auto-loads ColumnMappings (column unification) and ValueMappings (value normalization)."
     )
-    filter_ids: Optional[List[int]] = Field(None, description="Filter IDs (from POST /api/silver/filters)")
+    
+    filters: Optional[InlineFilter] = Field(
+        None, 
+        description="Inline filter conditions applied to the data"
+    )
     
     # column_transformations - SAME FORMAT AS VIRTUALIZED
-    column_transformations: Optional[List[VirtualizedColumnTransformation]] = Field(
+    column_transformations: Optional[List[ColumnTransformation]] = Field(
         None,
         description="Text transformations (same as Virtualized): template, lowercase, uppercase, trim, normalize_spaces, remove_accents. Uses external_column_id, auto-resolved to bronze_column_name. For regex/complex rules, create via POST /api/silver/normalization-rules first."
     )
@@ -398,8 +439,8 @@ class TransformConfigUpdate(BaseModel):
     silver_bucket: Optional[str] = None
     silver_path_prefix: Optional[str] = None
     column_group_ids: Optional[List[int]] = None
-    filter_ids: Optional[List[int]] = None
-    column_transformations: Optional[List[VirtualizedColumnTransformation]] = None
+    filters: Optional[InlineFilter] = None
+    column_transformations: Optional[List[ColumnTransformation]] = None
     image_labeling_config: Optional[TransformImageLabeling] = None
     exclude_unified_source_columns: Optional[bool] = None
     is_active: Optional[bool] = None
@@ -415,7 +456,7 @@ class TransformConfigResponse(BaseModel):
     silver_bucket: Optional[str]
     silver_path_prefix: Optional[str]
     column_group_ids: Optional[List[int]]
-    filter_ids: Optional[List[int]]
+    filters: Optional[Dict[str, Any]]
     column_transformations: Optional[List[Dict[str, Any]]]
     image_labeling_config: Optional[Dict[str, Any]]
     exclude_unified_source_columns: bool = False
@@ -466,4 +507,3 @@ class TransformExecutionResponse(BaseModel):
     error_message: Optional[str]
     
     model_config = {"from_attributes": True}
-

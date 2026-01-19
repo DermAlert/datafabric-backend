@@ -27,14 +27,10 @@ from ..database.metadata.relationships import TableRelationship, RelationshipSco
 from ..database.datasets.bronze import DatasetBronzeConfig, BronzeColumnMapping
 from ..database.datasets.silver import (
     NormalizationRule,
-    SilverFilter,
-    SilverFilterCondition,
     VirtualizedConfig,
     TransformConfig,
     TransformExecution,
     TransformStatus,
-    FilterOperator,
-    FilterLogic,
     NormalizationType,
 )
 from ..database.equivalence.equivalence import ColumnGroup, ColumnMapping
@@ -44,10 +40,6 @@ from ..api.schemas.silver_schemas import (
     NormalizationRuleResponse,
     NormalizationRuleTest,
     NormalizationRuleTestResult,
-    SilverFilterCreate,
-    SilverFilterUpdate,
-    SilverFilterResponse,
-    FilterConditionResponse,
     VirtualizedConfigCreate,
     VirtualizedConfigUpdate,
     VirtualizedConfigResponse,
@@ -675,157 +667,130 @@ class SilverTransformationService:
             'value_mappings_by_column': value_mappings_by_column
         }
     
-    # ==================== FILTERS ====================
+    # ==================== INLINE FILTER HELPERS ====================
     
-    async def create_filter(
+    def _inline_filter_to_sql(
         self,
-        data: SilverFilterCreate
-    ) -> SilverFilterResponse:
-        """Create a reusable filter."""
+        filters: Dict[str, Any],
+        column_metadata: Dict[int, Dict[str, Any]],
+        table_aliases: Optional[Dict[int, str]] = None
+    ) -> Optional[str]:
+        """
+        Convert inline filter to SQL WHERE clause.
         
-        # Check if name exists
-        existing = await self.db.execute(
-            select(SilverFilter).where(SilverFilter.name == data.name)
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Filter with name '{data.name}' already exists"
-            )
+        Args:
+            filters: Inline filter dict with 'logic' and 'conditions'
+            column_metadata: Dict mapping column_id to column info
+            table_aliases: Dict mapping table_id to alias
+            
+        Returns:
+            SQL WHERE clause string or None
+        """
+        if not filters:
+            return None
         
-        # Create filter
-        filter_obj = SilverFilter(
-            name=data.name,
-            description=data.description,
-            logic=FilterLogic(data.logic.value),
-            is_active=True
-        )
-        self.db.add(filter_obj)
-        await self.db.flush()
+        conditions = filters.get('conditions', [])
+        if not conditions:
+            return None
         
-        # Create conditions
-        for i, cond_data in enumerate(data.conditions):
-            condition = SilverFilterCondition(
-                filter_id=filter_obj.id,
-                column_id=cond_data.column_id,
-                column_name=cond_data.column_name,
-                operator=FilterOperator(cond_data.operator.value),
-                value=str(cond_data.value) if cond_data.value is not None else None,
-                value_min=str(cond_data.value_min) if cond_data.value_min is not None else None,
-                value_max=str(cond_data.value_max) if cond_data.value_max is not None else None,
-                condition_order=i
-            )
-            self.db.add(condition)
+        def format_value(val: Any) -> str:
+            """Format value for SQL - no quotes for numbers, quotes for strings."""
+            if val is None:
+                return "NULL"
+            # Check if it's a number
+            try:
+                float(val)
+                return str(val)  # No quotes for numeric values
+            except (ValueError, TypeError):
+                # Escape single quotes and wrap in quotes
+                escaped = str(val).replace("'", "''")
+                return f"'{escaped}'"
         
-        await self.db.commit()
+        # Build reverse lookup: column_name -> [(table_id, column_id)]
+        columns_by_name = {}
+        for col_id, col_meta in column_metadata.items():
+            col_name = col_meta["column_name"]
+            table_id = col_meta.get("table_id")
+            if col_name not in columns_by_name:
+                columns_by_name[col_name] = []
+            columns_by_name[col_name].append((table_id, col_id))
         
-        return await self.get_filter(filter_obj.id)
-    
-    async def get_filter(self, filter_id: int) -> SilverFilterResponse:
-        """Get a filter with conditions."""
-        result = await self.db.execute(
-            select(SilverFilter).where(SilverFilter.id == filter_id)
-        )
-        filter_obj = result.scalar_one_or_none()
+        condition_sqls = []
+        for cond in conditions:
+            col_ref = None
+            column_id = cond.get('column_id')
+            column_name = cond.get('column_name')
+            
+            if column_id and column_id in column_metadata:
+                col_meta = column_metadata[column_id]
+                col_name = col_meta["column_name"]
+                table_id = col_meta.get("table_id")
+                
+                # Use table alias if available to avoid ambiguous column errors
+                if table_aliases and table_id and table_id in table_aliases:
+                    alias = table_aliases[table_id]
+                    col_ref = f'{alias}."{col_name}"'
+                else:
+                    col_ref = f'"{col_name}"'
+            elif column_name:
+                # Column referenced by name - check if it exists in multiple tables
+                col_name = column_name
+                if col_name in columns_by_name and table_aliases:
+                    matching = columns_by_name[col_name]
+                    if len(matching) > 1:
+                        # Column exists in multiple tables - use COALESCE to match unified column
+                        coalesce_parts = []
+                        for t_id, c_id in matching:
+                            if t_id in table_aliases:
+                                coalesce_parts.append(f'{table_aliases[t_id]}."{col_name}"')
+                        if coalesce_parts:
+                            col_ref = f'COALESCE({", ".join(coalesce_parts)})'
+                        else:
+                            col_ref = f'"{col_name}"'
+                    elif len(matching) == 1:
+                        # Column exists in one table - use alias
+                        t_id, c_id = matching[0]
+                        if t_id in table_aliases:
+                            col_ref = f'{table_aliases[t_id]}."{col_name}"'
+                        else:
+                            col_ref = f'"{col_name}"'
+                    else:
+                        col_ref = f'"{col_name}"'
+                else:
+                    col_ref = f'"{col_name}"'
+            else:
+                continue
+            
+            op = cond.get('operator', '=')
+            value = cond.get('value')
+            value_min = cond.get('value_min')
+            value_max = cond.get('value_max')
+            
+            if op in ('IS NULL', 'IS NOT NULL'):
+                condition_sqls.append(f"{col_ref} {op}")
+            elif op == 'BETWEEN':
+                val_min = format_value(value_min)
+                val_max = format_value(value_max)
+                condition_sqls.append(f"{col_ref} BETWEEN {val_min} AND {val_max}")
+            elif op in ('IN', 'NOT IN'):
+                # Value should be a list
+                import json
+                try:
+                    values_list = json.loads(value) if isinstance(value, str) else value
+                    if isinstance(values_list, list):
+                        values_str = ", ".join([format_value(v) for v in values_list])
+                        condition_sqls.append(f"{col_ref} {op} ({values_str})")
+                except Exception:
+                    pass
+            else:
+                formatted_val = format_value(value)
+                condition_sqls.append(f"{col_ref} {op} {formatted_val}")
         
-        if not filter_obj:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Filter with ID {filter_id} not found"
-            )
+        if not condition_sqls:
+            return None
         
-        # Get conditions
-        cond_result = await self.db.execute(
-            select(SilverFilterCondition).where(
-                SilverFilterCondition.filter_id == filter_id
-            ).order_by(SilverFilterCondition.condition_order)
-        )
-        conditions = cond_result.scalars().all()
-        
-        return SilverFilterResponse(
-            id=filter_obj.id,
-            name=filter_obj.name,
-            description=filter_obj.description,
-            logic=filter_obj.logic.value,
-            is_active=filter_obj.is_active,
-            conditions=[
-                FilterConditionResponse(
-                    id=c.id,
-                    column_id=c.column_id,
-                    column_name=c.column_name,
-                    operator=c.operator.value,
-                    value=c.value,
-                    value_min=c.value_min,
-                    value_max=c.value_max
-                )
-                for c in conditions
-            ]
-        )
-    
-    async def list_filters(
-        self,
-        include_inactive: bool = False
-    ) -> List[SilverFilterResponse]:
-        """List all filters."""
-        query = select(SilverFilter)
-        if not include_inactive:
-            query = query.where(SilverFilter.is_active == True)
-        query = query.order_by(SilverFilter.name)
-        
-        result = await self.db.execute(query)
-        filters = result.scalars().all()
-        
-        responses = []
-        for f in filters:
-            resp = await self.get_filter(f.id)
-            responses.append(resp)
-        
-        return responses
-    
-    async def update_filter(
-        self,
-        filter_id: int,
-        data: SilverFilterUpdate
-    ) -> SilverFilterResponse:
-        """Update a filter."""
-        result = await self.db.execute(
-            select(SilverFilter).where(SilverFilter.id == filter_id)
-        )
-        filter_obj = result.scalar_one_or_none()
-        
-        if not filter_obj:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Filter with ID {filter_id} not found"
-            )
-        
-        update_data = data.model_dump(exclude_unset=True)
-        if 'logic' in update_data:
-            update_data['logic'] = FilterLogic(update_data['logic'])
-        
-        for key, value in update_data.items():
-            setattr(filter_obj, key, value)
-        
-        await self.db.commit()
-        
-        return await self.get_filter(filter_id)
-    
-    async def delete_filter(self, filter_id: int) -> bool:
-        """Delete a filter."""
-        result = await self.db.execute(
-            select(SilverFilter).where(SilverFilter.id == filter_id)
-        )
-        filter_obj = result.scalar_one_or_none()
-        
-        if not filter_obj:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Filter with ID {filter_id} not found"
-            )
-        
-        await self.db.delete(filter_obj)
-        await self.db.commit()
-        return True
+        logic = filters.get('logic', 'AND')
+        return f" {logic} ".join(condition_sqls)
     
     # ==================== VIRTUALIZED CONFIG ====================
     
@@ -851,7 +816,7 @@ class SilverTransformationService:
             tables=[t.model_dump() for t in data.tables],
             column_group_ids=data.column_group_ids,
             relationship_ids=data.relationship_ids,
-            filter_ids=data.filter_ids,
+            filters=data.filters.model_dump() if data.filters else None,
             column_transformations=[t.model_dump() for t in data.column_transformations] if data.column_transformations else None,
             exclude_unified_source_columns=data.exclude_unified_source_columns,
             is_active=True
@@ -918,6 +883,11 @@ class SilverTransformationService:
                 t.model_dump() if hasattr(t, 'model_dump') else t 
                 for t in update_data['column_transformations']
             ]
+        
+        # Convert filters to dict
+        if 'filters' in update_data and update_data['filters']:
+            if hasattr(update_data['filters'], 'model_dump'):
+                update_data['filters'] = update_data['filters'].model_dump()
         
         # Clear cached SQL
         update_data['generated_sql'] = None
@@ -1296,13 +1266,12 @@ class SilverTransformationService:
                 'table_name': table_info.get('table_name', '')
             }
         
-        # Build WHERE clause from filters
+        # Build WHERE clause from inline filters
         where_clauses = []
-        if config.filter_ids:
-            for filter_id in config.filter_ids:
-                filter_sql = await self._filter_to_sql(filter_id, column_metadata, table_aliases)
-                if filter_sql:
-                    where_clauses.append(f"({filter_sql})")
+        if config.filters:
+            filter_sql = self._inline_filter_to_sql(config.filters, column_metadata, table_aliases)
+            if filter_sql:
+                where_clauses.append(f"({filter_sql})")
         
         # ==================== ASSEMBLE SQL ====================
         if len(table_ids) == 1:
@@ -1552,109 +1521,6 @@ class SilverTransformationService:
             for row in rows
         }
     
-    async def _filter_to_sql(
-        self,
-        filter_id: int,
-        column_metadata: Dict[int, Dict[str, Any]],
-        table_aliases: Optional[Dict[int, str]] = None
-    ) -> Optional[str]:
-        """Convert a filter to SQL WHERE clause."""
-        filter_resp = await self.get_filter(filter_id)
-        
-        if not filter_resp.conditions:
-            return None
-        
-        def format_value(val: str) -> str:
-            """Format value for SQL - no quotes for numbers, quotes for strings."""
-            if val is None:
-                return "NULL"
-            # Check if it's a number
-            try:
-                float(val)
-                return val  # No quotes for numeric values
-            except (ValueError, TypeError):
-                # Escape single quotes and wrap in quotes
-                escaped = val.replace("'", "''")
-                return f"'{escaped}'"
-        
-        # Build reverse lookup: column_name -> [(table_id, column_id)]
-        columns_by_name = {}
-        for col_id, col_meta in column_metadata.items():
-            col_name = col_meta["column_name"]
-            table_id = col_meta.get("table_id")
-            if col_name not in columns_by_name:
-                columns_by_name[col_name] = []
-            columns_by_name[col_name].append((table_id, col_id))
-        
-        condition_sqls = []
-        for cond in filter_resp.conditions:
-            col_ref = None
-            if cond.column_id and cond.column_id in column_metadata:
-                col_meta = column_metadata[cond.column_id]
-                col_name = col_meta["column_name"]
-                table_id = col_meta.get("table_id")
-                
-                # Use table alias if available to avoid ambiguous column errors
-                if table_aliases and table_id and table_id in table_aliases:
-                    alias = table_aliases[table_id]
-                    col_ref = f'{alias}."{col_name}"'
-                else:
-                    col_ref = f'"{col_name}"'
-            elif cond.column_name:
-                # Column referenced by name - check if it exists in multiple tables
-                col_name = cond.column_name
-                if col_name in columns_by_name and table_aliases:
-                    matching = columns_by_name[col_name]
-                    if len(matching) > 1:
-                        # Column exists in multiple tables - use COALESCE to match unified column
-                        coalesce_parts = []
-                        for t_id, c_id in matching:
-                            if t_id in table_aliases:
-                                coalesce_parts.append(f'{table_aliases[t_id]}."{col_name}"')
-                        if coalesce_parts:
-                            col_ref = f'COALESCE({", ".join(coalesce_parts)})'
-                        else:
-                            col_ref = f'"{col_name}"'
-                    elif len(matching) == 1:
-                        # Column exists in one table - use alias
-                        t_id, c_id = matching[0]
-                        if t_id in table_aliases:
-                            col_ref = f'{table_aliases[t_id]}."{col_name}"'
-                        else:
-                            col_ref = f'"{col_name}"'
-                    else:
-                        col_ref = f'"{col_name}"'
-                else:
-                    col_ref = f'"{col_name}"'
-            else:
-                continue
-            
-            op = cond.operator
-            if op in ('IS NULL', 'IS NOT NULL'):
-                condition_sqls.append(f"{col_ref} {op}")
-            elif op == 'BETWEEN':
-                val_min = format_value(cond.value_min)
-                val_max = format_value(cond.value_max)
-                condition_sqls.append(f"{col_ref} BETWEEN {val_min} AND {val_max}")
-            elif op in ('IN', 'NOT IN'):
-                # Parse value as list
-                import json
-                try:
-                    values = json.loads(cond.value) if cond.value else []
-                    values_str = ", ".join([format_value(str(v)) for v in values])
-                    condition_sqls.append(f"{col_ref} {op} ({values_str})")
-                except:
-                    pass
-            else:
-                formatted_val = format_value(cond.value)
-                condition_sqls.append(f"{col_ref} {op} {formatted_val}")
-        
-        if not condition_sqls:
-            return None
-        
-        logic = filter_resp.logic
-        return f" {logic} ".join(condition_sqls)
-    
     # ==================== TRANSFORM CONFIG ====================
     
     async def create_transform_config(
@@ -1691,7 +1557,7 @@ class SilverTransformationService:
             silver_bucket=data.silver_bucket or self.silver_bucket,
             silver_path_prefix=data.silver_path_prefix,
             column_group_ids=data.column_group_ids,
-            filter_ids=data.filter_ids,
+            filters=data.filters.model_dump() if data.filters else None,
             column_transformations=[t.model_dump() for t in data.column_transformations] if data.column_transformations else None,
             image_labeling_config=data.image_labeling_config.model_dump() if data.image_labeling_config else None,
             exclude_unified_source_columns=data.exclude_unified_source_columns,
@@ -1731,7 +1597,7 @@ class SilverTransformationService:
             silver_bucket=config.silver_bucket,
             silver_path_prefix=config.silver_path_prefix,
             column_group_ids=config.column_group_ids,
-            filter_ids=config.filter_ids,
+            filters=config.filters,
             column_transformations=config.column_transformations,
             image_labeling_config=config.image_labeling_config,
             exclude_unified_source_columns=config.exclude_unified_source_columns,
@@ -1786,6 +1652,9 @@ class SilverTransformationService:
                 t.model_dump() if hasattr(t, 'model_dump') else t 
                 for t in update_data['column_transformations']
             ]
+        if 'filters' in update_data and update_data['filters']:
+            if hasattr(update_data['filters'], 'model_dump'):
+                update_data['filters'] = update_data['filters'].model_dump()
         if 'image_labeling_config' in update_data and update_data['image_labeling_config']:
             if hasattr(update_data['image_labeling_config'], 'model_dump'):
                 update_data['image_labeling_config'] = update_data['image_labeling_config'].model_dump()
@@ -1931,7 +1800,7 @@ class SilverTransformationService:
                 "transformations_applied": {
                     "column_transformations": len(config.column_transformations or []),
                     "column_groups": len(config.column_group_ids or []),
-                    "filters": len(config.filter_ids or [])
+                    "filters": 1 if config.filters else 0
                 }
             }
             
@@ -2113,7 +1982,7 @@ class SilverTransformationService:
         transform_config = {
             'config_id': config.id,
             'column_transformations': config.column_transformations,  # Same format as Virtualized
-            'filter_ids': config.filter_ids,
+            'filters': config.filters,  # Inline filters
             'column_group_ids': config.column_group_ids,
             'exclude_unified_source_columns': getattr(config, 'exclude_unified_source_columns', False)
         }
@@ -2121,10 +1990,6 @@ class SilverTransformationService:
         # Load normalization rules from column_transformations
         norm_rules = await self._load_transformation_rules(transform_config.get('column_transformations', []))
         transform_config['normalization_rules'] = norm_rules
-        
-        # Load filters
-        filters = await self._load_filters(transform_config.get('filter_ids', []))
-        transform_config['filters'] = filters
         
         # Load column group info from Equivalence
         if transform_config.get('column_group_ids'):
@@ -2201,6 +2066,11 @@ class SilverTransformationService:
         
         logger.info(f"Total rows to process: {total_rows}")
         
+        # Apply filters FIRST (before transformations) - consistent with Virtualized behavior
+        # In SQL (Virtualized), WHERE clause filters original data before SELECT transforms
+        # We do the same here: filter on original values, then transform
+        df = self._apply_spark_filters(df, transform_config)
+        
         # Apply column_transformations (same format as Virtualized, uses column_id)
         # This resolves column_id → bronze_column_name using BronzeColumnMapping
         df = self._apply_column_transformations(df, transform_config, bronze_info)
@@ -2208,9 +2078,6 @@ class SilverTransformationService:
         # Apply column_group_ids from Equivalence module
         # This handles both column unification and value mappings from Equivalence
         df = self._apply_equivalence_groups(df, transform_config, bronze_info)
-        
-        # Apply filters
-        df = self._apply_spark_filters(df, transform_config)
         
         # Add Silver metadata columns
         df = df.withColumn("_silver_timestamp", F.current_timestamp())
@@ -2529,117 +2396,87 @@ class SilverTransformationService:
         return df
     
     def _apply_spark_filters(self, df, transform_config: Dict[str, Any]):
-        """Apply filters to the DataFrame."""
+        """Apply inline filters to the DataFrame."""
         from pyspark.sql import functions as F
         
-        filters = transform_config.get('filters', [])
+        filters = transform_config.get('filters')
         
         if not filters:
             return df
         
-        for filter_info in filters:
-            filter_name = filter_info.get('name', 'unknown')
-            logic = filter_info.get('logic', 'AND')
-            conditions = filter_info.get('conditions', [])
-            
-            if not conditions:
+        # Inline filter is a single object with logic and conditions
+        logic = filters.get('logic', 'AND')
+        conditions = filters.get('conditions', [])
+        
+        if not conditions:
+            return df
+        
+        # Build filter conditions
+        spark_conditions = []
+        
+        for cond in conditions:
+            col_name = cond.get('column_name')
+            if not col_name or col_name not in df.columns:
                 continue
             
-            # Build filter conditions
-            spark_conditions = []
+            operator = cond.get('operator', '=')
+            value = cond.get('value')
+            value_min = cond.get('value_min')
+            value_max = cond.get('value_max')
             
-            for cond in conditions:
-                col_name = cond.get('column_name')
-                if not col_name or col_name not in df.columns:
-                    continue
-                
-                operator = cond.get('operator', '=')
-                value = cond.get('value')
-                value_min = cond.get('value_min')
-                value_max = cond.get('value_max')
-                
-                col_expr = F.col(col_name)
-                
-                if operator == '=':
-                    spark_conditions.append(col_expr == value)
-                elif operator == '!=':
-                    spark_conditions.append(col_expr != value)
-                elif operator == '>':
-                    spark_conditions.append(col_expr > value)
-                elif operator == '>=':
-                    spark_conditions.append(col_expr >= value)
-                elif operator == '<':
-                    spark_conditions.append(col_expr < value)
-                elif operator == '<=':
-                    spark_conditions.append(col_expr <= value)
-                elif operator == 'LIKE':
-                    spark_conditions.append(col_expr.like(value))
-                elif operator == 'ILIKE':
-                    spark_conditions.append(F.lower(col_expr).like(value.lower() if value else ''))
-                elif operator in ('IN', 'NOT IN'):
-                    import json
-                    try:
-                        values_list = json.loads(value) if isinstance(value, str) else value
-                        if operator == 'IN':
-                            spark_conditions.append(col_expr.isin(values_list))
-                        else:
-                            spark_conditions.append(~col_expr.isin(values_list))
-                    except Exception:
-                        pass
-                elif operator == 'IS NULL':
-                    spark_conditions.append(col_expr.isNull())
-                elif operator == 'IS NOT NULL':
-                    spark_conditions.append(col_expr.isNotNull())
-                elif operator == 'BETWEEN':
-                    if value_min is not None and value_max is not None:
-                        spark_conditions.append(col_expr.between(value_min, value_max))
+            col_expr = F.col(col_name)
             
-            if not spark_conditions:
-                continue
-            
-            # Combine conditions with AND or OR
-            if logic == 'OR':
-                combined = spark_conditions[0]
-                for cond in spark_conditions[1:]:
-                    combined = combined | cond
-            else:
-                combined = spark_conditions[0]
-                for cond in spark_conditions[1:]:
-                    combined = combined & cond
-            
-            df = df.filter(combined)
-            logger.info(f"Applied filter {filter_name} with {len(conditions)} conditions")
+            if operator == '=':
+                spark_conditions.append(col_expr == value)
+            elif operator == '!=':
+                spark_conditions.append(col_expr != value)
+            elif operator == '>':
+                spark_conditions.append(col_expr > value)
+            elif operator == '>=':
+                spark_conditions.append(col_expr >= value)
+            elif operator == '<':
+                spark_conditions.append(col_expr < value)
+            elif operator == '<=':
+                spark_conditions.append(col_expr <= value)
+            elif operator == 'LIKE':
+                spark_conditions.append(col_expr.like(value))
+            elif operator == 'ILIKE':
+                spark_conditions.append(F.lower(col_expr).like(value.lower() if value else ''))
+            elif operator in ('IN', 'NOT IN'):
+                import json
+                try:
+                    values_list = json.loads(value) if isinstance(value, str) else value
+                    if operator == 'IN':
+                        spark_conditions.append(col_expr.isin(values_list))
+                    else:
+                        spark_conditions.append(~col_expr.isin(values_list))
+                except Exception:
+                    pass
+            elif operator == 'IS NULL':
+                spark_conditions.append(col_expr.isNull())
+            elif operator == 'IS NOT NULL':
+                spark_conditions.append(col_expr.isNotNull())
+            elif operator == 'BETWEEN':
+                if value_min is not None and value_max is not None:
+                    spark_conditions.append(col_expr.between(value_min, value_max))
+        
+        if not spark_conditions:
+            return df
+        
+        # Combine conditions with AND or OR
+        if logic == 'OR':
+            combined = spark_conditions[0]
+            for cond in spark_conditions[1:]:
+                combined = combined | cond
+        else:
+            combined = spark_conditions[0]
+            for cond in spark_conditions[1:]:
+                combined = combined & cond
+        
+        df = df.filter(combined)
+        logger.info(f"Applied inline filter with {len(conditions)} conditions using {logic} logic")
         
         return df
-    
-    async def _load_filters(self, filter_ids: Optional[List[int]]) -> List[Dict]:
-        """Load filters from database."""
-        if not filter_ids:
-            return []
-        
-        filters = []
-        for filter_id in filter_ids:
-            try:
-                filter_resp = await self.get_filter(filter_id)
-                filters.append({
-                    'id': filter_resp.id,
-                    'name': filter_resp.name,
-                    'logic': filter_resp.logic,
-                    'conditions': [
-                        {
-                            'column_name': c.column_name,
-                            'operator': c.operator,
-                            'value': c.value,
-                            'value_min': c.value_min,
-                            'value_max': c.value_max
-                        }
-                        for c in filter_resp.conditions
-                    ]
-                })
-            except Exception as e:
-                logger.warning(f"Could not load filter {filter_id}: {e}")
-        
-        return filters
     
     async def _load_transformation_rules(self, transformations: Optional[List]) -> Dict[int, Dict]:
         """

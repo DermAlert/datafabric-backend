@@ -4,7 +4,7 @@ from typing import Optional
 from datetime import datetime
 import logging
 from app.api.schemas.data_connection import (
-    DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult
+    DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult, ConnectionTestRequest
 )
 from app.api.schemas.search import BaseSearchRequest, SearchDataResult
 
@@ -91,37 +91,72 @@ class DataConnectionService:
         await self.db.delete(obj)
         await self.db.commit()
 
-    async def test(self, id: int):
-        obj = await self.get(id)
-        
-        # Get connection type
-        stmt_ct = select(core.ConnectionType).where(core.ConnectionType.id == obj.connection_type_id)
-        ct = await self.db_service.scalars_first(stmt_ct)
+    async def _get_connection_type(self, connection_type_id: int) -> "core.ConnectionType":
+        """Busca o ConnectionType pelo ID. Lança 404 se não encontrar."""
+        stmt = select(core.ConnectionType).where(core.ConnectionType.id == connection_type_id)
+        ct = await self.db_service.scalars_first(stmt)
         if not ct:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection type not found")
-        
-        # Debug: log connection params
-        from app.utils.logger import logger
-        logger.info(f"[DataConnectionService] Testing connection id={id}")
-        logger.info(f"[DataConnectionService] Connection type: {ct.name}")
-        logger.info(f"[DataConnectionService] Params keys: {list(obj.connection_params.keys())}")
-        # Mask sensitive values for logging
+        return ct
+
+    def _mask_sensitive_params(self, params: dict) -> dict:
+        """Mascara valores sensíveis (password, key, secret) para logging seguro."""
         safe_params = {}
-        for k, v in obj.connection_params.items():
-            if 'key' in k.lower() or 'secret' in k.lower() or 'password' in k.lower():
+        for k, v in params.items():
+            if any(word in k.lower() for word in ('key', 'secret', 'password', 'token')):
                 safe_params[k] = f"{str(v)[:4]}***" if v else None
             else:
                 safe_params[k] = v
-        logger.info(f"[DataConnectionService] Params (masked): {safe_params}")
+        return safe_params
+
+    async def _do_test(self, connection_type_id: int, connection_params: dict, context: str = "") -> ConnectionTestResult:
+        """
+        Lógica central de teste de conexão.
         
-        # Test connection
+        Args:
+            connection_type_id: ID do tipo de conexão
+            connection_params: Parâmetros da conexão
+            context: Contexto para logging (ex: "id=5" ou "params only")
+        """
+        ct = await self._get_connection_type(connection_type_id)
+        
+        logger.info(f"[DataConnectionService] Testing connection {context}")
+        logger.info(f"[DataConnectionService] Connection type: {ct.name}")
+        logger.info(f"[DataConnectionService] Params (masked): {self._mask_sensitive_params(connection_params)}")
+        
         success, message, details = await test_connection(
             connection_type=ct.name,
-            connection_params=obj.connection_params
+            connection_params=connection_params
         )
-        obj.status = 'active' if success else 'error'
-        await self.db.commit()
+        
         return ConnectionTestResult(success=success, message=message, details=details)
+
+    async def test(self, id: int) -> ConnectionTestResult:
+        """Testa conexão existente e atualiza seu status no banco."""
+        obj = await self.get(id)
+        
+        result = await self._do_test(
+            connection_type_id=obj.connection_type_id,
+            connection_params=obj.connection_params,
+            context=f"id={id}"
+        )
+        
+        # Atualiza status no banco
+        obj.status = 'active' if result.success else 'error'
+        await self.db.commit()
+        
+        return result
+
+    async def test_params(self, data: ConnectionTestRequest) -> ConnectionTestResult:
+        """
+        Testa conexão ANTES de salvar no banco.
+        Útil para validar parâmetros antes de criar a conexão.
+        """
+        return await self._do_test(
+            connection_type_id=data.connection_type_id,
+            connection_params=data.connection_params,
+            context="(unsaved)"
+        )
 
     async def sync(self, id: int, background_tasks=None):
         obj = await self.get(id)
