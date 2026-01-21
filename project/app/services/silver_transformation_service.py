@@ -949,10 +949,11 @@ class SilverTransformationService:
         
         sql, columns, warnings = await self._generate_virtualized_sql(config)
         
-        # Add LIMIT/OFFSET
-        sql_with_limit = f"{sql} LIMIT {limit}"
+        # Add OFFSET/LIMIT (Trino requires OFFSET before LIMIT)
         if offset > 0:
-            sql_with_limit += f" OFFSET {offset}"
+            sql_with_limit = f"{sql} OFFSET {offset} LIMIT {limit}"
+        else:
+            sql_with_limit = f"{sql} LIMIT {limit}"
         
         # Execute (async with aiotrino)
         try:
@@ -1917,13 +1918,18 @@ class SilverTransformationService:
             column_mappings = []
         
         # Build column mapping dict: external_column_id -> bronze_column_name
+        # Include ingestion_group_id and group_index for JOIN column renaming
         column_map = {}
         for m in column_mappings:
+            group_index = group_id_to_index.get(m.ingestion_group_id)
             column_map[m.external_column_id] = {
                 'bronze_column_name': m.bronze_column_name,
                 'original_column_name': m.original_column_name,
                 'original_table_name': m.original_table_name,
-                'data_type': m.data_type
+                'data_type': m.data_type,
+                'ingestion_group_id': m.ingestion_group_id,
+                'group_index': group_index,
+                'external_table_id': m.external_table_id
             }
         
         # Get InterSourceLinks for JOIN between groups
@@ -2050,12 +2056,24 @@ class SilverTransformationService:
         # Combine DataFrames using JOINs (if InterSourceLinks exist) or UNION
         inter_source_links = bronze_info.get('inter_source_links', [])
         
+        # Debug: Log DataFrame columns
+        for idx, df_item in enumerate(dfs):
+            logger.info(f"DataFrame {idx} columns: {df_item.columns}")
+            logger.info(f"DataFrame {idx} count: {df_item.count()}")
+        
         if len(dfs) == 1:
             df = dfs[0]
         elif inter_source_links:
+            # Log the InterSourceLinks for debugging
+            for link in inter_source_links:
+                logger.info(f"InterSourceLink: group[{link.get('left_group_index')}].{link.get('left_column_name')} = "
+                           f"group[{link.get('right_group_index')}].{link.get('right_column_name')} "
+                           f"(strategy: {link.get('join_strategy')})")
+            
             # Use JOINs based on InterSourceLinks
             df = self._join_dataframes_with_links(dfs, inter_source_links, bronze_info)
             logger.info(f"Joined {len(dfs)} DataFrames using {len(inter_source_links)} InterSourceLinks")
+            logger.info(f"After JOIN row count: {df.count()}")
         else:
             # Fallback to UNION if no InterSourceLinks defined
             # This preserves backward compatibility but may not be correct semantically
@@ -2069,7 +2087,10 @@ class SilverTransformationService:
         # Apply filters FIRST (before transformations) - consistent with Virtualized behavior
         # In SQL (Virtualized), WHERE clause filters original data before SELECT transforms
         # We do the same here: filter on original values, then transform
-        df = self._apply_spark_filters(df, transform_config)
+        pre_filter_count = df.count()
+        df = self._apply_spark_filters(df, transform_config, bronze_info)
+        post_filter_count = df.count()
+        logger.info(f"Filter applied: {pre_filter_count} rows before, {post_filter_count} rows after")
         
         # Apply column_transformations (same format as Virtualized, uses column_id)
         # This resolves column_id → bronze_column_name using BronzeColumnMapping
@@ -2111,9 +2132,10 @@ class SilverTransformationService:
         Join DataFrames using InterSourceLinks.
         
         This method:
-        1. Uses the InterSourceLinks to determine JOIN conditions
-        2. Applies the correct join type (inner, left, right, full)
-        3. Unifies JOIN columns automatically (drops duplicates, keeps one)
+        1. Renames duplicate column names (non-JOIN columns) to avoid ambiguity
+        2. Uses the InterSourceLinks to determine JOIN conditions
+        3. Applies the correct join type (inner, left, right, full)
+        4. Unifies JOIN columns automatically (drops duplicates, keeps one)
         
         Args:
             dfs: List of Spark DataFrames (one per ingestion group)
@@ -2130,18 +2152,111 @@ class SilverTransformationService:
         if len(dfs) == 1:
             return dfs[0]
         
-        # Build a map of group_index -> DataFrame
-        # (dfs are in order of bronze_info['tables'])
-        df_map = {i: df for i, df in enumerate(dfs)}
+        # === STEP 1: Identify JOIN columns (these will be unified, not prefixed) ===
+        join_columns = set()
+        for link in inter_source_links:
+            left_col = link.get('left_column_name', '')
+            right_col = link.get('right_column_name', '')
+            if left_col:
+                join_columns.add(left_col.lower())
+            if right_col:
+                join_columns.add(right_col.lower())
         
+        logger.info(f"JOIN columns (will be unified): {join_columns}")
+        
+        # === STEP 2: Identify duplicate column names across all DataFrames ===
+        # Count column occurrences (case-insensitive)
+        column_counts = {}  # col_name_lower -> count
+        for idx, df in enumerate(dfs):
+            for col in df.columns:
+                col_lower = col.lower()
+                # Skip metadata columns
+                if col_lower.startswith('_'):
+                    continue
+                if col_lower not in column_counts:
+                    column_counts[col_lower] = 0
+                column_counts[col_lower] += 1
+        
+        # Find columns that are duplicated AND not JOIN columns
+        duplicate_columns = {
+            col for col, count in column_counts.items() 
+            if count > 1 and col not in join_columns
+        }
+        
+        if duplicate_columns:
+            logger.info(f"Duplicate columns found (will be prefixed): {duplicate_columns}")
+        
+        # === STEP 3: Rename duplicate columns with group prefix ===
+        # Also handle Bronze metadata columns (_source_table, _ingestion_timestamp)
+        # These exist in every group and would cause duplicates on JOIN
+        bronze_metadata_columns = {'_source_table', '_ingestion_timestamp'}
+        
+        tables = bronze_info.get('tables', [])
+        df_map = {}
+        column_rename_map = {}  # Track renames: (idx, old_name) -> new_name
+        
+        for idx, df in enumerate(dfs):
+            # Get group name for prefix
+            group_name = ''
+            if idx < len(tables):
+                group_name = tables[idx].get('group_name', f'group_{idx}')
+                # Extract a shorter prefix from group_name (e.g., "part_mysql_patients" -> "patients")
+                parts = group_name.replace('part_', '').split('_')
+                # Use last part as prefix (usually the table name)
+                if len(parts) > 1:
+                    group_prefix = parts[-1]
+                else:
+                    group_prefix = parts[0] if parts else f'g{idx}'
+            else:
+                group_prefix = f'g{idx}'
+            
+            # Rename duplicate columns in this DataFrame
+            renamed_df = df
+            for col in df.columns:
+                col_lower = col.lower()
+                if col_lower in duplicate_columns:
+                    new_name = f"{group_prefix}_{col}"
+                    renamed_df = renamed_df.withColumnRenamed(col, new_name)
+                    column_rename_map[(idx, col)] = new_name
+                    logger.info(f"Renamed column '{col}' to '{new_name}' in group {idx} ({group_name})")
+            
+            # For DataFrames other than the first one, drop Bronze metadata columns
+            # to avoid duplicates (we keep metadata from the first/primary DataFrame)
+            if idx > 0:
+                for meta_col in bronze_metadata_columns:
+                    if meta_col in renamed_df.columns:
+                        renamed_df = renamed_df.drop(meta_col)
+                        logger.info(f"Dropped metadata column '{meta_col}' from group {idx} (keeping from primary group)")
+            
+            df_map[idx] = renamed_df
+        
+        # Update bronze_info column_mappings with renamed columns
+        # This ensures equivalence/transformations can find the columns
+        column_mappings = bronze_info.get('column_mappings', {})
+        for (idx, old_name), new_name in column_rename_map.items():
+            # Find and update the mapping that has this bronze_column_name AND belongs to this group
+            for col_id, mapping in column_mappings.items():
+                bronze_col_name = mapping.get('bronze_column_name', '')
+                mapping_group_idx = mapping.get('group_index')
+                
+                # Match by column name AND group index (if available)
+                if bronze_col_name.lower() == old_name.lower():
+                    # If group_index is available, use it to be precise
+                    if mapping_group_idx is not None and mapping_group_idx != idx:
+                        continue  # This mapping is from a different group
+                    
+                    original_name = bronze_col_name
+                    mapping['bronze_column_name'] = new_name
+                    mapping['original_bronze_column_name'] = original_name
+                    mapping['is_prefixed_for_join'] = True
+                    logger.info(f"Updated column_mapping {col_id} (group {idx}): '{original_name}' -> '{new_name}'")
+        
+        # === STEP 4: Proceed with JOIN using renamed DataFrames ===
         # Track which DataFrames have been joined
         joined_indices = set()
         
-        # Track columns to drop after join (duplicates from JOIN keys)
-        columns_to_unify = []  # [(left_col, right_col), ...]
-        
         # Start with the first DataFrame
-        result_df = dfs[0]
+        result_df = df_map[0]
         joined_indices.add(0)
         
         # Sort links to ensure we can build the join graph
@@ -2395,8 +2510,13 @@ class SilverTransformationService:
         
         return df
     
-    def _apply_spark_filters(self, df, transform_config: Dict[str, Any]):
-        """Apply inline filters to the DataFrame."""
+    def _apply_spark_filters(self, df, transform_config: Dict[str, Any], bronze_info: Optional[Dict[str, Any]] = None):
+        """
+        Apply inline filters to the DataFrame.
+        
+        Supports both column_id (resolved via BronzeColumnMapping) and column_name.
+        column_id is preferred as it's unambiguous when columns have the same name.
+        """
         from pyspark.sql import functions as F
         
         filters = transform_config.get('filters')
@@ -2411,12 +2531,38 @@ class SilverTransformationService:
         if not conditions:
             return df
         
+        # Get column mappings for resolving column_id -> bronze_column_name
+        column_mappings = bronze_info.get('column_mappings', {}) if bronze_info else {}
+        
+        # Log available columns for debugging
+        logger.info(f"Available columns for filtering: {df.columns}")
+        
         # Build filter conditions
         spark_conditions = []
         
         for cond in conditions:
-            col_name = cond.get('column_name')
-            if not col_name or col_name not in df.columns:
+            # Resolve column name: prefer column_id (unambiguous), fallback to column_name
+            col_name = None
+            col_id = cond.get('column_id')
+            
+            if col_id and column_mappings:
+                # Resolve column_id to bronze_column_name
+                mapping = column_mappings.get(col_id)
+                if mapping:
+                    col_name = mapping.get('bronze_column_name')
+                    logger.info(f"Resolved filter column_id {col_id} to bronze_column_name '{col_name}'")
+                else:
+                    logger.warning(f"Filter column_id {col_id} not found in column_mappings")
+            
+            # Fallback to column_name if column_id not provided or not resolved
+            if not col_name:
+                col_name = cond.get('column_name')
+            
+            if not col_name:
+                logger.warning(f"Filter condition missing both column_id and column_name: {cond}")
+                continue
+            if col_name not in df.columns:
+                logger.warning(f"Filter column '{col_name}' not found in DataFrame columns. Available: {df.columns}")
                 continue
             
             operator = cond.get('operator', '=')

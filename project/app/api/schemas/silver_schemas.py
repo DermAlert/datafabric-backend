@@ -186,17 +186,27 @@ class FilterCondition(BaseModel):
     """
     A single filter condition for inline filters.
     
-    Use either column_id (for external_column.id) or column_name (for direct reference).
+    RECOMMENDED: Use column_id (external_column.id from metadata) for unambiguous filtering.
+    This avoids issues when multiple sources have columns with the same name.
     
-    Examples:
-        {"column_id": 10, "operator": "=", "value": "active"}
-        {"column_name": "age", "operator": ">=", "value": 18}
-        {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
-        {"column_name": "deleted_at", "operator": "IS NULL"}
-        {"column_name": "price", "operator": "BETWEEN", "value_min": 10, "value_max": 100}
+    ALTERNATIVE: Use column_name for direct reference (may be ambiguous if columns have same name).
+    
+    Examples (using column_id - RECOMMENDED):
+        {"column_id": 75, "operator": "IS NOT NULL"}
+        {"column_id": 71, "operator": "=", "value": "João Silva"}
+        {"column_id": 10, "operator": ">=", "value": 18}
+        {"column_id": 15, "operator": "IN", "value": ["active", "pending"]}
+        {"column_id": 20, "operator": "BETWEEN", "value_min": 10, "value_max": 100}
+    
+    Examples (using column_name - alternative):
+        {"column_name": "cpf_paciente", "operator": "IS NOT NULL"}
+        {"column_name": "status", "operator": "=", "value": "active"}
+    
+    Note: column_id is resolved to the actual Bronze column name automatically,
+    handling any prefixing that may have occurred during ingestion.
     """
-    column_id: Optional[int] = Field(None, description="external_column.id (for virtualized)")
-    column_name: Optional[str] = Field(None, description="Column name (for transform or direct reference)")
+    column_id: Optional[int] = Field(None, description="external_column.id (RECOMMENDED - unambiguous)")
+    column_name: Optional[str] = Field(None, description="Column name (alternative - may be ambiguous)")
     operator: FilterOperatorEnum = Field(..., description="Comparison operator")
     value: Optional[Any] = Field(None, description="Value to compare (not needed for IS NULL/IS NOT NULL)")
     value_min: Optional[Any] = Field(None, description="Min value for BETWEEN operator")
@@ -219,14 +229,27 @@ class InlineFilter(BaseModel):
     Filters are applied as WHERE conditions in the query.
     Multiple conditions are combined using the specified logic (AND/OR).
     
-    Example:
+    RECOMMENDED: Use column_id for unambiguous filtering across multiple sources.
+    
+    Example (using column_id - RECOMMENDED):
     ```json
     {
         "logic": "AND",
         "conditions": [
-            {"column_name": "age", "operator": ">=", "value": 18},
-            {"column_name": "status", "operator": "=", "value": "active"},
-            {"column_name": "deleted_at", "operator": "IS NULL"}
+            {"column_id": 75, "operator": "IS NOT NULL"},
+            {"column_id": 71, "operator": "=", "value": "João Silva"},
+            {"column_id": 80, "operator": ">=", "value": 18}
+        ]
+    }
+    ```
+    
+    Example (using column_name - alternative):
+    ```json
+    {
+        "logic": "AND",
+        "conditions": [
+            {"column_name": "cpf_paciente", "operator": "IS NOT NULL"},
+            {"column_name": "nome_paciente", "operator": "=", "value": "João Silva"}
         ]
     }
     ```

@@ -532,11 +532,29 @@ class BronzeIngestionService:
                 logger.warning(f"Failed to copy images to Bronze: {img_error}")
                 # Don't fail the entire ingestion if image copy fails
         
-        # Step 6: Store inter-DB links for Silver layer
+        # Step 6: Store inter-source links for Silver layer
+        # Create InterSourceLinks for ALL relationships between tables in DIFFERENT groups
+        # This includes both INTRA_CONNECTION and INTER_CONNECTION relationships
+        # (because tables from the same connection can be in different groups)
+        all_relationships = []
+        if dataset_data.intra_db_relationships:
+            all_relationships.extend(dataset_data.intra_db_relationships)
         if dataset_data.inter_db_relationships:
-            await self._store_inter_source_links(
+            all_relationships.extend([
+                IntraDBRelationship(
+                    left_table_id=r.left_table_id,
+                    left_column_id=r.left_column_id,
+                    right_table_id=r.right_table_id,
+                    right_column_id=r.right_column_id,
+                    join_strategy=r.join_strategy,
+                    custom_condition=None
+                ) for r in dataset_data.inter_db_relationships
+            ])
+        
+        if all_relationships and len(preview.ingestion_groups) > 1:
+            await self._store_inter_source_links_v2(
                 bronze_config.id,
-                dataset_data.inter_db_relationships,
+                all_relationships,
                 preview.ingestion_groups
             )
         
@@ -1480,6 +1498,146 @@ AS
         
         await self.db.flush()
 
+    async def _store_inter_source_links_v2(
+        self,
+        bronze_config_id: int,
+        relationships: List[IntraDBRelationship],
+        ingestion_groups: List[IngestionGroupPreview]
+    ):
+        """
+        Store inter-source links for Silver layer processing (V2 - improved).
+        
+        This version correctly maps table_id → group_id (not connection_id → group_id),
+        which handles the case where tables from the same connection are in different groups.
+        
+        Creates InterSourceLinks for ALL relationships where the tables are in DIFFERENT groups.
+        
+        IMPORTANT: Uses bronze_column_name from BronzeColumnMapping, NOT the original column name,
+        because Bronze may have prefixed column names to avoid conflicts.
+        """
+        # Step 1: Build mapping table_id → group_id
+        # First, get all ingestion groups from DB
+        group_query = select(
+            DatasetIngestionGroup.id,
+            DatasetIngestionGroup.group_name
+        ).where(
+            DatasetIngestionGroup.bronze_config_id == bronze_config_id
+        )
+        result = await self.db.execute(group_query)
+        db_groups = {row.group_name: row.id for row in result.fetchall()}
+        
+        # Build table_id → group_id mapping from preview data
+        table_to_group_id = {}
+        for group_preview in ingestion_groups:
+            group_id = db_groups.get(group_preview.group_name)
+            if group_id:
+                for table_info in group_preview.tables:
+                    table_id = table_info.get('table_id')
+                    if table_id:
+                        table_to_group_id[table_id] = group_id
+        
+        logger.info(f"Built table_to_group_id mapping: {table_to_group_id}")
+        
+        # Step 2: Build mapping (external_column_id, group_id) → bronze_column_name
+        # This is critical: we must use the BRONZE column name, not the original
+        # because Bronze may have prefixed columns to avoid naming conflicts
+        bronze_col_mapping = await self._get_bronze_column_names(bronze_config_id)
+        logger.info(f"Bronze column mappings loaded: {len(bronze_col_mapping)} entries")
+        
+        # Step 3: For each relationship, check if tables are in DIFFERENT groups
+        links_created = 0
+        for rel in relationships:
+            left_group_id = table_to_group_id.get(rel.left_table_id)
+            right_group_id = table_to_group_id.get(rel.right_table_id)
+            
+            # Skip if either table is not in our mapping
+            if not left_group_id or not right_group_id:
+                continue
+            
+            # Skip if tables are in the SAME group (already joined in Bronze)
+            if left_group_id == right_group_id:
+                continue
+            
+            # Tables are in DIFFERENT groups - create InterSourceLink
+            # Get BRONZE column names (not original names)
+            left_bronze_col = bronze_col_mapping.get((rel.left_column_id, left_group_id))
+            right_bronze_col = bronze_col_mapping.get((rel.right_column_id, right_group_id))
+            
+            # Fallback to original name if not found in mapping
+            if not left_bronze_col:
+                left_col_info = await self._get_column_info(rel.left_column_id)
+                left_bronze_col = left_col_info['column_name'] if left_col_info else None
+                logger.warning(f"Bronze column name not found for column {rel.left_column_id} in group {left_group_id}, using original: {left_bronze_col}")
+            
+            if not right_bronze_col:
+                right_col_info = await self._get_column_info(rel.right_column_id)
+                right_bronze_col = right_col_info['column_name'] if right_col_info else None
+                logger.warning(f"Bronze column name not found for column {rel.right_column_id} in group {right_group_id}, using original: {right_bronze_col}")
+            
+            if left_bronze_col and right_bronze_col:
+                # Check if link already exists
+                existing_link = await self.db.execute(
+                    select(InterSourceLink).where(
+                        and_(
+                            InterSourceLink.bronze_config_id == bronze_config_id,
+                            InterSourceLink.left_group_id == left_group_id,
+                            InterSourceLink.left_column_name == left_bronze_col,
+                            InterSourceLink.right_group_id == right_group_id,
+                            InterSourceLink.right_column_name == right_bronze_col
+                        )
+                    )
+                )
+                if existing_link.scalar_one_or_none():
+                    continue  # Already exists
+                
+                link = InterSourceLink(
+                    bronze_config_id=bronze_config_id,
+                    left_group_id=left_group_id,
+                    left_column_name=left_bronze_col,
+                    right_group_id=right_group_id,
+                    right_column_name=right_bronze_col,
+                    join_strategy=JoinStrategy(rel.join_strategy.value),
+                    description=f"Auto-created for tables in different groups"
+                )
+                self.db.add(link)
+                links_created += 1
+                logger.info(f"Created InterSourceLink: group[{left_group_id}].{left_bronze_col} = group[{right_group_id}].{right_bronze_col}")
+        
+        await self.db.flush()
+        logger.info(f"Created {links_created} InterSourceLinks for Bronze config {bronze_config_id}")
+    
+    async def _get_bronze_column_names(self, bronze_config_id: int) -> Dict[Tuple[int, int], str]:
+        """
+        Get mapping of (external_column_id, group_id) → bronze_column_name.
+        
+        This is needed because Bronze may prefix column names to avoid conflicts,
+        and InterSourceLinks must reference the actual Bronze column names.
+        """
+        # Get all groups for this bronze config
+        groups_query = select(DatasetIngestionGroup.id).where(
+            DatasetIngestionGroup.bronze_config_id == bronze_config_id
+        )
+        groups_result = await self.db.execute(groups_query)
+        group_ids = [row[0] for row in groups_result.fetchall()]
+        
+        if not group_ids:
+            return {}
+        
+        # Get all column mappings for these groups
+        mappings_query = select(
+            BronzeColumnMapping.external_column_id,
+            BronzeColumnMapping.ingestion_group_id,
+            BronzeColumnMapping.bronze_column_name
+        ).where(
+            BronzeColumnMapping.ingestion_group_id.in_(group_ids)
+        )
+        result = await self.db.execute(mappings_query)
+        
+        return {
+            (row.external_column_id, row.ingestion_group_id): row.bronze_column_name
+            for row in result.fetchall()
+        }
+
     async def _copy_images_to_bronze(
         self,
         dataset_id: int,
@@ -1967,11 +2125,11 @@ AS
                     # Check if query already has LIMIT (case-insensitive)
                     sql_upper = select_sql.upper()
                     if ' LIMIT ' not in sql_upper:
-                        # Add LIMIT (required for OFFSET in Trino)
-                        select_sql = f"{select_sql} LIMIT {limit}"
-                        # Only add OFFSET if > 0
+                        # Add OFFSET/LIMIT (Trino requires OFFSET before LIMIT)
                         if offset > 0:
-                            select_sql = f"{select_sql} OFFSET {offset}"
+                            select_sql = f"{select_sql} OFFSET {offset} LIMIT {limit}"
+                        else:
+                            select_sql = f"{select_sql} LIMIT {limit}"
                 
                 # Execute the query
                 data, columns = await self._execute_virtualized_query(select_sql)
