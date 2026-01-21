@@ -142,96 +142,98 @@ async def list_filter_operators():
                 "operator": "=",
                 "category": "comparison",
                 "description": "Equal to",
-                "example": {"column_name": "status", "operator": "=", "value": "active"}
+                "example": {"column_id": 10, "operator": "=", "value": "active"}
             },
             {
                 "operator": "!=",
                 "category": "comparison",
                 "description": "Not equal to",
-                "example": {"column_name": "status", "operator": "!=", "value": "deleted"}
+                "example": {"column_id": 10, "operator": "!=", "value": "deleted"}
             },
             {
                 "operator": ">",
                 "category": "comparison",
                 "description": "Greater than",
-                "example": {"column_name": "age", "operator": ">", "value": 18}
+                "example": {"column_id": 15, "operator": ">", "value": 18}
             },
             {
                 "operator": ">=",
                 "category": "comparison",
                 "description": "Greater than or equal to",
-                "example": {"column_name": "age", "operator": ">=", "value": 18}
+                "example": {"column_id": 15, "operator": ">=", "value": 18}
             },
             {
                 "operator": "<",
                 "category": "comparison",
                 "description": "Less than",
-                "example": {"column_name": "price", "operator": "<", "value": 100}
+                "example": {"column_id": 20, "operator": "<", "value": 100}
             },
             {
                 "operator": "<=",
                 "category": "comparison",
                 "description": "Less than or equal to",
-                "example": {"column_name": "price", "operator": "<=", "value": 100}
+                "example": {"column_id": 20, "operator": "<=", "value": 100}
             },
             {
                 "operator": "LIKE",
                 "category": "pattern",
                 "description": "Case-sensitive pattern match (use % as wildcard)",
-                "example": {"column_name": "name", "operator": "LIKE", "value": "John%"}
+                "example": {"column_id": 25, "operator": "LIKE", "value": "John%"}
             },
             {
                 "operator": "ILIKE",
                 "category": "pattern",
                 "description": "Case-insensitive pattern match",
-                "example": {"column_name": "email", "operator": "ILIKE", "value": "%@gmail.com"}
+                "example": {"column_id": 30, "operator": "ILIKE", "value": "%@gmail.com"}
             },
             {
                 "operator": "IN",
                 "category": "set",
                 "description": "Value is in a list",
-                "example": {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+                "example": {"column_id": 10, "operator": "IN", "value": ["active", "pending"]}
             },
             {
                 "operator": "NOT IN",
                 "category": "set",
                 "description": "Value is not in a list",
-                "example": {"column_name": "status", "operator": "NOT IN", "value": ["deleted", "archived"]}
+                "example": {"column_id": 10, "operator": "NOT IN", "value": ["deleted", "archived"]}
             },
             {
                 "operator": "IS NULL",
                 "category": "null",
                 "description": "Value is null",
-                "example": {"column_name": "deleted_at", "operator": "IS NULL"}
+                "example": {"column_id": 35, "operator": "IS NULL"}
             },
             {
                 "operator": "IS NOT NULL",
                 "category": "null",
                 "description": "Value is not null",
-                "example": {"column_name": "email", "operator": "IS NOT NULL"}
+                "example": {"column_id": 30, "operator": "IS NOT NULL"}
             },
             {
                 "operator": "BETWEEN",
                 "category": "range",
                 "description": "Value is between min and max (inclusive)",
-                "example": {"column_name": "price", "operator": "BETWEEN", "value_min": 10, "value_max": 100}
+                "example": {"column_id": 20, "operator": "BETWEEN", "value_min": 10, "value_max": 100}
             }
         ],
         "logic_options": ["AND", "OR"],
         "example_filter": {
             "logic": "AND",
             "conditions": [
-                {"column_name": "age", "operator": ">=", "value": 18},
-                {"column_name": "status", "operator": "=", "value": "active"},
-                {"column_name": "deleted_at", "operator": "IS NULL"}
+                {"column_id": 15, "operator": ">=", "value": 18},
+                {"column_id": 10, "operator": "=", "value": "active"},
+                {"column_id": 35, "operator": "IS NULL"}
             ]
         },
         "notes": [
             "Filters are defined inline within VirtualizedConfig and TransformConfig",
-            "Use column_id for external_column.id or column_name for direct reference",
+            "RECOMMENDED: Use column_id (external_column.id from metadata) - unambiguous across sources",
+            "ALTERNATIVE: Use column_name for direct reference (may be ambiguous if columns have same name)",
             "Multiple conditions are combined using the specified logic (AND/OR)",
             "For BETWEEN, use value_min and value_max instead of value",
-            "For IS NULL and IS NOT NULL, value is not required"
+            "For IS NULL and IS NOT NULL, value is not required",
+            "Get column_id via GET /api/metadata/tables/{table_id}/columns"
         ]
     }
 
@@ -468,13 +470,17 @@ Data is NOT saved - returned as JSON (use for exploration, APIs, etc.).
 
 Filters are defined directly in the config, not as separate entities.
 
+**RECOMMENDED:** Use `column_id` (from GET /api/metadata/tables/{table_id}/columns) for unambiguous filtering.
+
+**ALTERNATIVE:** Use `column_name` for direct reference (may be ambiguous if columns have same name across sources).
+
 ```json
 "filters": {
   "logic": "AND",
   "conditions": [
-    {"column_name": "age", "operator": ">=", "value": 18},
-    {"column_name": "status", "operator": "=", "value": "active"},
-    {"column_name": "deleted_at", "operator": "IS NULL"}
+    {"column_id": 15, "operator": ">=", "value": 18},
+    {"column_id": 10, "operator": "=", "value": "active"},
+    {"column_id": 35, "operator": "IS NULL"}
   ]
 }
 ```
@@ -520,8 +526,8 @@ See GET /api/silver/transformation-types for full documentation.
   "filters": {
     "logic": "AND",
     "conditions": [
-      {"column_name": "age", "operator": ">=", "value": 18},
-      {"column_name": "status", "operator": "=", "value": "active"}
+      {"column_id": 15, "operator": ">=", "value": 18},
+      {"column_id": 10, "operator": "=", "value": "active"}
     ]
   }
 }
@@ -575,8 +581,8 @@ See GET /api/silver/transformation-types for full documentation.
   "filters": {
     "logic": "AND",
     "conditions": [
-      {"column_name": "age", "operator": ">=", "value": 18},
-      {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+      {"column_id": 51, "operator": ">=", "value": 18},
+      {"column_id": 50, "operator": "IN", "value": ["active", "pending"]}
     ]
   },
   "column_transformations": [
@@ -591,9 +597,9 @@ See GET /api/silver/transformation-types for full documentation.
 
 ## **Notes:**
 - Use GET /api/metadata/tables to find `table_id`
-- Use GET /api/metadata/tables/{id}/columns to find `column_id`
+- Use GET /api/metadata/tables/{id}/columns to find `column_id` (RECOMMENDED for filters)
 - Create rules first via POST /api/silver/normalization-rules for `template` type
-- Filters are now inline (not separate entities)
+- Filters: prefer `column_id` over `column_name` for unambiguous references
 - For value mappings (M→Masculino), use /api/equivalence (not column_transformations)
 """
 )
@@ -739,12 +745,16 @@ Unlike VirtualizedConfig (which queries data on-demand via Trino), TransformConf
 
 Filters are defined directly in the config, not as separate entities.
 
+**RECOMMENDED:** Use `column_id` (from GET /api/metadata/tables/{table_id}/columns) for unambiguous filtering.
+
+**ALTERNATIVE:** Use `column_name` for direct reference (may be ambiguous if columns have same name across sources).
+
 ```json
 "filters": {
   "logic": "AND",
   "conditions": [
-    {"column_name": "age", "operator": ">=", "value": 18},
-    {"column_name": "status", "operator": "=", "value": "active"}
+    {"column_id": 15, "operator": ">=", "value": 18},
+    {"column_id": 10, "operator": "=", "value": "active"}
   ]
 }
 ```
@@ -795,8 +805,8 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
   "filters": {
     "logic": "AND",
     "conditions": [
-      {"column_name": "status", "operator": "=", "value": "active"},
-      {"column_name": "deleted_at", "operator": "IS NULL"}
+      {"column_id": 10, "operator": "=", "value": "active"},
+      {"column_id": 35, "operator": "IS NULL"}
     ]
   }
 }
@@ -843,8 +853,8 @@ Uses `column_id` (external_column.id) - automatically resolved to Bronze column 
   "filters": {
     "logic": "AND",
     "conditions": [
-      {"column_name": "age", "operator": ">=", "value": 18},
-      {"column_name": "status", "operator": "IN", "value": ["active", "pending"]}
+      {"column_id": 51, "operator": ">=", "value": 18},
+      {"column_id": 50, "operator": "IN", "value": ["active", "pending"]}
     ]
   },
   "column_transformations": [
