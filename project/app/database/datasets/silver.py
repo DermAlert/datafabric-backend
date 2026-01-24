@@ -38,6 +38,13 @@ class TransformStatus(enum.Enum):
     FAILED = "failed"
 
 
+class SilverWriteMode(enum.Enum):
+    """Write mode for Silver Delta Lake operations"""
+    OVERWRITE = "overwrite"  # Replace all data (default behavior before versioning)
+    APPEND = "append"        # Add to existing data (may duplicate)
+    MERGE = "merge"          # Upsert: insert new, update existing (no duplicates)
+
+
 # ==================== NORMALIZATION RULES ====================
 
 class NormalizationRule(AuditMixin, Base):
@@ -164,6 +171,15 @@ class TransformConfig(AuditMixin, Base):
     Materializes to Silver Delta Lake.
     
     Filters are defined inline in the config (not referenced by ID).
+    
+    Versioning with Delta Lake:
+    - write_mode='overwrite': Replaces all data each execution (legacy behavior)
+    - write_mode='append': Adds data without checking duplicates
+    - write_mode='merge': Upsert based on merge_keys (no duplicates) - RECOMMENDED
+    
+    If write_mode='merge' and merge_keys is not provided, the system
+    auto-detects primary keys from the Bronze source. If no PK is found,
+    falls back to 'overwrite' mode.
     """
     __tablename__ = "transform_configs"
     __table_args__ = (
@@ -211,6 +227,22 @@ class TransformConfig(AuditMixin, Base):
     # E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear
     exclude_unified_source_columns = Column(Boolean, default=False, nullable=False)
     
+    # === VERSIONING CONFIGURATION ===
+    # Write mode for Delta Lake
+    write_mode = Column(SQLEnum(SilverWriteMode), nullable=False, default=SilverWriteMode.MERGE)
+    
+    # Columns used for MERGE deduplication (like a primary key)
+    # If null and write_mode='merge', auto-detects from Bronze source PKs
+    # If no PK found, falls back to 'overwrite'
+    merge_keys = Column(JSON, nullable=True)  # ["patient_id"] or ["hospital_id", "visit_id"]
+    
+    # Resolved merge keys (filled after auto-detection)
+    # Stores what was actually used: 'user_defined', 'auto_detected_pk', or null (fallback to overwrite)
+    merge_keys_source = Column(String(50), nullable=True)
+    
+    # Delta Lake versioning info
+    current_delta_version = Column(Integer, nullable=True)  # Latest Delta version
+    
     # Execution status
     last_execution_time = Column(TIMESTAMP(timezone=True), nullable=True)
     last_execution_status = Column(SQLEnum(TransformStatus), nullable=True)
@@ -226,6 +258,8 @@ class TransformConfig(AuditMixin, Base):
 class TransformExecution(AuditMixin, Base):
     """
     Execution history for transform configs.
+    
+    Tracks each execution including versioning info and merge statistics.
     """
     __tablename__ = "transform_executions"
     __table_args__ = {'schema': 'datasets'}
@@ -246,3 +280,26 @@ class TransformExecution(AuditMixin, Base):
     
     # Execution details
     execution_details = Column(JSON, nullable=True)
+    
+    # === DELTA LAKE VERSIONING ===
+    # Delta version created by this execution
+    delta_version = Column(Integer, nullable=True)
+    
+    # Write mode used in this execution
+    write_mode_used = Column(String(20), nullable=True)  # overwrite, append, merge
+    
+    # Merge keys used (if merge mode)
+    merge_keys_used = Column(JSON, nullable=True)
+    
+    # MERGE operation statistics
+    rows_inserted = Column(Integer, nullable=True)  # New rows inserted
+    rows_updated = Column(Integer, nullable=True)   # Existing rows updated
+    rows_deleted = Column(Integer, nullable=True)   # Rows deleted (if applicable)
+    
+    # Schema tracking (internal - for auditing schema changes)
+    schema_hash = Column(String(64), nullable=True)  # Hash of config
+    schema_changed = Column(Boolean, default=False)  # True if schema changed from previous execution
+    
+    # Full config snapshot at execution time (for reproducibility)
+    # Stores exactly what config was used to generate this version
+    config_snapshot = Column(JSON, nullable=True)

@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes, delta_sharing_management, delta_sharing_protocol, bronze_routes, relationship_routes, silver_routes, internal
+    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes, delta_sharing_management, delta_sharing_protocol, bronze_routes, relationship_routes, federation_routes, silver_routes, internal
 )
 
 api_router = APIRouter()
@@ -53,6 +53,11 @@ api_router.include_router(
 # Table Relationships (Metadata)
 api_router.include_router(
     relationship_routes.router, prefix="/relationships", tags=["Table Relationships"]
+)
+
+# Federations (Cross-Database Relationship Groups)
+api_router.include_router(
+    federation_routes.router, prefix="/federations", tags=["Federations"]
 )
 
 # Delta Sharing Management APIs

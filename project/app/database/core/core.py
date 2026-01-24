@@ -96,7 +96,7 @@ class DataConnection(Base):
     content_type = Column(content_type_enum, nullable=False, default='metadata')
     # credentials_id = Column(Integer, ForeignKey("security.credentials.id"), nullable=True)  -> ainda não existe security.credentials.id
     status = Column(String, nullable=False, default='inactive')  # inactive, active, error
-    sync_status = Column(String, nullable=False, default='success')  # success, partial, failed, running, pending
+    sync_status = Column(String, nullable=False, default='idle')  # idle, pending, running, success, partial, failed
     sync_progress = Column(Integer, nullable=False, default=0)  # 0-100 percentage
     sync_progress_details = Column(JSON, nullable=True)  # {phase, current_item, total_items, message}
     last_sync_time = Column(TIMESTAMP(timezone=True), nullable=True)

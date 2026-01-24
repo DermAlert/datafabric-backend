@@ -584,7 +584,7 @@ class RelationshipDiscoveryService:
         return await self._build_relationship_response(relationship)
     
     async def delete_relationship(self, relationship_id: int) -> None:
-        """Delete a relationship."""
+        """Delete a relationship and reset associated suggestion to pending (if exists)."""
         query = select(TableRelationship).where(TableRelationship.id == relationship_id)
         result = await self.db.execute(query)
         relationship = result.scalar_one_or_none()
@@ -594,6 +594,26 @@ class RelationshipDiscoveryService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Relationship {relationship_id} not found"
             )
+        
+        # Reset associated suggestion to 'pending' so it can be re-discovered/re-accepted
+        sug_query = select(RelationshipSuggestion).where(
+            or_(
+                and_(
+                    RelationshipSuggestion.left_column_id == relationship.left_column_id,
+                    RelationshipSuggestion.right_column_id == relationship.right_column_id
+                ),
+                and_(
+                    RelationshipSuggestion.left_column_id == relationship.right_column_id,
+                    RelationshipSuggestion.right_column_id == relationship.left_column_id
+                )
+            )
+        )
+        sug_result = await self.db.execute(sug_query)
+        suggestion = sug_result.scalar_one_or_none()
+        
+        if suggestion and suggestion.status == 'accepted':
+            suggestion.status = 'pending'
+            logger.info(f"Reset suggestion {suggestion.id} to 'pending' after relationship deletion")
         
         await self.db.delete(relationship)
         await self.db.commit()
@@ -768,6 +788,48 @@ class RelationshipDiscoveryService:
         
         suggestion.status = 'rejected'
         await self.db.commit()
+    
+    async def reset_suggestion(self, suggestion_id: int) -> RelationshipSuggestionResponse:
+        """
+        Reset a rejected suggestion back to pending.
+        
+        This allows users to reconsider a previously rejected suggestion.
+        """
+        query = select(RelationshipSuggestion).where(
+            RelationshipSuggestion.id == suggestion_id
+        )
+        result = await self.db.execute(query)
+        suggestion = result.scalar_one_or_none()
+        
+        if not suggestion:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Suggestion {suggestion_id} not found"
+            )
+        
+        if suggestion.status == 'pending':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Suggestion is already pending"
+            )
+        
+        if suggestion.status == 'accepted':
+            # Check if the relationship still exists
+            existing_rel = await self._get_existing_relationship(
+                suggestion.left_column_id,
+                suggestion.right_column_id
+            )
+            if existing_rel:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot reset: relationship already exists. Delete the relationship first."
+                )
+        
+        suggestion.status = 'pending'
+        await self.db.commit()
+        await self.db.refresh(suggestion)
+        
+        return await self._build_suggestion_response(suggestion)
     
     async def list_suggestions(
         self,
@@ -1019,11 +1081,12 @@ class RelationshipDiscoveryService:
             pairs.add((row[0], row[1]))
             pairs.add((row[1], row[0]))  # Add reverse
         
-        # Also check suggestions
+        # Also check ALL suggestions (not just pending) to avoid unique constraint violations
+        # The constraint is on (left_column_id, right_column_id) regardless of status
         sug_query = select(
             RelationshipSuggestion.left_column_id,
             RelationshipSuggestion.right_column_id
-        ).where(RelationshipSuggestion.status == 'pending')
+        )
         
         sug_result = await self.db.execute(sug_query)
         for row in sug_result.fetchall():

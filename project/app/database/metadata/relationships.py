@@ -10,15 +10,86 @@ between tables across data connections. These relationships are:
 
 These relationships are stored at the metadata level (not dataset level)
 and can be reused across multiple datasets.
+
+Additionally, this module includes Federation models for organizing
+cross-database relationships into logical groups.
 """
 
-from sqlalchemy import Column, Integer, String, ForeignKey, JSON, Boolean, Text, Enum as SQLEnum, Float
+from sqlalchemy import Column, Integer, String, ForeignKey, JSON, Boolean, Text, Enum as SQLEnum, Float, Table
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy import UniqueConstraint, TIMESTAMP
 from ..database import Base
 from ..baseMixin import AuditMixin
 import enum
+
+
+# ==================== FEDERATION MODELS ====================
+
+class Federation(AuditMixin, Base):
+    """
+    Federation represents a logical grouping of data connections and tables
+    for organizing cross-database relationships.
+    
+    A federation groups multiple connections together, making it easier to:
+    - Navigate and manage relationships in large environments
+    - Organize by business domain (e.g., "E-commerce", "Analytics")
+    - Scope queries and discovery to specific connection groups
+    """
+    __tablename__ = "federations"
+    __table_args__ = {'schema': 'metadata'}
+
+    id = Column(Integer, primary_key=True)
+    name = Column(String(255), nullable=False)
+    description = Column(Text, nullable=True)
+    
+    # Relationships
+    connections = relationship("FederationConnection", back_populates="federation", cascade="all, delete-orphan")
+    tables = relationship("FederationTable", back_populates="federation", cascade="all, delete-orphan")
+
+
+class FederationConnection(Base):
+    """
+    Association table linking Federations to DataConnections.
+    A federation can have multiple connections, and a connection can belong to multiple federations.
+    """
+    __tablename__ = "federation_connections"
+    __table_args__ = (
+        UniqueConstraint('federation_id', 'connection_id', name='uq_federation_connection'),
+        {'schema': 'metadata'}
+    )
+
+    id = Column(Integer, primary_key=True)
+    federation_id = Column(Integer, ForeignKey('metadata.federations.id', ondelete='CASCADE'), nullable=False)
+    connection_id = Column(Integer, ForeignKey('core.data_connections.id', ondelete='CASCADE'), nullable=False)
+    
+    # Relationship back to federation
+    federation = relationship("Federation", back_populates="connections")
+
+
+class FederationTable(Base):
+    """
+    Optional association table linking Federations to specific tables.
+    
+    If no tables are explicitly added, the federation includes ALL tables
+    from its connections. If tables are added, only those specific tables
+    are considered part of the federation.
+    """
+    __tablename__ = "federation_tables"
+    __table_args__ = (
+        UniqueConstraint('federation_id', 'table_id', name='uq_federation_table'),
+        {'schema': 'metadata'}
+    )
+
+    id = Column(Integer, primary_key=True)
+    federation_id = Column(Integer, ForeignKey('metadata.federations.id', ondelete='CASCADE'), nullable=False)
+    table_id = Column(Integer, ForeignKey('metadata.external_tables.id', ondelete='CASCADE'), nullable=False)
+    
+    # Relationship back to federation
+    federation = relationship("Federation", back_populates="tables")
+
+
+# ==================== RELATIONSHIP ENUMS ====================
 
 
 class RelationshipScope(enum.Enum):

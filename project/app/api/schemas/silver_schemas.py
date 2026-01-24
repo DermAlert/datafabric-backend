@@ -96,6 +96,19 @@ class TransformStatusEnum(str, Enum):
     FAILED = "failed"
 
 
+class SilverWriteModeEnum(str, Enum):
+    """
+    Write mode for Silver Delta Lake operations.
+    
+    - **overwrite**: Replace all data each execution (legacy behavior)
+    - **append**: Add to existing data (may create duplicates)
+    - **merge**: Upsert based on merge_keys - insert new, update existing (recommended)
+    """
+    OVERWRITE = "overwrite"
+    APPEND = "append"
+    MERGE = "merge"
+
+
 # ==================== TABLE SELECTION ====================
 
 class TableColumnSelection(BaseModel):
@@ -419,6 +432,20 @@ class TransformConfigCreate(BaseModel):
     
     The system automatically resolves external_column_id to bronze_column_name
     using BronzeColumnMapping.
+    
+    ---
+    
+    ## **Versioning with Delta Lake:**
+    
+    | write_mode | Behavior | Duplicates | Use Case |
+    |------------|----------|------------|----------|
+    | `overwrite` | Replace all data | N/A | Full snapshot |
+    | `append` | Add to existing | ⚠️ May duplicate | Event logs |
+    | `merge` | Upsert (insert/update) | ✅ No duplicates | **Recommended** |
+    
+    **merge_keys**: Columns used to identify unique records (like a primary key).
+    - If not provided with `write_mode=merge`, auto-detects from Bronze source PKs
+    - If no PK found, falls back to `overwrite` mode
     """
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
@@ -452,6 +479,24 @@ class TransformConfigCreate(BaseModel):
         description="When True, excludes original source columns after semantic unification. "
                     "E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear in output."
     )
+    
+    # === VERSIONING FIELDS ===
+    write_mode: SilverWriteModeEnum = Field(
+        SilverWriteModeEnum.MERGE,
+        description=(
+            "Write mode: 'overwrite' (replace all), 'append' (add without checking), "
+            "'merge' (upsert - recommended, no duplicates)"
+        )
+    )
+    
+    merge_keys: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Columns used for MERGE deduplication (like a primary key). "
+            "If null with write_mode='merge', auto-detects from Bronze source PKs. "
+            "If no PK found, falls back to 'overwrite'."
+        )
+    )
 
 
 class TransformConfigUpdate(BaseModel):
@@ -466,6 +511,8 @@ class TransformConfigUpdate(BaseModel):
     column_transformations: Optional[List[ColumnTransformation]] = None
     image_labeling_config: Optional[TransformImageLabeling] = None
     exclude_unified_source_columns: Optional[bool] = None
+    write_mode: Optional[SilverWriteModeEnum] = None
+    merge_keys: Optional[List[str]] = None
     is_active: Optional[bool] = None
 
 
@@ -483,6 +530,13 @@ class TransformConfigResponse(BaseModel):
     column_transformations: Optional[List[Dict[str, Any]]]
     image_labeling_config: Optional[Dict[str, Any]]
     exclude_unified_source_columns: bool = False
+    
+    # Versioning fields
+    write_mode: str = "merge"
+    merge_keys: Optional[List[str]] = None
+    merge_keys_source: Optional[str] = None  # 'user_defined', 'auto_detected_pk', or null
+    current_delta_version: Optional[int] = None
+    
     last_execution_time: Optional[datetime]
     last_execution_status: Optional[str]
     last_execution_rows: Optional[int]
@@ -515,6 +569,18 @@ class TransformExecuteResponse(BaseModel):
     output_path: str
     execution_time_seconds: float
     message: str
+    
+    # Delta Lake versioning info
+    delta_version: Optional[int] = None
+    write_mode_used: str = "merge"
+    merge_keys_used: Optional[List[str]] = None
+    
+    # MERGE statistics (when write_mode=merge)
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    
+    # Config snapshot at execution time (for reproducibility)
+    config_snapshot: Optional[Dict[str, Any]] = None
 
 
 class TransformExecutionResponse(BaseModel):
@@ -529,4 +595,59 @@ class TransformExecutionResponse(BaseModel):
     output_path: Optional[str]
     error_message: Optional[str]
     
+    # Delta Lake versioning info
+    delta_version: Optional[int] = None
+    write_mode_used: Optional[str] = None
+    merge_keys_used: Optional[List[str]] = None
+    
+    # MERGE statistics
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    rows_deleted: Optional[int] = None
+    
+    # Config snapshot at execution time (for reproducibility)
+    config_snapshot: Optional[Dict[str, Any]] = None
+    
     model_config = {"from_attributes": True}
+
+
+# ==================== VERSION HISTORY ====================
+
+class SilverVersionInfo(BaseModel):
+    """Information about a single Silver Delta Lake version."""
+    version: int
+    timestamp: datetime
+    operation: str  # WRITE, MERGE, DELETE, etc.
+    execution_id: Optional[int] = None
+    
+    # Statistics
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    rows_deleted: Optional[int] = None
+    total_rows: Optional[int] = None
+    
+    # Size info
+    num_files: Optional[int] = None
+    size_bytes: Optional[int] = None
+
+
+class SilverVersionHistoryResponse(BaseModel):
+    """Response for version history of a Silver config."""
+    config_id: int
+    config_name: str
+    current_version: Optional[int]
+    output_path: str
+    versions: List[SilverVersionInfo]
+
+
+class SilverDataQueryResponse(BaseModel):
+    """Response for querying Silver data with optional time travel."""
+    config_id: int
+    config_name: str
+    version: Optional[int] = None  # null = latest
+    as_of_timestamp: Optional[datetime] = None
+    columns: List[str]
+    data: List[Dict[str, Any]]
+    row_count: int
+    total_rows: Optional[int] = None
+    execution_time_seconds: float

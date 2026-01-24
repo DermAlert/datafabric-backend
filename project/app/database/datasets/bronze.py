@@ -289,6 +289,13 @@ class BronzeExecutionStatus(enum.Enum):
     FAILED = "failed"
 
 
+class WriteMode(enum.Enum):
+    """Write mode for Delta Lake operations"""
+    OVERWRITE = "overwrite"  # Replace all data (default)
+    APPEND = "append"        # Add to existing data (may duplicate)
+    MERGE = "merge"          # Upsert: insert new, update existing (no duplicates)
+
+
 class BronzeVirtualizedConfig(AuditMixin, Base):
     """
     Configuration for virtualized Bronze queries via Trino.
@@ -341,6 +348,15 @@ class BronzePersistentConfig(AuditMixin, Base):
     reusable config that can be executed multiple times.
     
     This mirrors TransformConfig from Silver but for raw data ingestion.
+    
+    Versioning with Delta Lake:
+    - write_mode='overwrite': Replaces all data each execution (default)
+    - write_mode='append': Adds data without checking duplicates
+    - write_mode='merge': Upsert based on merge_keys (no duplicates)
+    
+    If write_mode='merge' and merge_keys is not provided, the system
+    auto-detects primary keys from the source tables. If no PK is found,
+    falls back to 'overwrite' mode.
     """
     __tablename__ = "bronze_persistent_configs"
     __table_args__ = (
@@ -363,10 +379,23 @@ class BronzePersistentConfig(AuditMixin, Base):
     enable_federated_joins = Column(Boolean, default=False)
     
     # Output configuration
-    output_format = Column(String(50), nullable=False, default='parquet')  # parquet, delta
+    output_format = Column(String(50), nullable=False, default='delta')  # parquet, delta (changed default to delta for versioning)
     output_bucket = Column(String(255), nullable=True)  # Defaults to system bronze bucket
     output_path_prefix = Column(String(500), nullable=True)  # Custom path prefix
     partition_columns = Column(JSON, nullable=True)  # ["year", "month"]
+    
+    # === VERSIONING CONFIGURATION ===
+    # Write mode for Delta Lake
+    write_mode = Column(SQLEnum(WriteMode), nullable=False, default=WriteMode.MERGE)
+    
+    # Columns used for MERGE deduplication (like a primary key)
+    # If null and write_mode='merge', auto-detects from source PKs
+    # If no PK found, falls back to 'overwrite'
+    merge_keys = Column(JSON, nullable=True)  # ["patient_id"] or ["hospital_id", "visit_id"]
+    
+    # Resolved merge keys (filled after auto-detection)
+    # Stores what was actually used: 'user_defined', 'auto_detected_pk', or null (fallback to overwrite)
+    merge_keys_source = Column(String(50), nullable=True)
     
     # Additional properties
     properties = Column(JSON, nullable=True)
@@ -380,6 +409,9 @@ class BronzePersistentConfig(AuditMixin, Base):
     last_execution_rows = Column(Integer, nullable=True)
     last_execution_error = Column(Text, nullable=True)
     
+    # Delta Lake versioning info
+    current_delta_version = Column(Integer, nullable=True)  # Latest Delta version
+    
     is_active = Column(Boolean, default=True)
     
     # Link to generated dataset (after first successful execution)
@@ -391,7 +423,7 @@ class BronzeExecution(AuditMixin, Base):
     Execution history for Bronze persistent configs.
     
     Tracks each execution of a BronzePersistentConfig, including
-    status, timing, and any errors.
+    status, timing, versioning info, and any errors.
     """
     __tablename__ = "bronze_executions"
     __table_args__ = {'schema': 'datasets'}
@@ -414,6 +446,29 @@ class BronzeExecution(AuditMixin, Base):
     
     # Execution details
     execution_details = Column(JSON, nullable=True)
+    
+    # === DELTA LAKE VERSIONING ===
+    # Delta version created by this execution
+    delta_version = Column(Integer, nullable=True)
+    
+    # Write mode used in this execution
+    write_mode_used = Column(String(20), nullable=True)  # overwrite, append, merge
+    
+    # Merge keys used (if merge mode)
+    merge_keys_used = Column(JSON, nullable=True)
+    
+    # MERGE operation statistics
+    rows_inserted = Column(Integer, nullable=True)  # New rows inserted
+    rows_updated = Column(Integer, nullable=True)   # Existing rows updated
+    rows_deleted = Column(Integer, nullable=True)   # Rows deleted (if applicable)
+    
+    # Schema tracking (internal - for auditing schema changes)
+    schema_hash = Column(String(64), nullable=True)  # Hash of tables/columns config
+    schema_changed = Column(Boolean, default=False)  # True if schema changed from previous execution
+    
+    # Full config snapshot at execution time (for reproducibility)
+    # Stores exactly what config was used to generate this version
+    config_snapshot = Column(JSON, nullable=True)
 
 
 

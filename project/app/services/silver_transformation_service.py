@@ -1760,11 +1760,30 @@ class SilverTransformationService:
         
         start_time = datetime.now()
         
+        # Create config snapshot for reproducibility
+        config_snapshot = {
+            "name": config.name,
+            "description": config.description,
+            "source_bronze_dataset_id": config.source_bronze_dataset_id,
+            "silver_bucket": config.silver_bucket,
+            "silver_path_prefix": config.silver_path_prefix,
+            "column_group_ids": config.column_group_ids,
+            "filters": config.filters,
+            "column_transformations": config.column_transformations,
+            "image_labeling_config": config.image_labeling_config,
+            "exclude_unified_source_columns": config.exclude_unified_source_columns,
+            "write_mode": config.write_mode if isinstance(config.write_mode, str) else (config.write_mode.value if hasattr(config, 'write_mode') and config.write_mode else None),
+            "merge_keys": config.merge_keys,
+            "merge_keys_source": config.merge_keys_source,
+            "snapshot_at": start_time.isoformat(),
+        }
+        
         # Create execution record
         execution = TransformExecution(
             config_id=config_id,
             status=TransformStatus.RUNNING,
-            started_at=start_time
+            started_at=start_time,
+            config_snapshot=config_snapshot,
         )
         self.db.add(execution)
         await self.db.flush()
@@ -1840,7 +1859,8 @@ class SilverTransformationService:
                 rows_output=rows_output,
                 output_path=output_path,
                 execution_time_seconds=execution_time,
-                message=message
+                message=message,
+                config_snapshot=config_snapshot,
             )
             
         except Exception as e:
