@@ -826,6 +826,9 @@ class DeltaVersionInfo(BaseModel):
     # Size info
     num_files: Optional[int] = None
     size_bytes: Optional[int] = None
+    
+    # Config snapshot at this version (for diff comparison)
+    config_snapshot: Optional[Dict[str, Any]] = None
 
 
 class BronzeVersionHistoryResponse(BaseModel):
@@ -833,8 +836,8 @@ class BronzeVersionHistoryResponse(BaseModel):
     config_id: int
     config_name: str
     current_version: Optional[int]
-    output_path: str
-    versions: List[DeltaVersionInfo]
+    output_paths: List[str]  # All output paths (for non-federated configs with multiple sources)
+    versions: List[DeltaVersionInfo]  # Aggregated metrics across all paths
 
 
 class BronzeDataQueryResponse(BaseModel):

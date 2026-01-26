@@ -2219,4 +2219,190 @@ AS
         except Exception as e:
             logger.error(f"Virtualized query failed: {str(e)}")
             raise
+    
+    async def execute_persistent_config_with_versioning(
+        self,
+        config_id: int,
+        config_name: str,
+        tables: List[TableColumnSelection],
+        relationship_ids: Optional[List[int]],
+        enable_federated_joins: bool,
+        output_format: str,
+        output_bucket: Optional[str],
+        output_path_prefix: Optional[str],
+        partition_columns: Optional[List[str]],
+        properties: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute a persistent config with proper Delta Lake versioning using Spark.
+        
+        Uses OVERWRITE mode for simplicity. Delta Lake maintains version history
+        automatically for time travel.
+        
+        Args:
+            config_id: The persistent config ID (used for consistent path)
+            config_name: Config name
+            tables: Table/column selections
+            relationship_ids: Optional relationship filter
+            enable_federated_joins: Whether to use federated joins
+            output_format: Output format (delta/parquet)
+            output_bucket: Optional bucket override
+            output_path_prefix: Optional path prefix override
+            partition_columns: Optional partition columns
+            properties: Additional properties
+            
+        Returns:
+            Dict with execution results including versioning info
+        """
+        from .spark_manager import SparkManager
+        from .bronze_versioning_service import BronzeVersioningService
+        from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType, DoubleType, BooleanType, TimestampType, DateType
+        
+        start_time = datetime.now()
+        
+        # Build consistent output path based on config_id (not dataset_id)
+        bucket = output_bucket or self.bronze_bucket
+        if output_path_prefix:
+            base_path = f"s3a://{bucket}/{output_path_prefix}"
+        else:
+            base_path = f"s3a://{bucket}/{config_id}-{config_name}"
+        
+        # Generate SQL for data extraction
+        dataset_data = DatasetBronzeCreateRequest(
+            name=config_name,
+            tables=tables,
+            relationship_ids=relationship_ids,
+            enable_federated_joins=enable_federated_joins
+        )
+        
+        preview = await self.generate_ingestion_plan_simplified(dataset_data)
+        
+        group_results = []
+        total_rows = 0
+        versioning_stats = {
+            'delta_version': None,
+            'rows_inserted': None,
+            'rows_updated': None,
+            'rows_deleted': None,
+            'size_bytes': None,
+            'num_files': None,
+        }
+        
+        # Initialize Spark
+        spark_manager = SparkManager()
+        versioning_service = BronzeVersioningService(self.db)
+        
+        try:
+            spark = spark_manager.get_or_create_session()
+            
+            for i, group_preview in enumerate(preview.ingestion_groups):
+                group_start = datetime.now()
+                
+                # Determine this group's output path
+                if enable_federated_joins:
+                    group_output_path = f"{base_path}/unified/"
+                elif len(preview.ingestion_groups) == 1:
+                    group_output_path = f"{base_path}/"
+                else:
+                    group_output_path = f"{base_path}/part_{group_preview.connection_name}/"
+                
+                try:
+                    # Execute the SELECT SQL via Trino (using aiotrino) to get data
+                    select_sql = group_preview.estimated_sql
+                    logger.info(f"Executing Trino query for group {group_preview.group_name}:\n{select_sql}")
+                    
+                    # Fetch data via Trino using existing async method
+                    data, columns = await self._execute_virtualized_query(select_sql)
+                    
+                    rows_in_batch = len(data)
+                    logger.info(f"Fetched {rows_in_batch} rows from Trino for group {group_preview.group_name}")
+                    
+                    if rows_in_batch == 0:
+                        logger.warning(f"No data returned from Trino for group {group_preview.group_name}")
+                        group_results.append(IngestionGroupResult(
+                            group_name=group_preview.group_name,
+                            connection_name=group_preview.connection_name,
+                            status=IngestionStatusEnum.SUCCESS,
+                            output_path=group_output_path,
+                            rows_ingested=0,
+                            execution_time_seconds=(datetime.now() - group_start).total_seconds()
+                        ))
+                        continue
+                    
+                    # Convert Python data to Spark DataFrame
+                    # Infer schema from first row
+                    df = spark.createDataFrame(data)
+                    
+                    logger.info(f"Created Spark DataFrame with {df.count()} rows and schema: {df.schema}")
+                    
+                    # Write to Delta Lake (always overwrite)
+                    stats = await versioning_service.execute_overwrite(
+                        spark=spark,
+                        source_df=df,
+                        output_path=group_output_path
+                    )
+                    
+                    # Update versioning stats (aggregate across all groups)
+                    versioning_stats['delta_version'] = stats.get('delta_version')
+                    versioning_stats['rows_inserted'] = (versioning_stats.get('rows_inserted') or 0) + (stats.get('rows_inserted') or 0)
+                    versioning_stats['rows_updated'] = (versioning_stats.get('rows_updated') or 0) + (stats.get('rows_updated') or 0)
+                    versioning_stats['rows_deleted'] = (versioning_stats.get('rows_deleted') or 0) + (stats.get('rows_deleted') or 0)
+                    versioning_stats['size_bytes'] = (versioning_stats.get('size_bytes') or 0) + (stats.get('size_bytes') or 0)
+                    versioning_stats['num_files'] = (versioning_stats.get('num_files') or 0) + (stats.get('num_files') or 0)
+                    
+                    group_results.append(IngestionGroupResult(
+                        group_name=group_preview.group_name,
+                        connection_name=group_preview.connection_name,
+                        status=IngestionStatusEnum.SUCCESS,
+                        output_path=group_output_path,
+                        rows_ingested=stats.get('total_rows', rows_in_batch),
+                        execution_time_seconds=(datetime.now() - group_start).total_seconds()
+                    ))
+                    
+                    total_rows += stats.get('total_rows', rows_in_batch)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to execute group {group_preview.group_name}: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    group_results.append(IngestionGroupResult(
+                        group_name=group_preview.group_name,
+                        connection_name=group_preview.connection_name,
+                        status=IngestionStatusEnum.FAILED,
+                        error_message=str(e),
+                        execution_time_seconds=(datetime.now() - group_start).total_seconds()
+                    ))
+            
+        finally:
+            # Don't stop the Spark session - it may be shared
+            pass
+        
+        # Determine overall status
+        success_count = sum(1 for g in group_results if g.status == IngestionStatusEnum.SUCCESS)
+        if success_count == len(group_results):
+            final_status = IngestionStatusEnum.SUCCESS
+            message = f"Bronze ingestion completed successfully. {total_rows} rows ingested."
+        elif success_count > 0:
+            final_status = IngestionStatusEnum.PARTIAL
+            message = f"Bronze ingestion partially completed. {total_rows} rows ingested."
+        else:
+            final_status = IngestionStatusEnum.FAILED
+            message = "Bronze ingestion failed."
+        
+        return {
+            'status': final_status,
+            'groups': group_results,
+            'total_rows_ingested': total_rows,
+            'bronze_paths': [g.output_path for g in group_results if g.status == IngestionStatusEnum.SUCCESS],
+            'execution_time_seconds': (datetime.now() - start_time).total_seconds(),
+            'message': message,
+            'delta_version': versioning_stats.get('delta_version'),
+            'write_mode_used': 'overwrite',
+            'merge_keys_used': None,
+            'rows_inserted': versioning_stats.get('rows_inserted'),
+            'rows_updated': versioning_stats.get('rows_updated'),
+            'rows_deleted': versioning_stats.get('rows_deleted'),
+            'size_bytes': versioning_stats.get('size_bytes'),
+            'num_files': versioning_stats.get('num_files'),
+        }
 

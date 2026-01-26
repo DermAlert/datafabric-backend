@@ -50,7 +50,7 @@ from ..schemas.silver_schemas import (
 from ...services.silver_transformation_service import SilverTransformationService
 from ...services.silver_versioning_service import SilverVersioningService
 from ...database.database import get_db
-from ...database.datasets.silver import TransformConfig, TransformStatus
+from ...database.datasets.silver import TransformConfig, TransformStatus, TransformExecution
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1178,12 +1178,27 @@ async def get_silver_version_history(
                 detail=f"Transform config {config_id} not found"
             )
         
-        # Build output path
-        silver_bucket = config.silver_bucket or "datafabric-silver"
-        if config.silver_path_prefix:
-            output_path = f"s3a://{silver_bucket}/{config.silver_path_prefix}"
+        # Get output path from the latest successful execution for accuracy
+        execution_result = await db.execute(
+            select(TransformExecution)
+            .where(
+                TransformExecution.config_id == config_id,
+                TransformExecution.status == TransformStatus.SUCCESS
+            )
+            .order_by(TransformExecution.started_at.desc())
+            .limit(1)
+        )
+        latest_execution = execution_result.scalar_one_or_none()
+        
+        if latest_execution and latest_execution.output_path:
+            output_path = latest_execution.output_path
         else:
-            output_path = f"s3a://{silver_bucket}/{config.id}-{config.name}"
+            # Fallback to constructing path from config (for configs not yet executed)
+            silver_bucket = config.silver_bucket or "datafabric-silver"
+            if config.silver_path_prefix:
+                output_path = f"s3a://{silver_bucket}/{config.silver_path_prefix}"
+            else:
+                output_path = f"s3a://{silver_bucket}/{config.id}-{config.name}"
         
         # Get version history using Spark
         from ...services.spark_manager import SparkManager
@@ -1310,12 +1325,25 @@ async def query_silver_data_with_time_travel(
                 detail="Config has not been successfully executed yet. Run execute first."
             )
         
-        # Build output path
-        silver_bucket = config.silver_bucket or "datafabric-silver"
-        if config.silver_path_prefix:
-            output_path = f"s3a://{silver_bucket}/{config.silver_path_prefix}"
-        else:
-            output_path = f"s3a://{silver_bucket}/{config.id}-{config.name}"
+        # Get output path from the latest successful execution for accuracy
+        execution_result = await db.execute(
+            select(TransformExecution)
+            .where(
+                TransformExecution.config_id == config_id,
+                TransformExecution.status == TransformStatus.SUCCESS
+            )
+            .order_by(TransformExecution.started_at.desc())
+            .limit(1)
+        )
+        latest_execution = execution_result.scalar_one_or_none()
+        
+        if not latest_execution or not latest_execution.output_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No successful execution found with output path. Run execute first."
+            )
+        
+        output_path = latest_execution.output_path
         
         # Query using Spark
         from ...services.spark_manager import SparkManager

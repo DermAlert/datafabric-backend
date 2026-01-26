@@ -260,9 +260,9 @@ class SilverVersioningService:
         
         # Get version and statistics from history
         history = delta_table.history(1).collect()
-        latest = history[0]
+        latest = history[0].asDict()  # Convert Row to dict for safe access
         version = latest["version"]
-        metrics = latest.get("operationMetrics", {})
+        metrics = latest.get("operationMetrics", {}) or {}
         
         # Read total rows
         result_df = spark.read.format("delta").load(output_path)
@@ -367,12 +367,13 @@ class SilverVersioningService:
             
             versions = []
             for row in history_rows:
-                metrics = row.get("operationMetrics", {}) or {}
+                row_dict = row.asDict()  # Convert Row to dict for safe access
+                metrics = row_dict.get("operationMetrics", {}) or {}
                 
                 version_info = SilverVersionInfo(
-                    version=row["version"],
-                    timestamp=row["timestamp"],
-                    operation=row["operation"],
+                    version=row_dict["version"],
+                    timestamp=row_dict["timestamp"],
+                    operation=row_dict["operation"],
                     execution_id=None,
                     rows_inserted=int(metrics.get("numTargetRowsInserted", 0)) or int(metrics.get("numOutputRows", 0)),
                     rows_updated=int(metrics.get("numTargetRowsUpdated", 0)),

@@ -715,6 +715,16 @@ class RelationshipDiscoveryService:
             else RelationshipScope.INTER_CONNECTION
         )
         
+        # Determine cardinality: use provided value, fallback to details, or default to ONE_TO_MANY for FK
+        final_cardinality = None
+        if cardinality:
+            final_cardinality = RelationshipCardinality(cardinality.value)
+        elif suggestion.details and suggestion.details.get('cardinality'):
+            final_cardinality = RelationshipCardinality(suggestion.details['cardinality'])
+        elif suggestion.suggestion_reason in ('foreign_key_constraint', 'fk_constraint', 'auto_fk'):
+            # Default for FK relationships
+            final_cardinality = RelationshipCardinality.ONE_TO_MANY
+        
         # Create relationship
         relationship = TableRelationship(
             left_table_id=suggestion.left_table_id,
@@ -725,7 +735,7 @@ class RelationshipDiscoveryService:
             description=description,
             scope=scope,
             source=self._map_suggestion_reason_to_source(suggestion.suggestion_reason),
-            cardinality=RelationshipCardinality(cardinality.value) if cardinality else None,
+            cardinality=final_cardinality,
             default_join_type=JoinType(default_join_type.value) if default_join_type else JoinType.FULL,
             confidence_score=suggestion.confidence_score,
             is_verified=True,
@@ -1188,6 +1198,11 @@ class RelationshipDiscoveryService:
     
     async def _create_suggestion_from_discovery(self, discovery: Dict) -> RelationshipSuggestion:
         """Create a RelationshipSuggestion from a discovery dict."""
+        # Merge cardinality into details so it can be used when accepting
+        details = discovery.get('details', {}).copy()
+        if discovery.get('cardinality'):
+            details['cardinality'] = discovery['cardinality'].value
+        
         suggestion = RelationshipSuggestion(
             left_table_id=discovery['left_table_id'],
             left_column_id=discovery['left_column_id'],
@@ -1196,7 +1211,7 @@ class RelationshipDiscoveryService:
             suggestion_reason=discovery['details'].get('reason', 'unknown'),
             confidence_score=discovery['confidence'],
             status='pending',
-            details=discovery.get('details', {})
+            details=details
         )
         
         self.db.add(suggestion)
