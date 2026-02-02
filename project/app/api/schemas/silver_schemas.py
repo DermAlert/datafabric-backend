@@ -430,27 +430,17 @@ class TransformConfigCreate(BaseModel):
     - column_group_ids: Semantic unification + value mappings from Equivalence
     - filters: Inline filter conditions
     
-    The system automatically resolves external_column_id to bronze_column_name
-    using BronzeColumnMapping.
+    Source Options:
+    - source_bronze_config_id: Reference to Bronze Persistent Config (RECOMMENDED)
+    - source_bronze_version: Optional specific Delta version to use from Bronze
     
-    ---
-    
-    ## **Versioning with Delta Lake:**
-    
-    | write_mode | Behavior | Duplicates | Use Case |
-    |------------|----------|------------|----------|
-    | `overwrite` | Replace all data | N/A | Full snapshot |
-    | `append` | Add to existing | ⚠️ May duplicate | Event logs |
-    | `merge` | Upsert (insert/update) | ✅ No duplicates | **Recommended** |
-    
-    **merge_keys**: Columns used to identify unique records (like a primary key).
-    - If not provided with `write_mode=merge`, auto-detects from Bronze source PKs
-    - If no PK found, falls back to `overwrite` mode
+    Write mode is always OVERWRITE. Delta Lake maintains version history automatically.
     """
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     
-    source_bronze_dataset_id: int = Field(..., description="Bronze dataset ID")
+    source_bronze_config_id: int = Field(..., description="Bronze Persistent Config ID")
+    source_bronze_version: Optional[int] = Field(None, description="Specific Bronze Delta version to read (null = latest)")
     
     silver_bucket: Optional[str] = Field(None, description="Output bucket (optional)")
     silver_path_prefix: Optional[str] = Field(None, description="Output path prefix")
@@ -480,30 +470,15 @@ class TransformConfigCreate(BaseModel):
                     "E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear in output."
     )
     
-    # === VERSIONING FIELDS ===
-    write_mode: SilverWriteModeEnum = Field(
-        SilverWriteModeEnum.MERGE,
-        description=(
-            "Write mode: 'overwrite' (replace all), 'append' (add without checking), "
-            "'merge' (upsert - recommended, no duplicates)"
-        )
-    )
-    
-    merge_keys: Optional[List[str]] = Field(
-        None,
-        description=(
-            "Columns used for MERGE deduplication (like a primary key). "
-            "If null with write_mode='merge', auto-detects from Bronze source PKs. "
-            "If no PK found, falls back to 'overwrite'."
-        )
-    )
+    # Write mode is always OVERWRITE (versioning fields deprecated)
 
 
 class TransformConfigUpdate(BaseModel):
     """Update a transform config."""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
-    source_bronze_dataset_id: Optional[int] = None
+    source_bronze_config_id: Optional[int] = Field(None, description="Bronze Persistent Config ID")
+    source_bronze_version: Optional[int] = Field(None, description="Specific Bronze Delta version to read")
     silver_bucket: Optional[str] = None
     silver_path_prefix: Optional[str] = None
     column_group_ids: Optional[List[int]] = None
@@ -511,8 +486,6 @@ class TransformConfigUpdate(BaseModel):
     column_transformations: Optional[List[ColumnTransformation]] = None
     image_labeling_config: Optional[TransformImageLabeling] = None
     exclude_unified_source_columns: Optional[bool] = None
-    write_mode: Optional[SilverWriteModeEnum] = None
-    merge_keys: Optional[List[str]] = None
     is_active: Optional[bool] = None
 
 
@@ -521,8 +494,16 @@ class TransformConfigResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
-    source_bronze_dataset_id: int
+    
+    # Source Bronze (new fields)
+    source_bronze_config_id: Optional[int] = None
+    source_bronze_config_name: Optional[str] = None
+    source_bronze_version: Optional[int] = None  # null = latest
+    
+    # LEGACY (deprecated)
+    source_bronze_dataset_id: Optional[int] = None
     source_bronze_dataset_name: Optional[str] = None
+    
     silver_bucket: Optional[str]
     silver_path_prefix: Optional[str]
     column_group_ids: Optional[List[int]]
@@ -531,10 +512,8 @@ class TransformConfigResponse(BaseModel):
     image_labeling_config: Optional[Dict[str, Any]]
     exclude_unified_source_columns: bool = False
     
-    # Versioning fields
-    write_mode: str = "merge"
-    merge_keys: Optional[List[str]] = None
-    merge_keys_source: Optional[str] = None  # 'user_defined', 'auto_detected_pk', or null
+    # Versioning (always overwrite)
+    write_mode: str = "overwrite"
     current_delta_version: Optional[int] = None
     
     last_execution_time: Optional[datetime]
@@ -572,12 +551,10 @@ class TransformExecuteResponse(BaseModel):
     
     # Delta Lake versioning info
     delta_version: Optional[int] = None
-    write_mode_used: str = "merge"
-    merge_keys_used: Optional[List[str]] = None
+    write_mode_used: str = "overwrite"
     
-    # MERGE statistics (when write_mode=merge)
+    # Statistics
     rows_inserted: Optional[int] = None
-    rows_updated: Optional[int] = None
     
     # Config snapshot at execution time (for reproducibility)
     config_snapshot: Optional[Dict[str, Any]] = None

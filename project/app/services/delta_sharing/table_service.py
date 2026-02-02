@@ -17,7 +17,8 @@ from ...database.storage.storage import DatasetStorage
 from ...api.schemas.delta_sharing_schemas import (
     ShareTableCreate, ShareTableUpdate, ShareTableDetail,
     RecipientCreate, RecipientUpdate, RecipientDetail,
-    SearchTables, SearchRecipients
+    SearchTables, SearchRecipients,
+    RecipientBasic, ShareBasic, ShareStatus
 )
 from ...api.schemas.search import SearchResult
 
@@ -232,9 +233,13 @@ class TableService:
     
     async def delete_table(self, share_id: int, schema_id: int, table_id: int, organization_id: int) -> None:
         """Delete a shared table"""
-        query = select(ShareTable, ShareSchema, Share).join(
-            ShareSchema
-        ).join(Share).where(
+        query = select(ShareTable, ShareSchema, Share).select_from(
+            ShareTable
+        ).join(
+            ShareSchema, ShareTable.schema_id == ShareSchema.id
+        ).join(
+            Share, ShareSchema.share_id == Share.id
+        ).where(
             and_(
                 ShareTable.id == table_id,
                 ShareTable.schema_id == schema_id,
@@ -582,17 +587,21 @@ class RecipientService:
     
     async def _build_recipient_detail(self, recipient: Recipient) -> RecipientDetail:
         """Build detailed recipient information"""
-        # Count shares - using the association table directly
-        shares_count_query = select(func.count()).select_from(
-            recipient_shares
+        # Get shares this recipient has access to
+        shares_query = select(Share).join(
+            recipient_shares, Share.id == recipient_shares.c.share_id
         ).where(recipient_shares.c.recipient_id == recipient.id)
-        shares_result = await self.db.execute(shares_count_query)
-        shares_count = shares_result.scalar()
+        shares_result = await self.db.execute(shares_query)
+        shares = shares_result.scalars().all()
         
-        # Mask token for security (show only first 8 characters)
-        masked_token = None
-        if recipient.bearer_token:
-            masked_token = recipient.bearer_token[:8] + "..." if len(recipient.bearer_token) > 8 else recipient.bearer_token
+        shares_list = [
+            ShareBasic(
+                id=s.id,
+                name=s.name,
+                description=s.description,
+                status=s.status
+            ) for s in shares
+        ]
         
         return RecipientDetail(
             id=recipient.id,
@@ -613,5 +622,6 @@ class RecipientService:
             notes=recipient.notes,
             data_criacao=recipient.data_criacao,
             data_atualizacao=recipient.data_atualizacao,
-            shares_count=shares_count
+            shares_count=len(shares_list),
+            shares=shares_list
         )

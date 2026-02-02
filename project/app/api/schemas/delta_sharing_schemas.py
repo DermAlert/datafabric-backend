@@ -127,6 +127,21 @@ class ShareUpdate(BaseModel):
     contact_info: Optional[Dict[str, Any]] = Field(default=None, description="Contact information")
     terms_of_use: Optional[str] = Field(default=None, description="Terms of use")
 
+class RecipientBasic(BaseModel):
+    """Basic recipient info for listing in shares"""
+    id: int = Field(description="Recipient ID")
+    identifier: str = Field(description="Unique identifier")
+    name: str = Field(description="Recipient name")
+    email: Optional[str] = Field(default=None, description="Recipient email")
+    is_active: bool = Field(description="Whether recipient is active")
+
+class ShareBasic(BaseModel):
+    """Basic share info for listing in recipients"""
+    id: int = Field(description="Share ID")
+    name: str = Field(description="Share name")
+    description: Optional[str] = Field(default=None, description="Share description")
+    status: ShareStatus = Field(description="Share status")
+
 class ShareDetail(BaseModel):
     """Detailed share information"""
     id: int = Field(description="Share ID")
@@ -142,6 +157,7 @@ class ShareDetail(BaseModel):
     schemas_count: int = Field(description="Number of schemas in share")
     tables_count: int = Field(description="Number of tables in share")
     recipients_count: int = Field(description="Number of recipients with access")
+    recipients: List[RecipientBasic] = Field(default=[], description="Recipients with access to this share")
 
 class SchemaCreate(BaseModel):
     """Create schema request"""
@@ -279,6 +295,7 @@ class RecipientDetail(BaseModel):
     data_criacao: datetime = Field(description="Creation timestamp")
     data_atualizacao: datetime = Field(description="Last update timestamp")
     shares_count: int = Field(description="Number of shares this recipient has access to")
+    shares: List[ShareBasic] = Field(default=[], description="Shares this recipient has access to")
 
 class RecipientShareAssignment(BaseModel):
     """Assign recipient to share"""
@@ -324,3 +341,70 @@ class DeltaSharingError(BaseModel):
     errorCode: str = Field(description="Error code")
     message: str = Field(description="Error message")
     details: Optional[Dict[str, Any]] = Field(default=None, description="Additional error details")
+
+
+# ===================== Bronze/Silver Integration Models =====================
+
+class DatasetSourceType(str, Enum):
+    """Type of dataset source"""
+    BRONZE = "bronze"
+    SILVER = "silver"
+
+class AvailableDataset(BaseModel):
+    """Dataset available for sharing"""
+    config_id: int = Field(description="Config ID (Bronze or Silver)")
+    name: str = Field(description="Dataset name")
+    description: Optional[str] = Field(default=None, description="Dataset description")
+    source_type: DatasetSourceType = Field(description="Source type: bronze or silver")
+    output_path: Optional[str] = Field(default=None, description="Delta Lake path")
+    current_version: Optional[int] = Field(default=None, description="Current Delta version")
+    last_execution_status: Optional[str] = Field(default=None, description="Last execution status")
+    last_execution_at: Optional[datetime] = Field(default=None, description="Last execution timestamp")
+    total_rows: Optional[int] = Field(default=None, description="Total rows in latest version")
+
+class CreateTableFromBronze(BaseModel):
+    """Create Delta Sharing table from Bronze config"""
+    bronze_config_id: int = Field(description="Bronze Persistent Config ID")
+    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description")
+    share_mode: str = Field(default="full", description="Share mode: full, filtered, aggregated")
+    filter_condition: Optional[str] = Field(default=None, description="SQL WHERE clause for filtered sharing")
+    path_index: int = Field(default=0, description="Path index for non-federated configs with multiple outputs")
+
+    @validator('name')
+    def validate_name(cls, v):
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
+        return v.lower().replace('-', '_')
+
+class CreateTableFromSilver(BaseModel):
+    """Create Delta Sharing table from Silver config"""
+    silver_config_id: int = Field(description="Silver Transform Config ID")
+    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description")
+    share_mode: str = Field(default="full", description="Share mode: full, filtered, aggregated")
+    filter_condition: Optional[str] = Field(default=None, description="SQL WHERE clause for filtered sharing")
+
+    @validator('name')
+    def validate_name(cls, v):
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
+        return v.lower().replace('-', '_')
+
+class IntegrationTableDetail(BaseModel):
+    """Detail of table created from Bronze/Silver integration"""
+    table_id: int = Field(description="Delta Sharing Table ID")
+    table_name: str = Field(description="Table name")
+    share_id: int = Field(description="Share ID")
+    share_name: str = Field(description="Share name")
+    schema_id: int = Field(description="Schema ID")
+    schema_name: str = Field(description="Schema name")
+    source_type: DatasetSourceType = Field(description="Source type: bronze or silver")
+    source_config_id: int = Field(description="Source config ID")
+    source_config_name: str = Field(description="Source config name")
+    storage_location: str = Field(description="Delta Lake storage location")
+    current_version: int = Field(description="Current table version")
+    share_mode: str = Field(description="Share mode")
+    status: str = Field(description="Table status")

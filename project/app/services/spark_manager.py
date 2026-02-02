@@ -83,15 +83,32 @@ class SparkManager:
         """
         if self._spark_session is not None:
             try:
-                # Check if session is still active
-                self._spark_session.sparkContext._jsc.sc().isStopped()
-                return self._spark_session
-            except Exception:
-                # Session is dead, create new one
+                # Check if session is still active by doing a simple operation
+                # This catches both stopped sessions and lost py4j connections
+                _ = self._spark_session.sparkContext.getConf().get("spark.app.name")
+                if not self._spark_session.sparkContext._jsc.sc().isStopped():
+                    return self._spark_session
+            except Exception as e:
+                # Session is dead or connection lost, create new one
+                logger.warning(f"Existing SparkSession is dead ({type(e).__name__}), creating new one")
+                try:
+                    self._spark_session.stop()
+                except:
+                    pass
                 self._spark_session = None
+                SparkManager._spark_session = None  # Clear class-level reference too
         
         from pyspark.sql import SparkSession
         from delta import configure_spark_with_delta_pip
+        
+        # Force cleanup of any stale session
+        try:
+            existing = SparkSession.getActiveSession()
+            if existing:
+                logger.info("Stopping existing active SparkSession")
+                existing.stop()
+        except:
+            pass
         
         logger.info(f"Creating SparkSession with master: {self.spark_master}")
         

@@ -18,6 +18,7 @@ from ...api.schemas.delta_sharing_schemas import (
     SchemaCreate, SchemaUpdate, SchemaDetail,
     ShareTableCreate, ShareTableUpdate, ShareTableDetail,
     RecipientCreate, RecipientUpdate, RecipientDetail,
+    RecipientBasic, ShareBasic,
     SearchShares, SearchSchemas, SearchTables, SearchRecipients
 )
 from ...api.schemas.search import SearchResult
@@ -186,12 +187,22 @@ class ShareService:
         tables_result = await self.db.execute(tables_count_query)
         tables_count = tables_result.scalar()
         
-        # Count recipients - using the association table directly
-        recipients_count_query = select(func.count()).select_from(
-            recipient_shares
+        # Get recipients with access to this share
+        recipients_query = select(Recipient).join(
+            recipient_shares, Recipient.id == recipient_shares.c.recipient_id
         ).where(recipient_shares.c.share_id == share.id)
-        recipients_result = await self.db.execute(recipients_count_query)
-        recipients_count = recipients_result.scalar()
+        recipients_result = await self.db.execute(recipients_query)
+        recipients = recipients_result.scalars().all()
+        
+        recipients_list = [
+            RecipientBasic(
+                id=r.id,
+                identifier=r.identifier,
+                name=r.name,
+                email=r.email,
+                is_active=r.is_active
+            ) for r in recipients
+        ]
         
         return ShareDetail(
             id=share.id,
@@ -206,7 +217,8 @@ class ShareService:
             data_atualizacao=share.data_atualizacao,
             schemas_count=schemas_count,
             tables_count=tables_count,
-            recipients_count=recipients_count
+            recipients_count=len(recipients_list),
+            recipients=recipients_list
         )
 
 class SchemaService:

@@ -24,7 +24,13 @@ from fastapi import HTTPException, status
 from ..database.core.core import DataConnection, Dataset
 from ..database.metadata.metadata import ExternalTables, ExternalColumn, ExternalSchema
 from ..database.metadata.relationships import TableRelationship, RelationshipScope, JoinType
-from ..database.datasets.bronze import DatasetBronzeConfig, BronzeColumnMapping
+from ..database.datasets.bronze import (
+    DatasetBronzeConfig, 
+    BronzeColumnMapping,
+    BronzePersistentConfig,
+    BronzeExecution,
+    BronzeExecutionStatus
+)
 from ..database.datasets.silver import (
     NormalizationRule,
     VirtualizedConfig,
@@ -1540,21 +1546,36 @@ class SilverTransformationService:
                 detail=f"Config with name '{data.name}' already exists"
             )
         
-        # Verify Bronze dataset exists
-        bronze_result = await self.db.execute(
-            select(Dataset).where(Dataset.id == data.source_bronze_dataset_id)
+        # Verify Bronze Persistent Config exists
+        bronze_config_result = await self.db.execute(
+            select(BronzePersistentConfig).where(BronzePersistentConfig.id == data.source_bronze_config_id)
         )
-        bronze_dataset = bronze_result.scalar_one_or_none()
-        if not bronze_dataset:
+        bronze_config = bronze_config_result.scalar_one_or_none()
+        if not bronze_config:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Bronze dataset with ID {data.source_bronze_dataset_id} not found"
+                detail=f"Bronze Persistent Config with ID {data.source_bronze_config_id} not found"
+            )
+        
+        # Check if Bronze config has been executed
+        exec_result = await self.db.execute(
+            select(BronzeExecution).where(
+                BronzeExecution.config_id == data.source_bronze_config_id,
+                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+            ).order_by(BronzeExecution.started_at.desc()).limit(1)
+        )
+        bronze_execution = exec_result.scalar_one_or_none()
+        if not bronze_execution:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Bronze Persistent Config {data.source_bronze_config_id} has not been executed successfully yet"
             )
         
         config = TransformConfig(
             name=data.name,
             description=data.description,
-            source_bronze_dataset_id=data.source_bronze_dataset_id,
+            source_bronze_config_id=data.source_bronze_config_id,
+            source_bronze_version=data.source_bronze_version,
             silver_bucket=data.silver_bucket or self.silver_bucket,
             silver_path_prefix=data.silver_path_prefix,
             column_group_ids=data.column_group_ids,
@@ -1575,26 +1596,34 @@ class SilverTransformationService:
     async def get_transform_config(self, config_id: int) -> TransformConfigResponse:
         """Get a transform config."""
         result = await self.db.execute(
-            select(TransformConfig, Dataset.name.label('bronze_name')).join(
-                Dataset, TransformConfig.source_bronze_dataset_id == Dataset.id
-            ).where(TransformConfig.id == config_id)
+            select(TransformConfig).where(TransformConfig.id == config_id)
         )
-        row = result.first()
+        config = result.scalar_one_or_none()
         
-        if not row:
+        if not config:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Config with ID {config_id} not found"
             )
         
-        config, bronze_name = row
+        # Get Bronze config name if available
+        bronze_config_name = None
+        if config.source_bronze_config_id:
+            bronze_result = await self.db.execute(
+                select(BronzePersistentConfig.name).where(
+                    BronzePersistentConfig.id == config.source_bronze_config_id
+                )
+            )
+            bronze_config_name = bronze_result.scalar_one_or_none()
         
         return TransformConfigResponse(
             id=config.id,
             name=config.name,
             description=config.description,
-            source_bronze_dataset_id=config.source_bronze_dataset_id,
-            source_bronze_dataset_name=bronze_name,
+            source_bronze_config_id=config.source_bronze_config_id,
+            source_bronze_config_name=bronze_config_name,
+            source_bronze_version=config.source_bronze_version,
+            source_bronze_dataset_id=config.source_bronze_dataset_id,  # Legacy
             silver_bucket=config.silver_bucket,
             silver_path_prefix=config.silver_path_prefix,
             column_group_ids=config.column_group_ids,
@@ -1602,6 +1631,8 @@ class SilverTransformationService:
             column_transformations=config.column_transformations,
             image_labeling_config=config.image_labeling_config,
             exclude_unified_source_columns=config.exclude_unified_source_columns,
+            write_mode="overwrite",
+            current_delta_version=config.current_delta_version,
             last_execution_time=config.last_execution_time,
             last_execution_status=config.last_execution_status.value if config.last_execution_status else None,
             last_execution_rows=config.last_execution_rows,
@@ -1764,7 +1795,9 @@ class SilverTransformationService:
         config_snapshot = {
             "name": config.name,
             "description": config.description,
-            "source_bronze_dataset_id": config.source_bronze_dataset_id,
+            "source_bronze_config_id": config.source_bronze_config_id,
+            "source_bronze_version": config.source_bronze_version,
+            "source_bronze_dataset_id": config.source_bronze_dataset_id,  # Legacy
             "silver_bucket": config.silver_bucket,
             "silver_path_prefix": config.silver_path_prefix,
             "column_group_ids": config.column_group_ids,
@@ -1772,9 +1805,7 @@ class SilverTransformationService:
             "column_transformations": config.column_transformations,
             "image_labeling_config": config.image_labeling_config,
             "exclude_unified_source_columns": config.exclude_unified_source_columns,
-            "write_mode": config.write_mode if isinstance(config.write_mode, str) else (config.write_mode.value if hasattr(config, 'write_mode') and config.write_mode else None),
-            "merge_keys": config.merge_keys,
-            "merge_keys_source": config.merge_keys_source,
+            "write_mode": "overwrite",  # Always overwrite
             "snapshot_at": start_time.isoformat(),
         }
         
@@ -1789,11 +1820,18 @@ class SilverTransformationService:
         await self.db.flush()
         
         try:
-            # Get Bronze dataset info
-            bronze_info = await self._get_bronze_dataset_info(config.source_bronze_dataset_id)
+            # Get Bronze source info (new or legacy)
+            if config.source_bronze_config_id:
+                bronze_info = await self._get_bronze_config_info(
+                    config.source_bronze_config_id,
+                    config.source_bronze_version
+                )
+            else:
+                # Legacy: use source_bronze_dataset_id
+                bronze_info = await self._get_bronze_dataset_info(config.source_bronze_dataset_id)
             
             if not bronze_info:
-                raise ValueError(f"Bronze dataset {config.source_bronze_dataset_id} not found")
+                raise ValueError(f"Bronze source not found for config {config_id}")
             
             # Build output path
             output_bucket = config.silver_bucket or self.silver_bucket
@@ -1985,6 +2023,65 @@ class SilverTransformationService:
             'tables': tables,
             'column_mappings': column_map,
             'inter_source_links': inter_source_links
+        }
+    
+    async def _get_bronze_config_info(
+        self, 
+        bronze_config_id: int,
+        version: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get Bronze Persistent Config information including output paths.
+        
+        Args:
+            bronze_config_id: The ID of the Bronze Persistent Config
+            version: Optional specific Delta version to use (None = latest)
+            
+        Returns:
+            Dict with bronze paths and metadata
+        """
+        # Get Bronze Persistent Config
+        config_result = await self.db.execute(
+            select(BronzePersistentConfig).where(
+                BronzePersistentConfig.id == bronze_config_id
+            )
+        )
+        bronze_config = config_result.scalar_one_or_none()
+        
+        if not bronze_config:
+            return None
+        
+        # Get the latest successful execution
+        exec_result = await self.db.execute(
+            select(BronzeExecution).where(
+                BronzeExecution.config_id == bronze_config_id,
+                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+            ).order_by(BronzeExecution.started_at.desc()).limit(1)
+        )
+        latest_execution = exec_result.scalar_one_or_none()
+        
+        if not latest_execution or not latest_execution.output_paths:
+            logger.warning(f"No successful execution found for Bronze config {bronze_config_id}")
+            return None
+        
+        # Build tables info from output_paths
+        tables = []
+        for idx, output_path in enumerate(latest_execution.output_paths):
+            tables.append({
+                'group_id': idx,
+                'group_name': f"bronze_table_{idx}",
+                'output_path': output_path,
+                'rows_ingested': latest_execution.rows_ingested
+            })
+        
+        return {
+            'config_id': bronze_config.id,
+            'config_name': bronze_config.name,
+            'tables': tables,
+            'column_mappings': {},  # Not needed for new architecture
+            'inter_source_links': [],  # Not needed for new architecture
+            'delta_version': version or latest_execution.delta_version,
+            'execution_id': latest_execution.id
         }
     
     async def _execute_spark_transform(

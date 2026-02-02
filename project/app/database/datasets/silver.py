@@ -167,19 +167,16 @@ class TransformConfig(AuditMixin, Base):
     """
     Configuration for materialization (Bronze → Silver Delta).
     
-    Uses Bronze dataset as source, applies transformations (SQL + Python).
-    Materializes to Silver Delta Lake.
+    Uses Bronze Persistent Config as source, applies transformations.
+    Materializes to Silver Delta Lake with OVERWRITE mode.
     
-    Filters are defined inline in the config (not referenced by ID).
+    Source Options:
+    - source_bronze_config_id: Reference to Bronze Persistent Config (RECOMMENDED)
+    - source_bronze_version: Optional specific Delta version to use from Bronze
+    - source_bronze_dataset_id: LEGACY - deprecated, use source_bronze_config_id
     
-    Versioning with Delta Lake:
-    - write_mode='overwrite': Replaces all data each execution (legacy behavior)
-    - write_mode='append': Adds data without checking duplicates
-    - write_mode='merge': Upsert based on merge_keys (no duplicates) - RECOMMENDED
-    
-    If write_mode='merge' and merge_keys is not provided, the system
-    auto-detects primary keys from the Bronze source. If no PK is found,
-    falls back to 'overwrite' mode.
+    Write mode is always OVERWRITE for simplicity and reliability.
+    Delta Lake maintains version history automatically.
     """
     __tablename__ = "transform_configs"
     __table_args__ = (
@@ -191,8 +188,12 @@ class TransformConfig(AuditMixin, Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     
-    # Source: Bronze dataset
-    source_bronze_dataset_id = Column(Integer, ForeignKey('core.datasets.id', ondelete='CASCADE'), nullable=False)
+    # Source: Bronze Persistent Config (NEW - RECOMMENDED)
+    source_bronze_config_id = Column(Integer, ForeignKey('datasets.bronze_persistent_configs.id', ondelete='CASCADE'), nullable=True)
+    source_bronze_version = Column(Integer, nullable=True)  # Optional: specific Delta version to read
+    
+    # Source: Bronze dataset (LEGACY - deprecated)
+    source_bronze_dataset_id = Column(Integer, ForeignKey('core.datasets.id', ondelete='CASCADE'), nullable=True)
     
     # Output configuration
     silver_bucket = Column(String(255), nullable=True)  # Defaults to system silver bucket
@@ -228,16 +229,11 @@ class TransformConfig(AuditMixin, Base):
     exclude_unified_source_columns = Column(Boolean, default=False, nullable=False)
     
     # === VERSIONING CONFIGURATION ===
-    # Write mode for Delta Lake
-    write_mode = Column(SQLEnum(SilverWriteMode), nullable=False, default=SilverWriteMode.MERGE)
+    # Write mode is always OVERWRITE for simplicity (column kept for compatibility)
+    write_mode = Column(SQLEnum(SilverWriteMode), nullable=False, default=SilverWriteMode.OVERWRITE)
     
-    # Columns used for MERGE deduplication (like a primary key)
-    # If null and write_mode='merge', auto-detects from Bronze source PKs
-    # If no PK found, falls back to 'overwrite'
-    merge_keys = Column(JSON, nullable=True)  # ["patient_id"] or ["hospital_id", "visit_id"]
-    
-    # Resolved merge keys (filled after auto-detection)
-    # Stores what was actually used: 'user_defined', 'auto_detected_pk', or null (fallback to overwrite)
+    # DEPRECATED: merge_keys no longer used (always overwrite)
+    merge_keys = Column(JSON, nullable=True)
     merge_keys_source = Column(String(50), nullable=True)
     
     # Delta Lake versioning info
