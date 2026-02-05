@@ -17,6 +17,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import aliased
 from sqlalchemy import and_, or_, func, text
 from fastapi import HTTPException, status
 
@@ -584,7 +585,7 @@ class RelationshipDiscoveryService:
         return await self._build_relationship_response(relationship)
     
     async def delete_relationship(self, relationship_id: int) -> None:
-        """Delete a relationship."""
+        """Delete a relationship and reset associated suggestion to pending (if exists)."""
         query = select(TableRelationship).where(TableRelationship.id == relationship_id)
         result = await self.db.execute(query)
         relationship = result.scalar_one_or_none()
@@ -594,6 +595,26 @@ class RelationshipDiscoveryService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Relationship {relationship_id} not found"
             )
+        
+        # Reset associated suggestion to 'pending' so it can be re-discovered/re-accepted
+        sug_query = select(RelationshipSuggestion).where(
+            or_(
+                and_(
+                    RelationshipSuggestion.left_column_id == relationship.left_column_id,
+                    RelationshipSuggestion.right_column_id == relationship.right_column_id
+                ),
+                and_(
+                    RelationshipSuggestion.left_column_id == relationship.right_column_id,
+                    RelationshipSuggestion.right_column_id == relationship.left_column_id
+                )
+            )
+        )
+        sug_result = await self.db.execute(sug_query)
+        suggestion = sug_result.scalar_one_or_none()
+        
+        if suggestion and suggestion.status == 'accepted':
+            suggestion.status = 'pending'
+            logger.info(f"Reset suggestion {suggestion.id} to 'pending' after relationship deletion")
         
         await self.db.delete(relationship)
         await self.db.commit()
@@ -630,9 +651,20 @@ class RelationshipDiscoveryService:
             )
         
         if connection_id:
-            # Need to join with tables to filter by connection
-            # For simplicity, we'll do this in memory for now
-            pass
+            LeftTable = aliased(ExternalTables)
+            RightTable = aliased(ExternalTables)
+            
+            query = query.join(LeftTable, TableRelationship.left_table_id == LeftTable.id)
+            query = query.join(RightTable, TableRelationship.right_table_id == RightTable.id)
+            count_query = count_query.join(LeftTable, TableRelationship.left_table_id == LeftTable.id)
+            count_query = count_query.join(RightTable, TableRelationship.right_table_id == RightTable.id)
+            
+            filters.append(
+                or_(
+                    LeftTable.connection_id == connection_id,
+                    RightTable.connection_id == connection_id
+                )
+            )
         
         if filters:
             query = query.where(and_(*filters))
@@ -695,6 +727,16 @@ class RelationshipDiscoveryService:
             else RelationshipScope.INTER_CONNECTION
         )
         
+        # Determine cardinality: use provided value, fallback to details, or default to ONE_TO_MANY for FK
+        final_cardinality = None
+        if cardinality:
+            final_cardinality = RelationshipCardinality(cardinality.value)
+        elif suggestion.details and suggestion.details.get('cardinality'):
+            final_cardinality = RelationshipCardinality(suggestion.details['cardinality'])
+        elif suggestion.suggestion_reason in ('foreign_key_constraint', 'fk_constraint', 'auto_fk'):
+            # Default for FK relationships
+            final_cardinality = RelationshipCardinality.ONE_TO_MANY
+        
         # Create relationship
         relationship = TableRelationship(
             left_table_id=suggestion.left_table_id,
@@ -705,7 +747,7 @@ class RelationshipDiscoveryService:
             description=description,
             scope=scope,
             source=self._map_suggestion_reason_to_source(suggestion.suggestion_reason),
-            cardinality=RelationshipCardinality(cardinality.value) if cardinality else None,
+            cardinality=final_cardinality,
             default_join_type=JoinType(default_join_type.value) if default_join_type else JoinType.FULL,
             confidence_score=suggestion.confidence_score,
             is_verified=True,
@@ -769,6 +811,48 @@ class RelationshipDiscoveryService:
         suggestion.status = 'rejected'
         await self.db.commit()
     
+    async def reset_suggestion(self, suggestion_id: int) -> RelationshipSuggestionResponse:
+        """
+        Reset a rejected suggestion back to pending.
+        
+        This allows users to reconsider a previously rejected suggestion.
+        """
+        query = select(RelationshipSuggestion).where(
+            RelationshipSuggestion.id == suggestion_id
+        )
+        result = await self.db.execute(query)
+        suggestion = result.scalar_one_or_none()
+        
+        if not suggestion:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Suggestion {suggestion_id} not found"
+            )
+        
+        if suggestion.status == 'pending':
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Suggestion is already pending"
+            )
+        
+        if suggestion.status == 'accepted':
+            # Check if the relationship still exists
+            existing_rel = await self._get_existing_relationship(
+                suggestion.left_column_id,
+                suggestion.right_column_id
+            )
+            if existing_rel:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Cannot reset: relationship already exists. Delete the relationship first."
+                )
+        
+        suggestion.status = 'pending'
+        await self.db.commit()
+        await self.db.refresh(suggestion)
+        
+        return await self._build_suggestion_response(suggestion)
+    
     async def list_suggestions(
         self,
         connection_id: Optional[int] = None,
@@ -796,6 +880,22 @@ class RelationshipDiscoveryService:
                 or_(
                     RelationshipSuggestion.left_table_id == table_id,
                     RelationshipSuggestion.right_table_id == table_id
+                )
+            )
+            
+        if connection_id:
+            LeftTable = aliased(ExternalTables)
+            RightTable = aliased(ExternalTables)
+            
+            query = query.join(LeftTable, RelationshipSuggestion.left_table_id == LeftTable.id)
+            query = query.join(RightTable, RelationshipSuggestion.right_table_id == RightTable.id)
+            count_query = count_query.join(LeftTable, RelationshipSuggestion.left_table_id == LeftTable.id)
+            count_query = count_query.join(RightTable, RelationshipSuggestion.right_table_id == RightTable.id)
+            
+            filters.append(
+                or_(
+                    LeftTable.connection_id == connection_id,
+                    RightTable.connection_id == connection_id
                 )
             )
         
@@ -1019,11 +1119,12 @@ class RelationshipDiscoveryService:
             pairs.add((row[0], row[1]))
             pairs.add((row[1], row[0]))  # Add reverse
         
-        # Also check suggestions
+        # Also check ALL suggestions (not just pending) to avoid unique constraint violations
+        # The constraint is on (left_column_id, right_column_id) regardless of status
         sug_query = select(
             RelationshipSuggestion.left_column_id,
             RelationshipSuggestion.right_column_id
-        ).where(RelationshipSuggestion.status == 'pending')
+        )
         
         sug_result = await self.db.execute(sug_query)
         for row in sug_result.fetchall():
@@ -1125,6 +1226,11 @@ class RelationshipDiscoveryService:
     
     async def _create_suggestion_from_discovery(self, discovery: Dict) -> RelationshipSuggestion:
         """Create a RelationshipSuggestion from a discovery dict."""
+        # Merge cardinality into details so it can be used when accepting
+        details = discovery.get('details', {}).copy()
+        if discovery.get('cardinality'):
+            details['cardinality'] = discovery['cardinality'].value
+        
         suggestion = RelationshipSuggestion(
             left_table_id=discovery['left_table_id'],
             left_column_id=discovery['left_column_id'],
@@ -1133,7 +1239,7 @@ class RelationshipDiscoveryService:
             suggestion_reason=discovery['details'].get('reason', 'unknown'),
             confidence_score=discovery['confidence'],
             status='pending',
-            details=discovery.get('details', {})
+            details=details
         )
         
         self.db.add(suggestion)

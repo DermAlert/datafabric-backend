@@ -370,6 +370,19 @@ class BronzeExecutionStatusEnum(str, Enum):
     FAILED = "failed"
 
 
+class WriteModeEnum(str, Enum):
+    """
+    Write mode for Delta Lake operations.
+    
+    - **overwrite**: Replace all data each execution
+    - **append**: Add to existing data (may create duplicates)
+    - **merge**: Upsert based on merge_keys - insert new, update existing (recommended)
+    """
+    OVERWRITE = "overwrite"
+    APPEND = "append"
+    MERGE = "merge"
+
+
 # ==================== VIRTUALIZED CONFIG ====================
 
 class BronzeVirtualizedConfigCreate(BaseModel):
@@ -513,6 +526,20 @@ class BronzePersistentConfigCreate(BaseModel):
     
     ---
     
+    ## **Versioning with Delta Lake:**
+    
+    | write_mode | Behavior | Duplicates | Use Case |
+    |------------|----------|------------|----------|
+    | `overwrite` | Replace all data | N/A | Full snapshot |
+    | `append` | Add to existing | ⚠️ May duplicate | Event logs |
+    | `merge` | Upsert (insert/update) | ✅ No duplicates | **Recommended** |
+    
+    **merge_keys**: Columns used to identify unique records (like a primary key).
+    - If not provided with `write_mode=merge`, auto-detects from source table PKs
+    - If no PK found, falls back to `overwrite` mode
+    
+    ---
+    
     ## **Request Fields:**
     
     | Field | Type | Required | Description |
@@ -522,14 +549,16 @@ class BronzePersistentConfigCreate(BaseModel):
     | `tables` | object[] | ✅ | Tables and columns to include |
     | `relationship_ids` | int[] | ❌ | Relationships for JOINs. `null`=auto-discover |
     | `enable_federated_joins` | bool | ❌ | Enable cross-database JOINs (default: false) |
-    | `output_format` | string | ❌ | "parquet" or "delta" (default: "parquet") |
+    | `output_format` | string | ❌ | "parquet" or "delta" (default: "delta") |
+    | `write_mode` | string | ❌ | "overwrite", "append", or "merge" (default: "merge") |
+    | `merge_keys` | string[] | ❌ | Columns for deduplication (auto-detected if null) |
     | `output_bucket` | string | ❌ | MinIO bucket (defaults to system bronze bucket) |
     | `output_path_prefix` | string | ❌ | Custom path prefix |
     | `partition_columns` | string[] | ❌ | Columns to partition by |
     
     ---
     
-    ## **Example 1: Minimal**
+    ## **Example 1: Minimal (uses merge with auto-detected PK)**
     ```json
     {
       "name": "users_bronze",
@@ -537,31 +566,36 @@ class BronzePersistentConfigCreate(BaseModel):
     }
     ```
     
-    ## **Example 2: Multiple tables with specific columns**
+    ## **Example 2: Explicit merge keys**
     ```json
     {
-      "name": "clinical_bronze",
-      "description": "Clinical data from hospital databases",
-      "tables": [
-        {"table_id": 1, "select_all": true},
-        {"table_id": 2, "column_ids": [10, 11, 12]},
-        {"table_id": 3, "select_all": true}
-      ],
-      "output_format": "delta"
+      "name": "patients_bronze",
+      "tables": [{"table_id": 1, "select_all": true}],
+      "write_mode": "merge",
+      "merge_keys": ["patient_id"]
     }
     ```
     
-    ## **Example 3: With partitioning**
+    ## **Example 3: Composite merge keys**
     ```json
     {
-      "name": "events_bronze",
-      "tables": [{"table_id": 5, "select_all": true}],
-      "output_format": "parquet",
-      "partition_columns": ["year", "month"]
+      "name": "visits_bronze",
+      "tables": [{"table_id": 1, "select_all": true}],
+      "write_mode": "merge",
+      "merge_keys": ["hospital_id", "patient_id", "visit_id"]
     }
     ```
     
-    ## **Example 4: Complete**
+    ## **Example 4: Overwrite mode (full refresh)**
+    ```json
+    {
+      "name": "snapshot_daily",
+      "tables": [{"table_id": 1, "select_all": true}],
+      "write_mode": "overwrite"
+    }
+    ```
+    
+    ## **Example 5: Complete with all options**
     ```json
     {
       "name": "unified_clinical_bronze",
@@ -573,6 +607,8 @@ class BronzePersistentConfigCreate(BaseModel):
       "relationship_ids": [1, 2],
       "enable_federated_joins": true,
       "output_format": "delta",
+      "write_mode": "merge",
+      "merge_keys": ["patient_id"],
       "output_bucket": "my-bronze-bucket",
       "output_path_prefix": "clinical/v1",
       "partition_columns": ["hospital_id"]
@@ -584,8 +620,10 @@ class BronzePersistentConfigCreate(BaseModel):
     ## **Workflow:**
     1. **Create config** → POST /api/bronze/configs/persistent
     2. **Preview** → POST /api/bronze/configs/persistent/{id}/preview
-    3. **Execute** → POST /api/bronze/configs/persistent/{id}/execute
-    4. **Query** → GET /api/bronze/configs/persistent/{id}/data
+    3. **Execute** → POST /api/bronze/configs/persistent/{id}/execute (creates version 0)
+    4. **Execute again** → POST /api/bronze/configs/persistent/{id}/execute (creates version 1, merges data)
+    5. **View history** → GET /api/bronze/configs/persistent/{id}/versions
+    6. **Time travel** → GET /api/bronze/configs/persistent/{id}/data?version=0
     """
     name: str = Field(..., min_length=1, max_length=255, description="Unique name for the config")
     description: Optional[str] = Field(None, description="Optional description")
@@ -607,8 +645,26 @@ class BronzePersistentConfigCreate(BaseModel):
     )
     
     output_format: OutputFormatEnum = Field(
-        OutputFormatEnum.PARQUET,
-        description="Output format for the Bronze data"
+        OutputFormatEnum.DELTA,
+        description="Output format (default: delta for versioning support)"
+    )
+    
+    # === VERSIONING FIELDS ===
+    write_mode: WriteModeEnum = Field(
+        WriteModeEnum.MERGE,
+        description=(
+            "Write mode: 'overwrite' (replace all), 'append' (add without checking), "
+            "'merge' (upsert - recommended, no duplicates)"
+        )
+    )
+    
+    merge_keys: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Columns used for MERGE deduplication (like a primary key). "
+            "If null with write_mode='merge', auto-detects from source table PKs. "
+            "If no PK found, falls back to 'overwrite'."
+        )
     )
     
     output_bucket: Optional[str] = Field(
@@ -640,6 +696,8 @@ class BronzePersistentConfigUpdate(BaseModel):
     relationship_ids: Optional[List[int]] = None
     enable_federated_joins: Optional[bool] = None
     output_format: Optional[OutputFormatEnum] = None
+    write_mode: Optional[WriteModeEnum] = None
+    merge_keys: Optional[List[str]] = None
     output_bucket: Optional[str] = None
     output_path_prefix: Optional[str] = None
     partition_columns: Optional[List[str]] = None
@@ -656,6 +714,13 @@ class BronzePersistentConfigResponse(BaseModel):
     relationship_ids: Optional[List[int]]
     enable_federated_joins: bool
     output_format: str
+    
+    # Versioning fields
+    write_mode: str = "merge"
+    merge_keys: Optional[List[str]] = None
+    merge_keys_source: Optional[str] = None  # 'user_defined', 'auto_detected_pk', or null
+    current_delta_version: Optional[int] = None
+    
     output_bucket: Optional[str]
     output_path_prefix: Optional[str]
     partition_columns: Optional[List[str]]
@@ -681,19 +746,11 @@ class BronzePersistentPreviewResponse(BaseModel):
     total_tables: int
     total_columns: int
     warnings: List[str] = []
-
-
-class BronzePersistentExecuteResponse(BaseModel):
-    """Response for persistent config execution."""
-    config_id: int
-    config_name: str
-    execution_id: int
-    status: BronzeExecutionStatusEnum
-    groups: List[IngestionGroupResult]
-    total_rows_ingested: int
-    bronze_paths: List[str]
-    execution_time_seconds: float
-    message: str
+    
+    # Versioning info
+    write_mode: str = "merge"
+    merge_keys: Optional[List[str]] = None
+    merge_keys_source: Optional[str] = None
 
 
 # ==================== EXECUTION HISTORY ====================
@@ -710,5 +767,88 @@ class BronzeExecutionResponse(BaseModel):
     output_paths: Optional[List[str]]
     error_message: Optional[str]
     
+    # Delta Lake versioning info
+    delta_version: Optional[int] = None
+    write_mode_used: Optional[str] = None
+    merge_keys_used: Optional[List[str]] = None
+    
+    # MERGE statistics
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    rows_deleted: Optional[int] = None
+    
+    # Config snapshot at execution time (for reproducibility)
+    config_snapshot: Optional[Dict[str, Any]] = None
+    
     model_config = {"from_attributes": True}
+
+
+class BronzePersistentExecuteResponse(BaseModel):
+    """Response for persistent config execution."""
+    config_id: int
+    config_name: str
+    execution_id: int
+    status: BronzeExecutionStatusEnum
+    groups: List[IngestionGroupResult]
+    total_rows_ingested: int
+    bronze_paths: List[str]
+    execution_time_seconds: float
+    message: str
+    
+    # Delta Lake versioning info
+    delta_version: Optional[int] = None
+    write_mode_used: str = "merge"
+    merge_keys_used: Optional[List[str]] = None
+    
+    # MERGE statistics (when write_mode=merge)
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    
+    # Config snapshot at execution time (for reproducibility)
+    config_snapshot: Optional[Dict[str, Any]] = None
+
+
+# ==================== VERSION HISTORY ====================
+
+class DeltaVersionInfo(BaseModel):
+    """Information about a single Delta Lake version."""
+    version: int
+    timestamp: datetime
+    operation: str  # WRITE, MERGE, DELETE, etc.
+    execution_id: Optional[int] = None
+    
+    # Statistics
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    rows_deleted: Optional[int] = None
+    total_rows: Optional[int] = None
+    
+    # Size info
+    num_files: Optional[int] = None
+    size_bytes: Optional[int] = None
+    
+    # Config snapshot at this version (for diff comparison)
+    config_snapshot: Optional[Dict[str, Any]] = None
+
+
+class BronzeVersionHistoryResponse(BaseModel):
+    """Response for version history of a Bronze config."""
+    config_id: int
+    config_name: str
+    current_version: Optional[int]
+    output_paths: List[str]  # All output paths (for non-federated configs with multiple sources)
+    versions: List[DeltaVersionInfo]  # Aggregated metrics across all paths
+
+
+class BronzeDataQueryResponse(BaseModel):
+    """Response for querying Bronze data with optional time travel."""
+    config_id: int
+    config_name: str
+    version: Optional[int] = None  # null = latest
+    as_of_timestamp: Optional[datetime] = None
+    columns: List[str]
+    data: List[Dict[str, Any]]
+    row_count: int
+    total_rows: Optional[int] = None
+    execution_time_seconds: float
 

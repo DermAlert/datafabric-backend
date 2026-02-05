@@ -23,6 +23,7 @@ from sqlalchemy import select, update, func
 
 from ..database.metadata.metadata import ExternalColumn, ExternalTables, ExternalSchema
 from ..database.core.core import DataConnection, ConnectionType
+from .credential_service import get_credential_service
 
 logger = logging.getLogger(__name__)
 
@@ -136,23 +137,47 @@ class ConstraintExtractionService:
         Returns:
             Dict with extraction results and statistics
         """
-        # Get connection info
+        # Get connection info with connection type
         conn_result = await self.db.execute(
-            select(DataConnection).where(DataConnection.id == connection_id)
+            select(DataConnection, ConnectionType)
+            .join(ConnectionType, DataConnection.connection_type_id == ConnectionType.id)
+            .where(DataConnection.id == connection_id)
         )
-        connection = conn_result.scalar_one_or_none()
+        result = conn_result.first()
         
-        if not connection:
+        if not result:
             raise ValueError(f"Connection {connection_id} not found")
         
-        # Determine database type
-        db_type = await self._get_db_type(connection)
+        connection, conn_type = result
+        
+        # Determine database type from connection type name
+        db_type = self._normalize_db_type(conn_type.name)
         if db_type not in DB_CONSTRAINT_QUERIES:
             logger.warning(f"Unsupported database type for constraint extraction: {db_type}")
             return {"status": "unsupported", "db_type": db_type}
         
         # Get catalog name (Trino catalog) using same format as TrinoManager
         catalog_name = self.trino.generate_catalog_name(connection.name, connection.id)
+        
+        # IMPORTANTE: Garantir que o catálogo existe antes de executar queries
+        # Descriptografar credenciais antes de usar
+        credential_service = get_credential_service()
+        decrypted_params = credential_service.decrypt_for_use(
+            connection.connection_params,
+            connection_id=connection.id,
+            purpose="constraint_extraction"
+        )
+        
+        # Garantir que o catálogo existe no Trino
+        catalog_created = await self.trino.ensure_catalog_exists_async(
+            connection_name=connection.name,
+            connection_type=conn_type.name,
+            params=decrypted_params,
+            connection_id=connection.id
+        )
+        
+        if not catalog_created:
+            raise ValueError(f"Failed to create/verify Trino catalog for connection {connection_id}")
         
         # Get schemas to process
         if not schemas:
@@ -326,14 +351,17 @@ class ConstraintExtractionService:
             )
         )
     
-    async def _get_db_type(self, connection: DataConnection) -> str:
-        """Determine database type from connection."""
-        # Get connection type name from ConnectionType table
-        conn_type_result = await self.db.execute(
-            select(ConnectionType).where(ConnectionType.id == connection.connection_type_id)
-        )
-        conn_type_obj = conn_type_result.scalar_one_or_none()
-        conn_type = (conn_type_obj.name if conn_type_obj else '').lower()
+    def _normalize_db_type(self, conn_type_name: str) -> str:
+        """
+        Normalize connection type name to a standard database type.
+        
+        Args:
+            conn_type_name: Name of the connection type (e.g., 'postgresql', 'MySQL')
+            
+        Returns:
+            Normalized database type string
+        """
+        conn_type = conn_type_name.lower()
         
         if 'mysql' in conn_type or 'mariadb' in conn_type:
             return 'mysql'
@@ -346,17 +374,23 @@ class ConstraintExtractionService:
         elif 'delta' in conn_type:
             return 'delta'
         
-        # Try to infer from connection_params
-        params = connection.connection_params or {}
-        host = (params.get('host') or params.get('url') or '').lower()
-        if 'mysql' in host:
-            return 'mysql'
-        elif 'postgres' in host:
-            return 'postgresql'
-        elif 'sqlserver' in host or 'mssql' in host:
-            return 'sqlserver'
-        
         return conn_type or 'unknown'
+    
+    async def _get_db_type(self, connection: DataConnection) -> str:
+        """
+        Determine database type from connection.
+        
+        DEPRECATED: Use _normalize_db_type with conn_type.name instead.
+        Kept for backwards compatibility.
+        """
+        # Get connection type name from ConnectionType table
+        conn_type_result = await self.db.execute(
+            select(ConnectionType).where(ConnectionType.id == connection.connection_type_id)
+        )
+        conn_type_obj = conn_type_result.scalar_one_or_none()
+        conn_type_name = conn_type_obj.name if conn_type_obj else ''
+        
+        return self._normalize_db_type(conn_type_name)
     
     # ========================================================================
     # UTILITY METHODS

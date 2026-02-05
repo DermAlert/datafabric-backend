@@ -6,7 +6,7 @@ from fastapi import HTTPException, status, Request
 import json
 import boto3
 from botocore.exceptions import ClientError
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 from datetime import datetime, timedelta
 import logging
 import os
@@ -687,6 +687,10 @@ class DeltaSharingProtocolService:
                             else:
                                 # Fallback: extract just the filename
                                 key = file_path.split('/')[-1]
+                            
+                            # Decode URL-encoded characters (Spark returns paths with %20 for spaces, etc.)
+                            # This prevents double-encoding when generate_presigned_url encodes again
+                            key = unquote(key)
                             
                             # Generate presigned URL
                             try:

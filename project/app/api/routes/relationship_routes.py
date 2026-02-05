@@ -96,158 +96,56 @@ async def discover_relationships(
         )
 
 
-# ==================== RELATIONSHIPS CRUD ====================
+# ==================== SUGGESTIONS ====================
+# NOTE: These routes MUST come before /{relationship_id} to avoid path conflicts
 
-@router.post("/", response_model=TableRelationshipResponse, status_code=status.HTTP_201_CREATED)
-async def create_relationship(
-    data: TableRelationshipCreate,
+@router.get("/suggestions", response_model=SearchResult[RelationshipSuggestionResponse])
+async def list_suggestions(
+    page: int = Query(1, ge=1),
+    size: int = Query(20, ge=1, le=100),
+    status: Optional[SuggestionStatusEnum] = Query(None, description="Filter by status (pending, accepted, rejected). If not provided, returns all."),
+    connection_id: Optional[int] = None,
+    table_id: Optional[int] = None,
+    min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0),
     db: AsyncSession = Depends(get_db),
     # current_user = Depends(get_current_user),
 ):
     """
-    Create a new table relationship manually.
-    
-    Use this when you know two columns are related but the system
-    didn't discover it automatically.
-    
-    The relationship is automatically marked as verified since it's
-    manually created.
-    
-    **Parameters:**
-    - `left_table_id`, `left_column_id`: The "parent" or "one" side
-    - `right_table_id`, `right_column_id`: The "child" or "many" side
-    - `cardinality`: Optional relationship cardinality
-    - `default_join_type`: Default join type (INNER, LEFT, etc.)
-    """
-    try:
-        service = RelationshipDiscoveryService(db)
-        return await service.create_relationship(data)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to create relationship: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to create relationship: {str(e)}"
-        )
-
-
-@router.get("/{relationship_id}", response_model=TableRelationshipResponse)
-async def get_relationship(
-    relationship_id: int,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """Get a relationship by ID."""
-    try:
-        service = RelationshipDiscoveryService(db)
-        return await service.get_relationship(relationship_id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to get relationship: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to get relationship: {str(e)}"
-        )
-
-
-@router.put("/{relationship_id}", response_model=TableRelationshipResponse)
-async def update_relationship(
-    relationship_id: int,
-    data: TableRelationshipUpdate,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """
-    Update a relationship.
-    
-    You can update:
-    - `name`, `description`: Metadata
-    - `cardinality`: Relationship type
-    - `default_join_type`: Default join strategy
-    - `is_verified`: Mark as verified/unverified
-    - `is_active`: Enable/disable without deleting
-    """
-    try:
-        service = RelationshipDiscoveryService(db)
-        return await service.update_relationship(relationship_id, data)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to update relationship: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to update relationship: {str(e)}"
-        )
-
-
-@router.delete("/{relationship_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_relationship(
-    relationship_id: int,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """Delete a relationship permanently."""
-    try:
-        service = RelationshipDiscoveryService(db)
-        await service.delete_relationship(relationship_id)
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Failed to delete relationship: {str(e)}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to delete relationship: {str(e)}"
-        )
-
-
-@router.post("/search", response_model=SearchResult[TableRelationshipResponse])
-async def search_relationships(
-    search: SearchRelationships,
-    db: AsyncSession = Depends(get_db),
-    # current_user = Depends(get_current_user),
-):
-    """
-    Search and list relationships with filters.
+    List relationship suggestions with optional status filter.
     
     **Filters:**
+    - `status`: Filter by status (pending, accepted, rejected). If not provided, returns all.
     - `connection_id`: Filter by connection
-    - `table_id`: Filter relationships involving this table
-    - `scope`: INTRA_CONNECTION or INTER_CONNECTION
-    - `source`: How it was discovered (AUTO_FK, AUTO_NAME, MANUAL, etc.)
-    - `is_verified`: Only verified relationships
-    - `is_active`: Only active relationships
+    - `table_id`: Filter suggestions involving this table
+    - `min_confidence`: Minimum confidence score (0.0-1.0)
     """
     try:
         service = RelationshipDiscoveryService(db)
-        relationships, total = await service.list_relationships(
-            connection_id=search.connection_id,
-            table_id=search.table_id,
-            scope=search.scope,
-            is_active=search.is_active,
-            page=search.page,
-            size=search.size
+        suggestions, total = await service.list_suggestions(
+            connection_id=connection_id,
+            table_id=table_id,
+            status_filter=status,
+            min_confidence=min_confidence,
+            page=page,
+            size=size
         )
         
         return SearchResult(
-            items=relationships,
+            items=suggestions,
             total=total,
-            page=search.page,
-            size=search.size,
-            pages=(total + search.size - 1) // search.size
+            page=page,
+            size=size,
+            pages=(total + size - 1) // size
         )
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to search relationships: {str(e)}")
+        logger.error(f"Failed to list suggestions: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to search relationships: {str(e)}"
+            detail=f"Failed to list suggestions: {str(e)}"
         )
 
-
-# ==================== SUGGESTIONS ====================
 
 @router.get("/suggestions/pending", response_model=SearchResult[RelationshipSuggestionResponse])
 async def list_pending_suggestions(
@@ -365,6 +263,35 @@ async def reject_suggestion(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to reject suggestion: {str(e)}"
+        )
+
+
+@router.post("/suggestions/{suggestion_id}/reset", response_model=RelationshipSuggestionResponse)
+async def reset_suggestion(
+    suggestion_id: int,
+    db: AsyncSession = Depends(get_db),
+    # current_user = Depends(get_current_user),
+):
+    """
+    Reset a rejected or accepted suggestion back to pending.
+    
+    Use this when you want to reconsider a previously rejected suggestion,
+    or when you deleted a relationship and want the suggestion to appear
+    in pending again.
+    
+    **Note:** If the suggestion was accepted and the relationship still exists,
+    you must delete the relationship first before resetting the suggestion.
+    """
+    try:
+        service = RelationshipDiscoveryService(db)
+        return await service.reset_suggestion(suggestion_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to reset suggestion: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to reset suggestion: {str(e)}"
         )
 
 
@@ -528,4 +455,153 @@ async def get_relationships_for_connection(
         )
 
 
+# ==================== RELATIONSHIPS CRUD ====================
+# NOTE: Routes with /{relationship_id} MUST come LAST to avoid capturing other paths
 
+@router.post("/", response_model=TableRelationshipResponse, status_code=status.HTTP_201_CREATED)
+async def create_relationship(
+    data: TableRelationshipCreate,
+    db: AsyncSession = Depends(get_db),
+    # current_user = Depends(get_current_user),
+):
+    """
+    Create a new table relationship manually.
+    
+    Use this when you know two columns are related but the system
+    didn't discover it automatically.
+    
+    The relationship is automatically marked as verified since it's
+    manually created.
+    
+    **Parameters:**
+    - `left_table_id`, `left_column_id`: The "parent" or "one" side
+    - `right_table_id`, `right_column_id`: The "child" or "many" side
+    - `cardinality`: Optional relationship cardinality
+    - `default_join_type`: Default join type (INNER, LEFT, etc.)
+    """
+    try:
+        service = RelationshipDiscoveryService(db)
+        return await service.create_relationship(data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to create relationship: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create relationship: {str(e)}"
+        )
+
+
+@router.post("/search", response_model=SearchResult[TableRelationshipResponse])
+async def search_relationships(
+    search: SearchRelationships,
+    db: AsyncSession = Depends(get_db),
+    # current_user = Depends(get_current_user),
+):
+    """
+    Search and list relationships with filters.
+    
+    **Filters:**
+    - `connection_id`: Filter by connection
+    - `table_id`: Filter relationships involving this table
+    - `scope`: INTRA_CONNECTION or INTER_CONNECTION
+    - `source`: How it was discovered (AUTO_FK, AUTO_NAME, MANUAL, etc.)
+    - `is_verified`: Only verified relationships
+    - `is_active`: Only active relationships
+    """
+    try:
+        service = RelationshipDiscoveryService(db)
+        relationships, total = await service.list_relationships(
+            connection_id=search.connection_id,
+            table_id=search.table_id,
+            scope=search.scope,
+            is_active=search.is_active,
+            page=search.page,
+            size=search.size
+        )
+        
+        return SearchResult(
+            items=relationships,
+            total=total,
+            page=search.page,
+            size=search.size,
+            pages=(total + search.size - 1) // search.size
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to search relationships: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to search relationships: {str(e)}"
+        )
+
+
+@router.get("/{relationship_id}", response_model=TableRelationshipResponse)
+async def get_relationship(
+    relationship_id: int,
+    db: AsyncSession = Depends(get_db),
+    # current_user = Depends(get_current_user),
+):
+    """Get a relationship by ID."""
+    try:
+        service = RelationshipDiscoveryService(db)
+        return await service.get_relationship(relationship_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get relationship: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get relationship: {str(e)}"
+        )
+
+
+@router.put("/{relationship_id}", response_model=TableRelationshipResponse)
+async def update_relationship(
+    relationship_id: int,
+    data: TableRelationshipUpdate,
+    db: AsyncSession = Depends(get_db),
+    # current_user = Depends(get_current_user),
+):
+    """
+    Update a relationship.
+    
+    You can update:
+    - `name`, `description`: Metadata
+    - `cardinality`: Relationship type
+    - `default_join_type`: Default join strategy
+    - `is_verified`: Mark as verified/unverified
+    - `is_active`: Enable/disable without deleting
+    """
+    try:
+        service = RelationshipDiscoveryService(db)
+        return await service.update_relationship(relationship_id, data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update relationship: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update relationship: {str(e)}"
+        )
+
+
+@router.delete("/{relationship_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_relationship(
+    relationship_id: int,
+    db: AsyncSession = Depends(get_db),
+    # current_user = Depends(get_current_user),
+):
+    """Delete a relationship permanently."""
+    try:
+        service = RelationshipDiscoveryService(db)
+        await service.delete_relationship(relationship_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete relationship: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete relationship: {str(e)}"
+        )

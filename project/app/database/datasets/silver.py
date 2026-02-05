@@ -38,6 +38,13 @@ class TransformStatus(enum.Enum):
     FAILED = "failed"
 
 
+class SilverWriteMode(enum.Enum):
+    """Write mode for Silver Delta Lake operations"""
+    OVERWRITE = "overwrite"  # Replace all data (default behavior before versioning)
+    APPEND = "append"        # Add to existing data (may duplicate)
+    MERGE = "merge"          # Upsert: insert new, update existing (no duplicates)
+
+
 # ==================== NORMALIZATION RULES ====================
 
 class NormalizationRule(AuditMixin, Base):
@@ -47,7 +54,7 @@ class NormalizationRule(AuditMixin, Base):
     Can be used with templates (like {d3}.{d3}.{d3}-{d2} for CPF)
     or with regex patterns for SQL-based transformations.
     """
-    __tablename__ = "normalization_rules"
+    __tablename__ = "silver_normalization_rules"
     __table_args__ = (
         UniqueConstraint('name'),
         {'schema': 'datasets'}
@@ -105,7 +112,7 @@ class VirtualizedConfig(AuditMixin, Base):
     column_transformations is for text transformations (lowercase, trim, etc.)
     and normalization rules (template). For value mappings, use /api/equivalence.
     """
-    __tablename__ = "virtualized_configs"
+    __tablename__ = "silver_virtualized_configs"
     __table_args__ = (
         UniqueConstraint('name'),
         {'schema': 'datasets'}
@@ -160,12 +167,18 @@ class TransformConfig(AuditMixin, Base):
     """
     Configuration for materialization (Bronze → Silver Delta).
     
-    Uses Bronze dataset as source, applies transformations (SQL + Python).
-    Materializes to Silver Delta Lake.
+    Uses Bronze Persistent Config as source, applies transformations.
+    Materializes to Silver Delta Lake with OVERWRITE mode.
     
-    Filters are defined inline in the config (not referenced by ID).
+    Source Options:
+    - source_bronze_config_id: Reference to Bronze Persistent Config (RECOMMENDED)
+    - source_bronze_version: Optional specific Delta version to use from Bronze
+    - source_bronze_dataset_id: LEGACY - deprecated, use source_bronze_config_id
+    
+    Write mode is always OVERWRITE for simplicity and reliability.
+    Delta Lake maintains version history automatically.
     """
-    __tablename__ = "transform_configs"
+    __tablename__ = "silver_persistent_configs"
     __table_args__ = (
         UniqueConstraint('name'),
         {'schema': 'datasets'}
@@ -175,8 +188,12 @@ class TransformConfig(AuditMixin, Base):
     name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     
-    # Source: Bronze dataset
-    source_bronze_dataset_id = Column(Integer, ForeignKey('core.datasets.id', ondelete='CASCADE'), nullable=False)
+    # Source: Bronze Persistent Config (NEW - RECOMMENDED)
+    source_bronze_config_id = Column(Integer, ForeignKey('datasets.bronze_persistent_configs.id', ondelete='CASCADE'), nullable=True)
+    source_bronze_version = Column(Integer, nullable=True)  # Optional: specific Delta version to read
+    
+    # Source: Bronze dataset (LEGACY - deprecated)
+    source_bronze_dataset_id = Column(Integer, ForeignKey('core.datasets.id', ondelete='CASCADE'), nullable=True)
     
     # Output configuration
     silver_bucket = Column(String(255), nullable=True)  # Defaults to system silver bucket
@@ -211,6 +228,17 @@ class TransformConfig(AuditMixin, Base):
     # E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear
     exclude_unified_source_columns = Column(Boolean, default=False, nullable=False)
     
+    # === VERSIONING CONFIGURATION ===
+    # Write mode is always OVERWRITE for simplicity (column kept for compatibility)
+    write_mode = Column(SQLEnum(SilverWriteMode), nullable=False, default=SilverWriteMode.OVERWRITE)
+    
+    # DEPRECATED: merge_keys no longer used (always overwrite)
+    merge_keys = Column(JSON, nullable=True)
+    merge_keys_source = Column(String(50), nullable=True)
+    
+    # Delta Lake versioning info
+    current_delta_version = Column(Integer, nullable=True)  # Latest Delta version
+    
     # Execution status
     last_execution_time = Column(TIMESTAMP(timezone=True), nullable=True)
     last_execution_status = Column(SQLEnum(TransformStatus), nullable=True)
@@ -226,12 +254,14 @@ class TransformConfig(AuditMixin, Base):
 class TransformExecution(AuditMixin, Base):
     """
     Execution history for transform configs.
+    
+    Tracks each execution including versioning info and merge statistics.
     """
-    __tablename__ = "transform_executions"
+    __tablename__ = "silver_executions"
     __table_args__ = {'schema': 'datasets'}
 
     id = Column(Integer, primary_key=True)
-    config_id = Column(Integer, ForeignKey('datasets.transform_configs.id', ondelete='CASCADE'), nullable=False)
+    config_id = Column(Integer, ForeignKey('datasets.silver_persistent_configs.id', ondelete='CASCADE'), nullable=False)
     
     status = Column(SQLEnum(TransformStatus), nullable=False, default=TransformStatus.PENDING)
     started_at = Column(TIMESTAMP(timezone=True), nullable=True)
@@ -246,3 +276,26 @@ class TransformExecution(AuditMixin, Base):
     
     # Execution details
     execution_details = Column(JSON, nullable=True)
+    
+    # === DELTA LAKE VERSIONING ===
+    # Delta version created by this execution
+    delta_version = Column(Integer, nullable=True)
+    
+    # Write mode used in this execution
+    write_mode_used = Column(String(20), nullable=True)  # overwrite, append, merge
+    
+    # Merge keys used (if merge mode)
+    merge_keys_used = Column(JSON, nullable=True)
+    
+    # MERGE operation statistics
+    rows_inserted = Column(Integer, nullable=True)  # New rows inserted
+    rows_updated = Column(Integer, nullable=True)   # Existing rows updated
+    rows_deleted = Column(Integer, nullable=True)   # Rows deleted (if applicable)
+    
+    # Schema tracking (internal - for auditing schema changes)
+    schema_hash = Column(String(64), nullable=True)  # Hash of config
+    schema_changed = Column(Boolean, default=False)  # True if schema changed from previous execution
+    
+    # Full config snapshot at execution time (for reproducibility)
+    # Stores exactly what config was used to generate this version
+    config_snapshot = Column(JSON, nullable=True)

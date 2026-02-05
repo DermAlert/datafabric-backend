@@ -29,6 +29,8 @@ from ..schemas.metadata_schemas import (
 from ...services.distinct_values_service import DistinctValuesService
 from ...services.constraint_extraction_service import ConstraintExtractionService
 from ...services.trino_client import get_trino_client
+from ...services.trino_manager import TrinoManager
+from ...services.credential_service import get_credential_service
 
 router = APIRouter()
 
@@ -353,7 +355,198 @@ async def get_table_details(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve table details: {str(e)}"
         )
+
+
+@router.get("/tables/{table_id}/sample")
+async def get_table_sample(
+    table_id: int,
+    max_samples: int = Query(5, ge=1, le=100, description="Maximum number of sample rows to return"),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Returns sample rows from a table using Trino.
+    Works with any connection type that has a Trino catalog configured (MySQL, PostgreSQL, Delta Lake, etc.).
+    
+    Args:
+        table_id: ID of the table to sample
+        max_samples: Maximum number of sample rows to return (default: 5, max: 100)
+    
+    Returns:
+        Sample rows with all columns from the table
+    """
+    try:
+        # Buscar a tabela
+        table_result = await db.execute(
+            select(metadata.ExternalTables)
+            .where(metadata.ExternalTables.id == table_id)
+        )
+        table = table_result.scalars().first()
+        if not table:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Tabela com ID {table_id} não encontrada"
+            )
         
+        # Buscar o schema
+        schema_result = await db.execute(
+            select(metadata.ExternalSchema)
+            .where(metadata.ExternalSchema.id == table.schema_id)
+        )
+        schema = schema_result.scalars().first()
+        if not schema:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Schema com ID {table.schema_id} não encontrado"
+            )
+        
+        # Buscar o catalog (para Delta Lake)
+        catalog_db = None
+        if schema.catalog_id:
+            catalog_result = await db.execute(
+                select(metadata.ExternalCatalogs)
+                .where(metadata.ExternalCatalogs.id == schema.catalog_id)
+            )
+            catalog_db = catalog_result.scalars().first()
+        
+        # Buscar a conexão
+        conn_result = await db.execute(
+            select(core.DataConnection)
+            .where(core.DataConnection.id == table.connection_id)
+        )
+        conn = conn_result.scalars().first()
+        if not conn:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Connection com ID {table.connection_id} não encontrada"
+            )
+        
+        # Buscar o tipo da conexão
+        conn_type = None
+        if hasattr(conn, 'connection_type_id'):
+            type_result = await db.execute(
+                select(core.ConnectionType)
+                .where(core.ConnectionType.id == conn.connection_type_id)
+            )
+            conn_type_obj = type_result.scalars().first()
+            if conn_type_obj:
+                conn_type = conn_type_obj.name.lower()
+        
+        if not conn_type:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Tipo de conexão não encontrado"
+            )
+        
+        # Usar TrinoManager para gerar o nome do catalog
+        trino_manager = TrinoManager()
+        catalog_name = trino_manager.generate_catalog_name(conn.name, conn.id)
+        
+        # SEGURANÇA: Descriptografar credenciais antes de usar
+        credential_service = get_credential_service()
+        decrypted_params = credential_service.decrypt_for_use(
+            conn.connection_params,
+            connection_id=conn.id,
+            purpose="table_sample_preview"
+        )
+        
+        # Garantir que o catálogo existe no Trino
+        await trino_manager.ensure_catalog_exists_async(
+            connection_name=conn.name,
+            connection_type=conn_type,
+            params=decrypted_params,
+            connection_id=conn.id
+        )
+        
+        schema_name = schema.schema_name
+        table_name = table.table_name
+        
+        # Buscar as colunas da tabela para informação adicional
+        columns_result = await db.execute(
+            select(metadata.ExternalColumn)
+            .where(metadata.ExternalColumn.table_id == table_id)
+            .order_by(metadata.ExternalColumn.column_position)
+        )
+        columns_db = columns_result.scalars().all()
+        column_info = [
+            {
+                "column_name": col.column_name,
+                "data_type": col.data_type,
+                "is_nullable": col.is_nullable,
+                "is_primary_key": col.is_primary_key,
+            }
+            for col in columns_db
+        ]
+        
+        # Executar query via Trino
+        import aiotrino
+        
+        trino_conn = aiotrino.dbapi.connect(
+            host=trino_manager.host,
+            port=trino_manager.port,
+            user=trino_manager.user,
+            catalog=catalog_name,
+            schema=schema_name,
+        )
+        
+        try:
+            cur = await trino_conn.cursor()
+            
+            # Query para buscar samples - usar quoted identifiers para preservar case
+            query = f'SELECT * FROM "{catalog_name}"."{schema_name}"."{table_name}" LIMIT {max_samples}'
+            
+            await cur.execute(query)
+            rows = await cur.fetchall()
+            
+            # Obter nomes das colunas do cursor
+            description = await cur.get_description() if hasattr(cur, 'get_description') else None
+            column_names = []
+            if description:
+                column_names = [
+                    col.name if hasattr(col, 'name') else (col.get('name') if isinstance(col, dict) else col[0])
+                    for col in description
+                ]
+            
+            # Converter rows para dicts
+            sample_data = []
+            for row in rows:
+                if column_names:
+                    row_dict = {}
+                    for i, val in enumerate(row):
+                        col_name = column_names[i] if i < len(column_names) else f"col_{i}"
+                        # Converter valores para tipos serializáveis
+                        if val is None:
+                            row_dict[col_name] = None
+                        elif isinstance(val, (int, float, str, bool)):
+                            row_dict[col_name] = val
+                        else:
+                            row_dict[col_name] = str(val)
+                    sample_data.append(row_dict)
+                else:
+                    sample_data.append(list(row))
+            
+        finally:
+            await trino_conn.close()
+        
+        return {
+            "table_id": table_id,
+            "table_name": table_name,
+            "schema_name": schema_name,
+            "catalog_name": catalog_name,
+            "connection_type": conn_type,
+            "columns": column_info,
+            "sample_data": sample_data,
+            "total_returned": len(sample_data),
+            "max_samples": max_samples
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Erro ao buscar sample da tabela: {str(e)}"
+        )
+
     
 @router.get("/columns/{column_id}/distinct-values")
 async def get_distinct_values_for_column(
@@ -364,7 +557,7 @@ async def get_distinct_values_for_column(
 ):
     """
     Retorna os valores distintos encontrados para uma coluna de metadados,
-    consultando diretamente a fonte de dados (PostgreSQL, Delta Lake, etc.).
+    consultando via Trino (suporta MySQL, PostgreSQL, Delta Lake, etc.).
     """
     try:
         # Buscar a coluna
@@ -403,15 +596,6 @@ async def get_distinct_values_for_column(
                 detail=f"Schema com ID {table.schema_id} não encontrado"
             )
         
-        # Buscar o catalog (para Delta Lake via Trino)
-        catalog = None
-        if schema.catalog_id:
-            catalog_result = await db.execute(
-                select(metadata.ExternalCatalogs)
-                .where(metadata.ExternalCatalogs.id == schema.catalog_id)
-            )
-            catalog = catalog_result.scalars().first()
-        
         # Buscar a conexão
         conn_result = await db.execute(
             select(core.DataConnection)
@@ -441,35 +625,103 @@ async def get_distinct_values_for_column(
                 detail="Tipo de conexão não encontrado"
             )
         
-        # Verificar se o tipo de conexão é suportado
-        if not await DistinctValuesService.is_connection_type_supported(conn_type):
-            supported_types = DistinctValuesService.get_supported_connection_types()
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Tipo de conexão '{conn_type}' não suportado. Tipos suportados: {', '.join(supported_types)}"
-            )
+        # Usar TrinoManager para gerar o nome do catalog e executar query
+        trino_manager = TrinoManager()
+        catalog_name = trino_manager.generate_catalog_name(conn.name, conn.id)
         
-        # Buscar valores distintos usando o serviço genérico
+        # SEGURANÇA: Descriptografar credenciais antes de usar
+        credential_service = get_credential_service()
+        decrypted_params = credential_service.decrypt_for_use(
+            conn.connection_params,
+            connection_id=conn.id,
+            purpose="distinct_values_query"
+        )
+        
+        # Garantir que o catálogo existe no Trino
+        await trino_manager.ensure_catalog_exists_async(
+            connection_name=conn.name,
+            connection_type=conn_type,
+            params=decrypted_params,
+            connection_id=conn.id
+        )
+        
         schema_name = schema.schema_name
         table_name = table.table_name
         column_name = column.column_name
-        catalog_name = catalog.catalog_name if catalog else None
         
-        values = await DistinctValuesService.get_distinct_values(
-            connection_type=conn_type,
-            connection_params=conn.connection_params,
-            schema_name=schema_name,
-            table_name=table_name,
-            column_name=column_name,
-            limit=limit,
-            search=search,
-            catalog_name=catalog_name
+        # Executar query via Trino
+        import aiotrino
+        
+        trino_conn = aiotrino.dbapi.connect(
+            host=trino_manager.host,
+            port=trino_manager.port,
+            user=trino_manager.user,
+            catalog=catalog_name,
+            schema=schema_name,
         )
+        
+        try:
+            cur = await trino_conn.cursor()
+            
+            # First, get approximate count of distinct values (using HyperLogLog - very fast)
+            if search:
+                safe_search = search.replace("'", "''")
+                count_query = f'''
+                    SELECT approx_distinct("{column_name}") 
+                    FROM "{catalog_name}"."{schema_name}"."{table_name}" 
+                    WHERE lower(cast("{column_name}" as varchar)) LIKE '%{safe_search.lower()}%'
+                '''
+            else:
+                count_query = f'''
+                    SELECT approx_distinct("{column_name}") 
+                    FROM "{catalog_name}"."{schema_name}"."{table_name}"
+                '''
+            
+            await cur.execute(count_query)
+            count_result = await cur.fetchone()
+            total_distinct = count_result[0] if count_result else 0
+            
+            # Build query with optional search filter
+            if search:
+                # Case-insensitive search using lower()
+                query = f'''
+                    SELECT DISTINCT "{column_name}" 
+                    FROM "{catalog_name}"."{schema_name}"."{table_name}" 
+                    WHERE lower(cast("{column_name}" as varchar)) LIKE '%{safe_search.lower()}%'
+                    ORDER BY "{column_name}" 
+                    LIMIT {limit}
+                '''
+            else:
+                query = f'''
+                    SELECT DISTINCT "{column_name}" 
+                    FROM "{catalog_name}"."{schema_name}"."{table_name}" 
+                    ORDER BY "{column_name}" 
+                    LIMIT {limit}
+                '''
+            
+            await cur.execute(query)
+            rows = await cur.fetchall()
+            
+            # Extract values
+            values = []
+            for row in rows:
+                val = row[0]
+                if val is None:
+                    values.append(None)
+                elif isinstance(val, (int, float, str, bool)):
+                    values.append(val)
+                else:
+                    values.append(str(val))
+            
+        finally:
+            await trino_conn.close()
         
         return {
             "column_id": column_id,
+            "column_name": column_name,
             "connection_type": conn_type,
             "distinct_values": values,
+            "total_distinct": total_distinct,
             "total_returned": len(values),
             "search_filter": search,
             "limit": limit

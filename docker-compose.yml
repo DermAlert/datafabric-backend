@@ -42,28 +42,6 @@ services:
     command: poetry run uvicorn app.main:app --reload --workers 1 --host 0.0.0.0 --port 8000
     env_file:
       - .env
-    environment:
-      # Trino configuration
-      - TRINO_HOST=trino
-      - TRINO_PORT=8080
-      - TRINO_USER=admin
-      # Hive Metastore
-      # - USE_EXTERNAL_HMS=true
-      # - HIVE_METASTORE_URI=thrift://hive-metastore:9083
-      # Internal MinIO (for file-based metastore fallback)
-      - INTERNAL_S3_ENDPOINT=http://minio:9000
-      - INTERNAL_S3_ACCESS_KEY=minio
-      - INTERNAL_S3_SECRET_KEY=minio123
-      - INTERNAL_METASTORE_BUCKET=datafabric-metastore
-      # Spark configuration for Silver layer
-      - SPARK_MODE=local
-      - SPARK_MASTER=local[*]
-      - SPARK_DRIVER_MEMORY=4g
-      - SPARK_SHUFFLE_PARTITIONS=8
-      - SPARK_LOG_LEVEL=WARN
-      # Silver bucket
-      - SILVER_BUCKET=datafabric-silver
-      - BRONZE_BUCKET=datafabric-bronze
     volumes:
       - ./project:/usr/src/app
     ports:
@@ -82,18 +60,6 @@ services:
     build: ./dataset-service
     env_file:
       - .env
-    environment:
-      # Trino configuration
-      - TRINO_HOST=trino
-      - TRINO_PORT=8080
-      - TRINO_USER=admin
-      # Hive Metastore
-      # - USE_EXTERNAL_HMS=true
-      # - HIVE_METASTORE_URI=thrift://hive-metastore:9083
-      # Internal MinIO
-      - INTERNAL_S3_ENDPOINT=http://minio:9000
-      - INTERNAL_S3_ACCESS_KEY=minio
-      - INTERNAL_S3_SECRET_KEY=minio123
     volumes:
       - ./project:/shared/project
     ports:
@@ -136,7 +102,7 @@ services:
       - shared-network
 
   postgres-airflow:
-    image: postgres:15.3
+    image: postgres:18.1
     ports: 
       - 5433:5432
     environment:
@@ -144,7 +110,7 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=dermalert_airflow
     volumes:
-      - airflow_pgdata:/var/lib/postgresql/data
+      - airflow_pgdata:/var/lib/postgresql
     healthcheck:
      test: ["CMD-SHELL", "pg_isready -U postgres"]
      interval: 10s
@@ -154,7 +120,7 @@ services:
       - shared-network
 
   postgres-backend:
-    image: postgres:15.3
+    image: postgres:18.1
     ports: 
       - 5434:5432
     environment:
@@ -162,7 +128,7 @@ services:
       - POSTGRES_PASSWORD=postgres
       - POSTGRES_DB=dermalert_backend
     volumes:
-      - backend_pgdata:/var/lib/postgresql/data
+      - backend_pgdata:/var/lib/postgresql
     healthcheck:
      test: ["CMD-SHELL", "pg_isready -U postgres"]
      interval: 10s
@@ -243,6 +209,8 @@ services:
       - "8089:8080"
     volumes:
       - ./trino:/etc/trino
+    extra_hosts:
+      - "localhost:host-gateway"  # Permite acessar localhost do host (ex: PostgreSQL em localhost:5432)
     networks:
       - shared-network
     depends_on:

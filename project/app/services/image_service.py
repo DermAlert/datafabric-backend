@@ -149,19 +149,25 @@ class ImageService:
             connection, connection_type = connection_data
             
             # Extract MinIO connection parameters
-            params = connection.connection_params
+            # SEGURANÇA: Importar e usar credential_service para descriptografar
+            from app.services.credential_service import get_credential_service
+            credential_service = get_credential_service()
+            
+            # Descriptografar parâmetros de conexão
+            params = credential_service.decrypt_for_use(
+                connection.connection_params,
+                connection_id=connection_id,
+                purpose="image_service_minio_client"
+            )
+            
             endpoint = params.get('endpoint')
             access_key = params.get('access_key')
             secret_key = params.get('secret_key')
             secure = params.get('secure', False)
             region = params.get('region', 'us-east-1')  # Default region for S3 compatibility
 
-            print(f"  ✓ connection_id: '{connection_id}'")
-            print(f"  ✓ endpoint: '{endpoint}'")
-            print(f"  ✓ access_key: '{access_key}'")
-            print(f"  ✓ secret_key: '{secret_key}'")
-            print(f"  ✓ secure: '{secure}'")
-            print(f"  ✓ region: '{region}'")
+            # SEGURANÇA: Removidos print statements que expunham credenciais em texto claro
+            logger.debug(f"Configuring MinIO client for connection_id={connection_id}, endpoint={endpoint}")
 
             if not all([endpoint, access_key, secret_key]):
                 logger.error(f"Missing MinIO connection parameters for connection {connection_id}")
@@ -197,11 +203,10 @@ class ImageService:
                 region=region
             )
 
-            print(f"  ✓ minio_client: '{minio_client}'")
-            
+            # SEGURANÇA: Não expor credenciais nos logs, nem parcialmente
             logger.info(f"Created MinIO/S3 client for connection {connection_id}:")
             logger.info(f"  - Endpoint: {endpoint}")
-            logger.info(f"  - Access Key: {access_key[:4]}***{access_key[-4:] if len(access_key) > 8 else '***'}")
+            logger.info(f"  - Access Key: [REDACTED]")
             logger.info(f"  - Secure: {secure}")
             logger.info(f"  - Region: {region}")
             

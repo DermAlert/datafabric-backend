@@ -54,6 +54,7 @@ from ..schemas.bronze_schemas import (
     BronzeVirtualizedResponse,
     TableColumnSelection,
     OutputFormatEnum,
+    WriteModeEnum,
     # Config schemas
     BronzeVirtualizedConfigCreate,
     BronzeVirtualizedConfigUpdate,
@@ -65,8 +66,12 @@ from ..schemas.bronze_schemas import (
     BronzePersistentPreviewResponse,
     BronzePersistentExecuteResponse,
     BronzeExecutionResponse,
+    # Versioning schemas
+    BronzeVersionHistoryResponse,
+    BronzeDataQueryResponse,
 )
 from ...services.bronze_ingestion_service import BronzeIngestionService
+from ...services.bronze_versioning_service import BronzeVersioningService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -871,14 +876,23 @@ async def create_persistent_config(
                 detail=f"Config with name '{config_data.name}' already exists"
             )
         
-        # Create config
+        # Create config (always uses overwrite mode)
+        tables_dict = [t.model_dump() for t in config_data.tables]
+        
+        from ...database.datasets.bronze import WriteMode
+        
         config = BronzePersistentConfig(
             name=config_data.name,
             description=config_data.description,
-            tables=[t.model_dump() for t in config_data.tables],
+            tables=tables_dict,
             relationship_ids=config_data.relationship_ids,
             enable_federated_joins=config_data.enable_federated_joins,
             output_format=config_data.output_format.value,
+            # Always use overwrite for simplicity
+            write_mode=WriteMode.OVERWRITE,
+            merge_keys=None,
+            merge_keys_source=None,
+            # Other fields
             output_bucket=config_data.output_bucket,
             output_path_prefix=config_data.output_path_prefix,
             partition_columns=config_data.partition_columns,
@@ -899,6 +913,12 @@ async def create_persistent_config(
             relationship_ids=config.relationship_ids,
             enable_federated_joins=config.enable_federated_joins,
             output_format=config.output_format,
+            # Versioning fields
+            write_mode=config.write_mode.value if config.write_mode else 'overwrite',
+            merge_keys=config.merge_keys,
+            merge_keys_source=config.merge_keys_source,
+            current_delta_version=config.current_delta_version,
+            # Other fields
             output_bucket=config.output_bucket,
             output_path_prefix=config.output_path_prefix,
             partition_columns=config.partition_columns,
@@ -956,6 +976,12 @@ async def get_persistent_config(
             relationship_ids=config.relationship_ids,
             enable_federated_joins=config.enable_federated_joins,
             output_format=config.output_format,
+            # Versioning fields
+            write_mode=config.write_mode.value if config.write_mode else 'overwrite',
+            merge_keys=config.merge_keys,
+            merge_keys_source=config.merge_keys_source,
+            current_delta_version=config.current_delta_version,
+            # Other fields
             output_bucket=config.output_bucket,
             output_path_prefix=config.output_path_prefix,
             partition_columns=config.partition_columns,
@@ -1014,6 +1040,12 @@ async def update_persistent_config(
         if 'output_format' in update_data and update_data['output_format']:
             update_data['output_format'] = update_data['output_format'].value
         
+        # Always use overwrite mode (ignore write_mode/merge_keys from request)
+        from ...database.datasets.bronze import WriteMode
+        update_data['write_mode'] = WriteMode.OVERWRITE
+        update_data['merge_keys'] = None
+        update_data['merge_keys_source'] = None
+        
         for field, value in update_data.items():
             setattr(config, field, value)
         
@@ -1025,6 +1057,8 @@ async def update_persistent_config(
             'relationship_ids': config.relationship_ids,
             'enable_federated_joins': config.enable_federated_joins,
             'output_format': config.output_format,
+            'write_mode': 'overwrite',
+            'merge_keys': None,
             'output_bucket': config.output_bucket,
             'output_path_prefix': config.output_path_prefix,
             'partition_columns': config.partition_columns,
@@ -1042,6 +1076,12 @@ async def update_persistent_config(
             relationship_ids=config.relationship_ids,
             enable_federated_joins=config.enable_federated_joins,
             output_format=config.output_format,
+            # Versioning fields
+            write_mode=config.write_mode.value if config.write_mode else 'overwrite',
+            merge_keys=config.merge_keys,
+            merge_keys_source=config.merge_keys_source,
+            current_delta_version=config.current_delta_version,
+            # Other fields
             output_bucket=config.output_bucket,
             output_path_prefix=config.output_path_prefix,
             partition_columns=config.partition_columns,
@@ -1189,7 +1229,7 @@ async def execute_persistent_config(
     config_id: int,
     db: AsyncSession = Depends(get_db),
 ):
-    """Execute a persistent config."""
+    """Execute a persistent config with proper Delta Lake versioning."""
     try:
         # Get config
         result = await db.execute(
@@ -1205,48 +1245,77 @@ async def execute_persistent_config(
                 detail=f"Persistent config {config_id} not found"
             )
         
+        # Create config snapshot for reproducibility
+        config_snapshot = {
+            "name": config.name,
+            "description": config.description,
+            "tables": config.tables,
+            "relationship_ids": config.relationship_ids,
+            "enable_federated_joins": config.enable_federated_joins,
+            "output_format": config.output_format,
+            "output_bucket": config.output_bucket,
+            "output_path_prefix": config.output_path_prefix,
+            "partition_columns": config.partition_columns,
+            "write_mode": config.write_mode.value if config.write_mode else None,
+            "merge_keys": config.merge_keys,
+            "merge_keys_source": config.merge_keys_source,
+            "properties": config.properties,
+            "snapshot_at": datetime.utcnow().isoformat(),
+        }
+        
         # Create execution record
         execution = BronzeExecution(
             config_id=config.id,
             status=BronzeExecutionStatus.RUNNING,
             started_at=datetime.utcnow(),
+            config_snapshot=config_snapshot,
         )
         db.add(execution)
         await db.commit()
         await db.refresh(execution)
         
         try:
-            # Convert config to request format
+            # Convert config tables to TableColumnSelection
             tables = [TableColumnSelection(**t) for t in config.tables]
             
-            request = DatasetBronzeCreateRequest(
-                name=config.name,
-                description=config.description,
+            # Execute with proper versioning using Spark (always overwrite)
+            service = BronzeIngestionService(db)
+            ingestion_result = await service.execute_persistent_config_with_versioning(
+                config_id=config.id,
+                config_name=config.name,
                 tables=tables,
                 relationship_ids=config.relationship_ids,
                 enable_federated_joins=config.enable_federated_joins,
-                output_format=OutputFormatEnum(config.output_format),
+                output_format=config.output_format,
                 output_bucket=config.output_bucket,
+                output_path_prefix=config.output_path_prefix,
                 partition_columns=config.partition_columns,
                 properties=config.properties or {},
             )
             
-            # Execute ingestion
-            service = BronzeIngestionService(db)
-            ingestion_result = await service.execute_ingestion_simplified(request)
-            
-            # Update execution record
-            execution.status = BronzeExecutionStatus(ingestion_result.status.value)
+            # Update execution record with versioning info
+            execution.status = BronzeExecutionStatus(ingestion_result['status'].value)
             execution.finished_at = datetime.utcnow()
-            execution.rows_ingested = ingestion_result.total_rows_ingested
-            execution.output_paths = ingestion_result.bronze_paths
-            execution.group_results = [g.model_dump() for g in ingestion_result.groups]
+            execution.rows_ingested = ingestion_result['total_rows_ingested']
+            execution.output_paths = ingestion_result['bronze_paths']
+            execution.group_results = [g.model_dump() for g in ingestion_result['groups']]
+            execution.delta_version = ingestion_result.get('delta_version')
+            execution.write_mode_used = ingestion_result.get('write_mode_used')
+            execution.merge_keys_used = ingestion_result.get('merge_keys_used')
+            execution.rows_inserted = ingestion_result.get('rows_inserted')
+            execution.rows_updated = ingestion_result.get('rows_updated')
+            execution.rows_deleted = ingestion_result.get('rows_deleted')
+            execution.execution_details = {
+                'size_bytes': ingestion_result.get('size_bytes'),
+                'num_files': ingestion_result.get('num_files'),
+                'execution_time_seconds': ingestion_result.get('execution_time_seconds'),
+            }
             
             # Update config
             config.last_execution_time = datetime.utcnow()
-            config.last_execution_status = BronzeExecutionStatus(ingestion_result.status.value)
-            config.last_execution_rows = ingestion_result.total_rows_ingested
-            config.dataset_id = ingestion_result.dataset_id
+            config.last_execution_status = BronzeExecutionStatus(ingestion_result['status'].value)
+            config.last_execution_rows = ingestion_result['total_rows_ingested']
+            config.current_delta_version = ingestion_result.get('delta_version')
             
             await db.commit()
             
@@ -1254,12 +1323,18 @@ async def execute_persistent_config(
                 config_id=config.id,
                 config_name=config.name,
                 execution_id=execution.id,
-                status=ingestion_result.status,
-                groups=ingestion_result.groups,
-                total_rows_ingested=ingestion_result.total_rows_ingested,
-                bronze_paths=ingestion_result.bronze_paths,
-                execution_time_seconds=ingestion_result.total_execution_time_seconds,
-                message=ingestion_result.message,
+                status=ingestion_result['status'],
+                groups=ingestion_result['groups'],
+                total_rows_ingested=ingestion_result['total_rows_ingested'],
+                bronze_paths=ingestion_result['bronze_paths'],
+                execution_time_seconds=ingestion_result['execution_time_seconds'],
+                message=ingestion_result['message'],
+                delta_version=ingestion_result.get('delta_version'),
+                write_mode_used=ingestion_result.get('write_mode_used'),
+                merge_keys_used=ingestion_result.get('merge_keys_used'),
+                rows_inserted=ingestion_result.get('rows_inserted'),
+                rows_updated=ingestion_result.get('rows_updated'),
+                config_snapshot=config_snapshot,
             )
             
         except Exception as exec_error:
@@ -1331,6 +1406,13 @@ async def list_config_executions(
                 rows_ingested=e.rows_ingested,
                 output_paths=e.output_paths,
                 error_message=e.error_message,
+                # Versioning fields
+                delta_version=e.delta_version,
+                write_mode_used=e.write_mode_used,
+                merge_keys_used=e.merge_keys_used,
+                rows_inserted=e.rows_inserted,
+                rows_updated=e.rows_updated,
+                rows_deleted=e.rows_deleted,
             )
             for e in executions
         ]
@@ -1342,4 +1424,317 @@ async def list_config_executions(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list config executions: {str(e)}"
+        )
+
+
+# ==================== VERSIONING & TIME TRAVEL ====================
+
+@router.get(
+    "/configs/persistent/{config_id}/versions",
+    response_model=BronzeVersionHistoryResponse,
+    summary="Get Delta Lake version history",
+    description="""
+Get the version history of a Bronze Delta Lake table.
+
+Each execution creates a new version. You can use version numbers
+for time travel queries.
+
+**Metrics are aggregated across all output paths** - For non-federated configs with multiple sources,
+the response shows unified metrics from all paths.
+
+---
+
+## **Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | int | 100 | Maximum versions to return (1-1000) |
+
+---
+
+## **Response:**
+
+```json
+{
+  "config_id": 1,
+  "config_name": "patients_bronze",
+  "current_version": 5,
+  "output_paths": [
+    "s3a://datafabric-bronze/1-patients_bronze/unified/"
+  ],
+  "versions": [
+    {
+      "version": 5,
+      "timestamp": "2024-01-20T14:30:00Z",
+      "operation": "OVERWRITE",
+      "execution_id": 12,
+      "rows_inserted": 150,
+      "rows_updated": 23,
+      "total_rows": 10523,
+      "num_files": 4,
+      "size_bytes": 1048576,
+      "config_snapshot": {
+        "name": "patients_bronze",
+        "tables": [{"table_id": 1, "select_all": true}],
+        "write_mode": "overwrite",
+        "merge_keys": ["patient_id"],
+        "snapshot_at": "2024-01-20T14:30:00"
+      }
+    },
+    {
+      "version": 4,
+      "timestamp": "2024-01-15T10:00:00Z",
+      "operation": "OVERWRITE",
+      "execution_id": 11,
+      "rows_inserted": 500,
+      "rows_updated": 0,
+      "total_rows": 10350,
+      "num_files": 3,
+      "size_bytes": 950000,
+      "config_snapshot": {
+        "name": "patients_bronze",
+        "tables": [{"table_id": 1, "column_ids": [1,2,3]}],
+        "write_mode": "overwrite",
+        "merge_keys": ["patient_id"],
+        "snapshot_at": "2024-01-15T10:00:00"
+      }
+    }
+  ]
+}
+```
+
+---
+
+## **Use Cases:**
+- See all versions available for time travel
+- Track changes over time
+- Audit data modifications
+- **Compare config snapshots between versions (git-like diff)** - Each version includes the exact config used at execution time
+
+## **Notes:**
+- Metrics are aggregated from execution records (not individual Delta paths)
+- `output_paths` lists all paths where data was written
+- `config_snapshot` contains the exact configuration used for each execution, enabling diff comparison
+- `size_bytes` and `num_files` show the total size and file count of the Delta table at each version
+"""
+)
+async def get_version_history(
+    config_id: int,
+    limit: int = Query(100, ge=1, le=1000, description="Maximum versions to return"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get Delta Lake version history for a config."""
+    try:
+        # Get config
+        result = await db.execute(
+            select(BronzePersistentConfig).where(
+                BronzePersistentConfig.id == config_id
+            )
+        )
+        config = result.scalar_one_or_none()
+        
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Persistent config {config_id} not found"
+            )
+        
+        # Get version history from execution records (aggregated metrics)
+        versioning_service = BronzeVersioningService(db)
+        history = await versioning_service.get_version_history(
+            config_id=config_id,
+            config_name=config.name,
+            limit=limit
+        )
+        
+        return history
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get version history: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to get version history: {str(e)}"
+        )
+
+
+@router.get(
+    "/configs/persistent/{config_id}/data",
+    response_model=BronzeDataQueryResponse,
+    summary="Query Bronze data with time travel",
+    description="""
+Query the Bronze Delta Lake table with optional time travel.
+
+You can query:
+- **Latest version** (default): No parameters needed
+- **Specific version**: Use `version` parameter
+- **Point in time**: Use `as_of_timestamp` parameter
+
+---
+
+## **Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `version` | int | null | Query specific version (0, 1, 2, ...) |
+| `as_of_timestamp` | string | null | Query as of timestamp (ISO format) |
+| `limit` | int | 1000 | Maximum rows to return (1-100000) |
+| `offset` | int | 0 | Rows to skip for pagination |
+| `path_index` | int | 0 | Index of output path to query. For federated configs (single `/unified/` path), use 0. For non-federated configs with multiple connection paths, specify which path (0, 1, 2...) |
+
+---
+
+## **Examples:**
+
+```bash
+# Latest data
+GET /api/bronze/configs/persistent/1/data
+
+# Specific version
+GET /api/bronze/configs/persistent/1/data?version=2
+
+# Point in time
+GET /api/bronze/configs/persistent/1/data?as_of_timestamp=2024-01-15T10:00:00Z
+
+# With pagination
+GET /api/bronze/configs/persistent/1/data?version=2&limit=100&offset=500
+
+# Query specific path for non-federated config
+GET /api/bronze/configs/persistent/1/data?path_index=1
+```
+
+---
+
+## **Response:**
+
+```json
+{
+  "config_id": 1,
+  "config_name": "patients_bronze",
+  "version": 2,
+  "columns": ["patient_id", "name", "cpf", "_source_table", "_ingestion_timestamp"],
+  "data": [
+    {"patient_id": 1, "name": "João Silva", "cpf": "123.456.789-00", ...},
+    ...
+  ],
+  "row_count": 100,
+  "total_rows": 10350,
+  "execution_time_seconds": 0.5
+}
+```
+
+---
+
+## **Notes:**
+- Output path is retrieved from the actual execution record (not constructed from config)
+- For federated configs (`enable_federated_joins=true`), there is a single `/unified/` path
+- For non-federated configs, each connection group has its own path (use `path_index` to select)
+"""
+)
+async def query_bronze_data(
+    config_id: int,
+    version: Optional[int] = Query(None, description="Query specific Delta version"),
+    as_of_timestamp: Optional[str] = Query(None, description="Query as of timestamp (ISO format)"),
+    limit: int = Query(1000, ge=1, le=100000, description="Maximum rows to return"),
+    offset: int = Query(0, ge=0, description="Rows to skip"),
+    path_index: int = Query(0, ge=0, description="Index of output path to query (for non-federated configs with multiple paths)"),
+    db: AsyncSession = Depends(get_db),
+):
+    """Query Bronze data with optional time travel."""
+    import time
+    start_time = time.time()
+    
+    try:
+        # Get config
+        result = await db.execute(
+            select(BronzePersistentConfig).where(
+                BronzePersistentConfig.id == config_id
+            )
+        )
+        config = result.scalar_one_or_none()
+        
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Persistent config {config_id} not found"
+            )
+        
+        # Get output path from the latest successful execution
+        # Note: We check for successful executions directly, not config.last_execution_status
+        # because the last execution might have failed but a previous one succeeded
+        # This is the actual path where data was written
+        execution_result = await db.execute(
+            select(BronzeExecution)
+            .where(
+                BronzeExecution.config_id == config_id,
+                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+            )
+            .order_by(BronzeExecution.started_at.desc())
+            .limit(1)
+        )
+        latest_execution = execution_result.scalar_one_or_none()
+        
+        if not latest_execution or not latest_execution.output_paths:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No successful execution found with output paths. Run execute first."
+            )
+        
+        # Get the output path from execution record
+        output_paths = latest_execution.output_paths
+        if path_index >= len(output_paths):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"path_index {path_index} is out of range. Available paths: {len(output_paths)} (0-{len(output_paths)-1})"
+            )
+        
+        output_path = output_paths[path_index]
+        
+        # Query using Spark
+        from ...services.spark_manager import SparkManager
+        spark_manager = SparkManager()
+        
+        versioning_service = BronzeVersioningService(db)
+        
+        with spark_manager.session_scope() as spark:
+            columns, data, total_rows = await versioning_service.query_at_version(
+                spark=spark,
+                output_path=output_path,
+                version=version,
+                timestamp=as_of_timestamp,
+                limit=limit,
+                offset=offset
+            )
+        
+        execution_time = time.time() - start_time
+        
+        # Parse timestamp if provided
+        parsed_timestamp = None
+        if as_of_timestamp:
+            try:
+                from datetime import datetime
+                parsed_timestamp = datetime.fromisoformat(as_of_timestamp.replace('Z', '+00:00'))
+            except:
+                pass
+        
+        return BronzeDataQueryResponse(
+            config_id=config_id,
+            config_name=config.name,
+            version=version,
+            as_of_timestamp=parsed_timestamp,
+            columns=columns,
+            data=data,
+            row_count=len(data),
+            total_rows=total_rows,
+            execution_time_seconds=round(execution_time, 3)
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to query Bronze data: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query Bronze data: {str(e)}"
         )

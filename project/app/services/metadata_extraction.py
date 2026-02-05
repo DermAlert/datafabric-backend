@@ -2,15 +2,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy import func
 from sqlalchemy.exc import IntegrityError
-import logging
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Optional
 from datetime import datetime
-import asyncio
 
 from ..database.database import get_db
 from ..database.core import core
 from ..database.metadata import metadata
 from ..utils.logger import logger
+from .credential_service import get_credential_service
 
 # Import generic Trino extractor
 from .extractors.trino_extractor import TrinoExtractor
@@ -239,8 +238,16 @@ async def extract_metadata(connection_id: int) -> bool:
                     # Progress: 0-5% - Setup
                     await _update_progress(db, connection, 2, "setup", "Creating Trino extractor...")
                     
+                    # SEGURANÇA: Descriptografar credenciais antes de usar
+                    credential_service = get_credential_service()
+                    decrypted_params = credential_service.decrypt_for_use(
+                        connection.connection_params,
+                        connection_id=connection.id,
+                        purpose="metadata_extraction"
+                    )
+                    
                     extractor = TrinoExtractor(
-                        connection_params=connection.connection_params,
+                        connection_params=decrypted_params,
                         connection_type=connection_type.name,
                         connection_name=connection.name,
                         connection_id=connection.id  # Pass ID for unique catalog name
@@ -274,28 +281,35 @@ async def extract_metadata(connection_id: int) -> bool:
                         cat_id = await _get_or_create_catalog(db, connection.id, cat_info)
                         catalog_map[cat_info["catalog_name"]] = cat_id
                     
-                    # Progress: 15-30% - Extract Schemas
-                    await _update_progress(db, connection, 15, "schemas", "Extracting schemas...")
+                    # Progress: 15-50% - Extract all metadata in parallel using Trino
+                    await _update_progress(db, connection, 15, "extracting", "Extracting metadata in parallel...")
                     
-                    schemas = await extractor.extract_schemas()
+                    # Use parallel extraction for better performance
+                    full_metadata = await extractor.extract_full_metadata()
+                    
+                    schemas = full_metadata["schemas"]
+                    schema_tables = full_metadata["tables"]
+                    all_columns = full_metadata["columns"]
+                    
                     total_schemas = len(schemas)
-                    logger.info(f"Extracted {total_schemas} schemas")
+                    total_tables = sum(len(tables) for tables in schema_tables.values())
+                    logger.info(f"Extracted {total_schemas} schemas, {total_tables} tables in parallel")
                     
-                    # Count total tables for progress calculation
-                    total_tables_estimate = total_schemas * 5  # Estimate avg 5 tables per schema
+                    await _update_progress(db, connection, 50, "storing", "Storing metadata in database...")
+                    
+                    # Now store everything in the database
                     tables_processed = 0
                     
-                    # Store schemas and tables
                     for schema_idx, schema_info in enumerate(schemas):
                         schema_name = schema_info["schema_name"]
                         catalog_name = schema_info.get("catalog_name")
                         catalog_id = catalog_map.get(catalog_name)
                         
-                        # Progress: 15-30% for schemas
-                        schema_progress = 15 + int((schema_idx + 1) / max(total_schemas, 1) * 15)  # 15-30%
+                        # Progress: 50-70% for schemas and tables
+                        schema_progress = 50 + int((schema_idx + 1) / max(total_schemas, 1) * 20)
                         await _update_progress(
-                            db, connection, schema_progress, "schemas",
-                            f"Processing schema: {schema_name}",
+                            db, connection, schema_progress, "storing",
+                            f"Storing schema: {schema_name}",
                             current_item=schema_name,
                             items_done=schema_idx + 1,
                             total_items=total_schemas
@@ -306,39 +320,20 @@ async def extract_metadata(connection_id: int) -> bool:
                             db, connection.id, catalog_id, schema_info
                         )
                         
-                        # Extract Tables for this schema
-                        tables = await extractor.extract_tables(schema_name)
-                        total_tables_in_schema = len(tables)
-                        logger.info(f"Extracted {total_tables_in_schema} tables for schema {schema_name}")
+                        # Get tables for this schema from pre-extracted data
+                        tables = schema_tables.get(schema_name, [])
                         
-                        # Update total estimate
-                        if schema_idx == 0 and total_tables_in_schema > 0:
-                            total_tables_estimate = total_schemas * total_tables_in_schema
-                        
-                        for table_idx, table_info in enumerate(tables):
+                        for table_info in tables:
                             tables_processed += 1
-                            
-                            # Progress: 30-70% for tables
-                            table_progress = 30 + int(tables_processed / max(total_tables_estimate, 1) * 40)  # 30-70%
-                            table_progress = min(table_progress, 70)
-                            
                             table_name = table_info["table_name"]
-                            await _update_progress(
-                                db, connection, table_progress, "tables",
-                                f"Processing table: {schema_name}.{table_name}",
-                                current_item=f"{schema_name}.{table_name}",
-                                items_done=tables_processed,
-                                total_items=total_tables_estimate
-                            )
                             
                             # Get or create table (handles race conditions)
                             table_obj = await _get_or_create_table(
                                 db, schema_obj.id, connection.id, table_info
                             )
                             
-                            # Extract Columns - Progress: 70-100%
-                            columns = await extractor.extract_columns(schema_name, table_name)
-                            total_columns = len(columns)
+                            # Get columns from pre-extracted data
+                            columns = all_columns.get((schema_name, table_name), [])
                             
                             # Get existing columns for this table
                             stmt_cols = select(metadata.ExternalColumn).where(
@@ -347,21 +342,8 @@ async def extract_metadata(connection_id: int) -> bool:
                             existing_cols = (await db.execute(stmt_cols)).scalars().all()
                             existing_col_map = {c.column_name: c for c in existing_cols}
                             
-                            for col_idx, col_info in enumerate(columns):
+                            for col_info in columns:
                                 col_name = col_info["column_name"]
-                                
-                                # Progress within columns (70-100% spread across all tables)
-                                # We update less frequently for columns to avoid too many commits
-                                if col_idx == 0 or col_idx == total_columns - 1:
-                                    col_progress = 70 + int(tables_processed / max(total_tables_estimate, 1) * 30)
-                                    col_progress = min(col_progress, 99)
-                                    await _update_progress(
-                                        db, connection, col_progress, "columns",
-                                        f"Processing columns for: {schema_name}.{table_name}",
-                                        current_item=f"{schema_name}.{table_name}",
-                                        items_done=col_idx + 1,
-                                        total_items=total_columns
-                                    )
                                 
                                 if col_name in existing_col_map:
                                     # Update existing column
@@ -408,6 +390,17 @@ async def extract_metadata(connection_id: int) -> bool:
                                         # Column already exists (race condition), skip
                                         await db.rollback()
                                         logger.debug(f"Column {col_name} already exists, skipping")
+                            
+                            # Progress: 70-99% for columns storage
+                            col_progress = 70 + int(tables_processed / max(total_tables, 1) * 29)
+                            col_progress = min(col_progress, 99)
+                            await _update_progress(
+                                db, connection, col_progress, "storing",
+                                f"Stored columns for: {schema_name}.{table_name}",
+                                current_item=f"{schema_name}.{table_name}",
+                                items_done=tables_processed,
+                                total_items=total_tables
+                            )
                             
                     # Complete!
                     connection.sync_status = "success"

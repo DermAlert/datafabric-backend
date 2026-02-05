@@ -96,6 +96,19 @@ class TransformStatusEnum(str, Enum):
     FAILED = "failed"
 
 
+class SilverWriteModeEnum(str, Enum):
+    """
+    Write mode for Silver Delta Lake operations.
+    
+    - **overwrite**: Replace all data each execution (legacy behavior)
+    - **append**: Add to existing data (may create duplicates)
+    - **merge**: Upsert based on merge_keys - insert new, update existing (recommended)
+    """
+    OVERWRITE = "overwrite"
+    APPEND = "append"
+    MERGE = "merge"
+
+
 # ==================== TABLE SELECTION ====================
 
 class TableColumnSelection(BaseModel):
@@ -417,13 +430,17 @@ class TransformConfigCreate(BaseModel):
     - column_group_ids: Semantic unification + value mappings from Equivalence
     - filters: Inline filter conditions
     
-    The system automatically resolves external_column_id to bronze_column_name
-    using BronzeColumnMapping.
+    Source Options:
+    - source_bronze_config_id: Reference to Bronze Persistent Config (RECOMMENDED)
+    - source_bronze_version: Optional specific Delta version to use from Bronze
+    
+    Write mode is always OVERWRITE. Delta Lake maintains version history automatically.
     """
     name: str = Field(..., min_length=1, max_length=255)
     description: Optional[str] = None
     
-    source_bronze_dataset_id: int = Field(..., description="Bronze dataset ID")
+    source_bronze_config_id: int = Field(..., description="Bronze Persistent Config ID")
+    source_bronze_version: Optional[int] = Field(None, description="Specific Bronze Delta version to read (null = latest)")
     
     silver_bucket: Optional[str] = Field(None, description="Output bucket (optional)")
     silver_path_prefix: Optional[str] = Field(None, description="Output path prefix")
@@ -452,13 +469,16 @@ class TransformConfigCreate(BaseModel):
         description="When True, excludes original source columns after semantic unification. "
                     "E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear in output."
     )
+    
+    # Write mode is always OVERWRITE (versioning fields deprecated)
 
 
 class TransformConfigUpdate(BaseModel):
     """Update a transform config."""
     name: Optional[str] = Field(None, min_length=1, max_length=255)
     description: Optional[str] = None
-    source_bronze_dataset_id: Optional[int] = None
+    source_bronze_config_id: Optional[int] = Field(None, description="Bronze Persistent Config ID")
+    source_bronze_version: Optional[int] = Field(None, description="Specific Bronze Delta version to read")
     silver_bucket: Optional[str] = None
     silver_path_prefix: Optional[str] = None
     column_group_ids: Optional[List[int]] = None
@@ -474,8 +494,16 @@ class TransformConfigResponse(BaseModel):
     id: int
     name: str
     description: Optional[str]
-    source_bronze_dataset_id: int
+    
+    # Source Bronze (new fields)
+    source_bronze_config_id: Optional[int] = None
+    source_bronze_config_name: Optional[str] = None
+    source_bronze_version: Optional[int] = None  # null = latest
+    
+    # LEGACY (deprecated)
+    source_bronze_dataset_id: Optional[int] = None
     source_bronze_dataset_name: Optional[str] = None
+    
     silver_bucket: Optional[str]
     silver_path_prefix: Optional[str]
     column_group_ids: Optional[List[int]]
@@ -483,6 +511,11 @@ class TransformConfigResponse(BaseModel):
     column_transformations: Optional[List[Dict[str, Any]]]
     image_labeling_config: Optional[Dict[str, Any]]
     exclude_unified_source_columns: bool = False
+    
+    # Versioning (always overwrite)
+    write_mode: str = "overwrite"
+    current_delta_version: Optional[int] = None
+    
     last_execution_time: Optional[datetime]
     last_execution_status: Optional[str]
     last_execution_rows: Optional[int]
@@ -515,6 +548,16 @@ class TransformExecuteResponse(BaseModel):
     output_path: str
     execution_time_seconds: float
     message: str
+    
+    # Delta Lake versioning info
+    delta_version: Optional[int] = None
+    write_mode_used: str = "overwrite"
+    
+    # Statistics
+    rows_inserted: Optional[int] = None
+    
+    # Config snapshot at execution time (for reproducibility)
+    config_snapshot: Optional[Dict[str, Any]] = None
 
 
 class TransformExecutionResponse(BaseModel):
@@ -529,4 +572,62 @@ class TransformExecutionResponse(BaseModel):
     output_path: Optional[str]
     error_message: Optional[str]
     
+    # Delta Lake versioning info
+    delta_version: Optional[int] = None
+    write_mode_used: Optional[str] = None
+    merge_keys_used: Optional[List[str]] = None
+    
+    # MERGE statistics
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    rows_deleted: Optional[int] = None
+    
+    # Config snapshot at execution time (for reproducibility)
+    config_snapshot: Optional[Dict[str, Any]] = None
+    
     model_config = {"from_attributes": True}
+
+
+# ==================== VERSION HISTORY ====================
+
+class SilverVersionInfo(BaseModel):
+    """Information about a single Silver Delta Lake version."""
+    version: int
+    timestamp: datetime
+    operation: str  # WRITE, MERGE, DELETE, etc.
+    execution_id: Optional[int] = None
+    
+    # Statistics
+    rows_inserted: Optional[int] = None
+    rows_updated: Optional[int] = None
+    rows_deleted: Optional[int] = None
+    total_rows: Optional[int] = None
+    
+    # Size info
+    num_files: Optional[int] = None
+    size_bytes: Optional[int] = None
+    
+    # Config snapshot at this version (for diff comparison)
+    config_snapshot: Optional[Dict[str, Any]] = None
+
+
+class SilverVersionHistoryResponse(BaseModel):
+    """Response for version history of a Silver config."""
+    config_id: int
+    config_name: str
+    current_version: Optional[int]
+    output_paths: List[str]  # All output paths (for consistency with Bronze)
+    versions: List[SilverVersionInfo]
+
+
+class SilverDataQueryResponse(BaseModel):
+    """Response for querying Silver data with optional time travel."""
+    config_id: int
+    config_name: str
+    version: Optional[int] = None  # null = latest
+    as_of_timestamp: Optional[datetime] = None
+    columns: List[str]
+    data: List[Dict[str, Any]]
+    row_count: int
+    total_rows: Optional[int] = None
+    execution_time_seconds: float

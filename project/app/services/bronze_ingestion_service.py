@@ -26,13 +26,14 @@ from sqlalchemy.future import select
 from sqlalchemy import and_
 from fastapi import HTTPException, status
 
-from ..database.core.core import DataConnection, Dataset
+from ..database.core.core import DataConnection, Dataset, ConnectionType
 from ..database.metadata.metadata import ExternalTables, ExternalColumn, ExternalSchema
 from ..database.metadata.relationships import (
     TableRelationship,
     RelationshipScope,
     RelationshipSource,
 )
+from ..services.credential_service import get_credential_service
 from ..database.datasets.bronze import (
     DatasetBronzeConfig,
     DatasetIngestionGroup,
@@ -62,7 +63,6 @@ from ..api.schemas.bronze_schemas import (
 )
 from .trino_manager import TrinoManager
 from minio import Minio
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +76,8 @@ class BronzeIngestionService:
         self.db = db
         self.trino = TrinoManager()
         self.bronze_bucket = os.getenv("BRONZE_BUCKET", "datafabric-bronze")
-        self.bronze_catalog = "bronze"
-        self.bronze_schema = "default"
+        self.bronze_catalog = os.getenv("BRONZE_CATALOG", "bronze")
+        self.bronze_schema = os.getenv("BRONZE_SCHEMA", "default")
         
         # Ensure bronze infrastructure exists
         self._ensure_bronze_bucket()
@@ -86,16 +86,13 @@ class BronzeIngestionService:
     def _ensure_bronze_bucket(self):
         """Create the bronze bucket if it doesn't exist"""
         try:
-            endpoint = os.getenv("INTERNAL_S3_ENDPOINT", "http://minio:9000")
-            access_key = os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio"))
-            secret_key = os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123"))
-            
-            parsed = urlparse(endpoint)
-            endpoint_host = parsed.netloc if parsed.netloc else parsed.path
-            secure = parsed.scheme == "https"
+            endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+            access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
+            secret_key = os.getenv("MINIO_SECRET_KEY", "minio123")
+            secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
             
             client = Minio(
-                endpoint=endpoint_host,
+                endpoint=endpoint,
                 access_key=access_key,
                 secret_key=secret_key,
                 secure=secure
@@ -158,6 +155,70 @@ class BronzeIngestionService:
             asyncio.run(self._ensure_bronze_schema_async())
             self._bronze_schema_ensured = True
     
+    async def _ensure_source_catalogs_exist(self, connection_ids: List[int]) -> Dict[int, bool]:
+        """
+        Ensure all source catalogs exist in Trino before executing queries.
+        
+        With catalog.store=memory, catalogs are volatile and need to be
+        recreated when Trino restarts. This method ensures all required
+        source catalogs exist before running Bronze queries.
+        
+        Args:
+            connection_ids: List of connection IDs to ensure catalogs for
+            
+        Returns:
+            Dict mapping connection_id to success status
+        """
+        if not connection_ids:
+            return {}
+        
+        # Remove duplicates
+        unique_ids = list(set(connection_ids))
+        
+        # Fetch connection details with their types
+        query = select(
+            DataConnection.id,
+            DataConnection.name,
+            DataConnection.connection_params,
+            ConnectionType.name.label('type_name')
+        ).join(
+            ConnectionType, DataConnection.connection_type_id == ConnectionType.id
+        ).where(
+            DataConnection.id.in_(unique_ids)
+        )
+        
+        result = await self.db.execute(query)
+        connections = result.fetchall()
+        
+        results = {}
+        credential_service = get_credential_service()
+        
+        for conn in connections:
+            try:
+                # SEGURANÇA: Descriptografar credenciais para uso no Trino
+                decrypted_params = credential_service.decrypt_for_use(
+                    conn.connection_params,
+                    connection_id=conn.id,
+                    purpose="bronze_ingestion_catalog_creation"
+                )
+                
+                success = await self.trino.ensure_catalog_exists_async(
+                    connection_name=conn.name,
+                    connection_type=conn.type_name,
+                    params=decrypted_params,
+                    connection_id=conn.id
+                )
+                results[conn.id] = success
+                if success:
+                    logger.info(f"Ensured catalog exists for connection '{conn.name}' (id={conn.id})")
+                else:
+                    logger.warning(f"Failed to ensure catalog for connection '{conn.name}' (id={conn.id})")
+            except Exception as e:
+                logger.error(f"Error ensuring catalog for connection '{conn.name}' (id={conn.id}): {e}")
+                results[conn.id] = False
+        
+        return results
+
     def _get_dataset_folder_name(self, dataset_name: str, dataset_id: Optional[int] = None) -> str:
         """
         Generate dataset folder name in format: {id}-{name}
@@ -409,6 +470,16 @@ class BronzeIngestionService:
         # Generate plan if not provided
         if not preview:
             preview = await self.generate_ingestion_plan(dataset_data)
+        
+        # Ensure all source catalogs exist before executing queries
+        # With catalog.store=memory, catalogs are volatile and need to be recreated
+        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        if connection_ids:
+            logger.info(f"Ensuring source catalogs exist for connection_ids: {connection_ids}")
+            catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
+            failed_catalogs = [cid for cid, success in catalog_results.items() if not success]
+            if failed_catalogs:
+                logger.warning(f"Some catalogs could not be created: {failed_catalogs}")
         
         # Step 1: Create Dataset record
         dataset = Dataset(
@@ -1709,10 +1780,10 @@ AS
             
             # Create MinIO client for Bronze bucket
             bronze_minio = Minio(
-                endpoint=os.getenv("INTERNAL_S3_ENDPOINT", "minio:9000").replace("http://", "").replace("https://", ""),
-                access_key=os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio")),
-                secret_key=os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123")),
-                secure=False
+                endpoint=os.getenv("MINIO_ENDPOINT", "minio:9000"),
+                access_key=os.getenv("MINIO_ACCESS_KEY", "minio"),
+                secret_key=os.getenv("MINIO_SECRET_KEY", "minio123"),
+                secure=os.getenv("MINIO_SECURE", "false").lower() == "true"
             )
             
             # Ensure Bronze bucket exists
@@ -2110,6 +2181,16 @@ AS
         # Generate the plan (this gives us the SQL for each group)
         preview = await self.generate_ingestion_plan_simplified(dataset_data)
         
+        # Ensure all source catalogs exist before executing queries
+        # With catalog.store=memory, catalogs are volatile and need to be recreated
+        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        if connection_ids:
+            logger.info(f"Ensuring source catalogs exist for virtualized query: {connection_ids}")
+            catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
+            failed_catalogs = [cid for cid, success in catalog_results.items() if not success]
+            if failed_catalogs:
+                warnings.append(f"Some catalogs could not be created: {failed_catalogs}")
+        
         # Execute each group's SQL and collect results
         group_results = []
         total_rows = 0
@@ -2219,4 +2300,200 @@ AS
         except Exception as e:
             logger.error(f"Virtualized query failed: {str(e)}")
             raise
+    
+    async def execute_persistent_config_with_versioning(
+        self,
+        config_id: int,
+        config_name: str,
+        tables: List[TableColumnSelection],
+        relationship_ids: Optional[List[int]],
+        enable_federated_joins: bool,
+        output_format: str,
+        output_bucket: Optional[str],
+        output_path_prefix: Optional[str],
+        partition_columns: Optional[List[str]],
+        properties: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Execute a persistent config with proper Delta Lake versioning using Spark.
+        
+        Uses OVERWRITE mode for simplicity. Delta Lake maintains version history
+        automatically for time travel.
+        
+        Args:
+            config_id: The persistent config ID (used for consistent path)
+            config_name: Config name
+            tables: Table/column selections
+            relationship_ids: Optional relationship filter
+            enable_federated_joins: Whether to use federated joins
+            output_format: Output format (delta/parquet)
+            output_bucket: Optional bucket override
+            output_path_prefix: Optional path prefix override
+            partition_columns: Optional partition columns
+            properties: Additional properties
+            
+        Returns:
+            Dict with execution results including versioning info
+        """
+        from .spark_manager import SparkManager
+        from .bronze_versioning_service import BronzeVersioningService
+        from pyspark.sql.types import StructType, StructField, StringType, IntegerType, LongType, DoubleType, BooleanType, TimestampType, DateType
+        
+        start_time = datetime.now()
+        
+        # Build consistent output path based on config_id (not dataset_id)
+        bucket = output_bucket or self.bronze_bucket
+        if output_path_prefix:
+            base_path = f"s3a://{bucket}/{output_path_prefix}"
+        else:
+            base_path = f"s3a://{bucket}/{config_id}-{config_name}"
+        
+        # Generate SQL for data extraction
+        dataset_data = DatasetBronzeCreateRequest(
+            name=config_name,
+            tables=tables,
+            relationship_ids=relationship_ids,
+            enable_federated_joins=enable_federated_joins
+        )
+        
+        preview = await self.generate_ingestion_plan_simplified(dataset_data)
+        
+        # Ensure all source catalogs exist before executing queries
+        # With catalog.store=memory, catalogs are volatile and need to be recreated
+        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        if connection_ids:
+            logger.info(f"Ensuring source catalogs exist for connection_ids: {connection_ids}")
+            catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
+            failed_catalogs = [cid for cid, success in catalog_results.items() if not success]
+            if failed_catalogs:
+                logger.warning(f"Some catalogs could not be created: {failed_catalogs}")
+        
+        group_results = []
+        total_rows = 0
+        versioning_stats = {
+            'delta_version': None,
+            'rows_inserted': None,
+            'rows_updated': None,
+            'rows_deleted': None,
+            'size_bytes': None,
+            'num_files': None,
+        }
+        
+        # Initialize Spark
+        spark_manager = SparkManager()
+        versioning_service = BronzeVersioningService(self.db)
+        
+        try:
+            spark = spark_manager.get_or_create_session()
+            
+            for i, group_preview in enumerate(preview.ingestion_groups):
+                group_start = datetime.now()
+                
+                # Determine this group's output path
+                if enable_federated_joins:
+                    group_output_path = f"{base_path}/unified/"
+                elif len(preview.ingestion_groups) == 1:
+                    group_output_path = f"{base_path}/"
+                else:
+                    group_output_path = f"{base_path}/part_{group_preview.connection_name}/"
+                
+                try:
+                    # Execute the SELECT SQL via Trino (using aiotrino) to get data
+                    select_sql = group_preview.estimated_sql
+                    logger.info(f"Executing Trino query for group {group_preview.group_name}:\n{select_sql}")
+                    
+                    # Fetch data via Trino using existing async method
+                    data, columns = await self._execute_virtualized_query(select_sql)
+                    
+                    rows_in_batch = len(data)
+                    logger.info(f"Fetched {rows_in_batch} rows from Trino for group {group_preview.group_name}")
+                    
+                    if rows_in_batch == 0:
+                        logger.warning(f"No data returned from Trino for group {group_preview.group_name}")
+                        group_results.append(IngestionGroupResult(
+                            group_name=group_preview.group_name,
+                            connection_name=group_preview.connection_name,
+                            status=IngestionStatusEnum.SUCCESS,
+                            output_path=group_output_path,
+                            rows_ingested=0,
+                            execution_time_seconds=(datetime.now() - group_start).total_seconds()
+                        ))
+                        continue
+                    
+                    # Convert Python data to Spark DataFrame
+                    # Infer schema from first row
+                    df = spark.createDataFrame(data)
+                    
+                    logger.info(f"Created Spark DataFrame with {df.count()} rows and schema: {df.schema}")
+                    
+                    # Write to Delta Lake (always overwrite)
+                    stats = await versioning_service.execute_overwrite(
+                        spark=spark,
+                        source_df=df,
+                        output_path=group_output_path
+                    )
+                    
+                    # Update versioning stats (aggregate across all groups)
+                    versioning_stats['delta_version'] = stats.get('delta_version')
+                    versioning_stats['rows_inserted'] = (versioning_stats.get('rows_inserted') or 0) + (stats.get('rows_inserted') or 0)
+                    versioning_stats['rows_updated'] = (versioning_stats.get('rows_updated') or 0) + (stats.get('rows_updated') or 0)
+                    versioning_stats['rows_deleted'] = (versioning_stats.get('rows_deleted') or 0) + (stats.get('rows_deleted') or 0)
+                    versioning_stats['size_bytes'] = (versioning_stats.get('size_bytes') or 0) + (stats.get('size_bytes') or 0)
+                    versioning_stats['num_files'] = (versioning_stats.get('num_files') or 0) + (stats.get('num_files') or 0)
+                    
+                    group_results.append(IngestionGroupResult(
+                        group_name=group_preview.group_name,
+                        connection_name=group_preview.connection_name,
+                        status=IngestionStatusEnum.SUCCESS,
+                        output_path=group_output_path,
+                        rows_ingested=stats.get('total_rows', rows_in_batch),
+                        execution_time_seconds=(datetime.now() - group_start).total_seconds()
+                    ))
+                    
+                    total_rows += stats.get('total_rows', rows_in_batch)
+                    
+                except Exception as e:
+                    logger.error(f"Failed to execute group {group_preview.group_name}: {str(e)}")
+                    import traceback
+                    logger.error(traceback.format_exc())
+                    group_results.append(IngestionGroupResult(
+                        group_name=group_preview.group_name,
+                        connection_name=group_preview.connection_name,
+                        status=IngestionStatusEnum.FAILED,
+                        error_message=str(e),
+                        execution_time_seconds=(datetime.now() - group_start).total_seconds()
+                    ))
+            
+        finally:
+            # Don't stop the Spark session - it may be shared
+            pass
+        
+        # Determine overall status
+        success_count = sum(1 for g in group_results if g.status == IngestionStatusEnum.SUCCESS)
+        if success_count == len(group_results):
+            final_status = IngestionStatusEnum.SUCCESS
+            message = f"Bronze ingestion completed successfully. {total_rows} rows ingested."
+        elif success_count > 0:
+            final_status = IngestionStatusEnum.PARTIAL
+            message = f"Bronze ingestion partially completed. {total_rows} rows ingested."
+        else:
+            final_status = IngestionStatusEnum.FAILED
+            message = "Bronze ingestion failed."
+        
+        return {
+            'status': final_status,
+            'groups': group_results,
+            'total_rows_ingested': total_rows,
+            'bronze_paths': [g.output_path for g in group_results if g.status == IngestionStatusEnum.SUCCESS],
+            'execution_time_seconds': (datetime.now() - start_time).total_seconds(),
+            'message': message,
+            'delta_version': versioning_stats.get('delta_version'),
+            'write_mode_used': 'overwrite',
+            'merge_keys_used': None,
+            'rows_inserted': versioning_stats.get('rows_inserted'),
+            'rows_updated': versioning_stats.get('rows_updated'),
+            'rows_deleted': versioning_stats.get('rows_deleted'),
+            'size_bytes': versioning_stats.get('size_bytes'),
+            'num_files': versioning_stats.get('num_files'),
+        }
 
