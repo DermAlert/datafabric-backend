@@ -17,6 +17,7 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy.orm import aliased
 from sqlalchemy import and_, or_, func, text
 from fastapi import HTTPException, status
 
@@ -650,9 +651,20 @@ class RelationshipDiscoveryService:
             )
         
         if connection_id:
-            # Need to join with tables to filter by connection
-            # For simplicity, we'll do this in memory for now
-            pass
+            LeftTable = aliased(ExternalTables)
+            RightTable = aliased(ExternalTables)
+            
+            query = query.join(LeftTable, TableRelationship.left_table_id == LeftTable.id)
+            query = query.join(RightTable, TableRelationship.right_table_id == RightTable.id)
+            count_query = count_query.join(LeftTable, TableRelationship.left_table_id == LeftTable.id)
+            count_query = count_query.join(RightTable, TableRelationship.right_table_id == RightTable.id)
+            
+            filters.append(
+                or_(
+                    LeftTable.connection_id == connection_id,
+                    RightTable.connection_id == connection_id
+                )
+            )
         
         if filters:
             query = query.where(and_(*filters))
@@ -868,6 +880,22 @@ class RelationshipDiscoveryService:
                 or_(
                     RelationshipSuggestion.left_table_id == table_id,
                     RelationshipSuggestion.right_table_id == table_id
+                )
+            )
+            
+        if connection_id:
+            LeftTable = aliased(ExternalTables)
+            RightTable = aliased(ExternalTables)
+            
+            query = query.join(LeftTable, RelationshipSuggestion.left_table_id == LeftTable.id)
+            query = query.join(RightTable, RelationshipSuggestion.right_table_id == RightTable.id)
+            count_query = count_query.join(LeftTable, RelationshipSuggestion.left_table_id == LeftTable.id)
+            count_query = count_query.join(RightTable, RelationshipSuggestion.right_table_id == RightTable.id)
+            
+            filters.append(
+                or_(
+                    LeftTable.connection_id == connection_id,
+                    RightTable.connection_id == connection_id
                 )
             )
         

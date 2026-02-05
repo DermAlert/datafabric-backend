@@ -606,6 +606,9 @@ class SilverVersionInfo(BaseModel):
     # Size info
     num_files: Optional[int] = None
     size_bytes: Optional[int] = None
+    
+    # Config snapshot at this version (for diff comparison)
+    config_snapshot: Optional[Dict[str, Any]] = None
 
 
 class SilverVersionHistoryResponse(BaseModel):
@@ -613,7 +616,7 @@ class SilverVersionHistoryResponse(BaseModel):
     config_id: int
     config_name: str
     current_version: Optional[int]
-    output_path: str
+    output_paths: List[str]  # All output paths (for consistency with Bronze)
     versions: List[SilverVersionInfo]
 
 

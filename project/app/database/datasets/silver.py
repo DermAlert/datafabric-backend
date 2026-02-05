@@ -54,7 +54,7 @@ class NormalizationRule(AuditMixin, Base):
     Can be used with templates (like {d3}.{d3}.{d3}-{d2} for CPF)
     or with regex patterns for SQL-based transformations.
     """
-    __tablename__ = "normalization_rules"
+    __tablename__ = "silver_normalization_rules"
     __table_args__ = (
         UniqueConstraint('name'),
         {'schema': 'datasets'}
@@ -112,7 +112,7 @@ class VirtualizedConfig(AuditMixin, Base):
     column_transformations is for text transformations (lowercase, trim, etc.)
     and normalization rules (template). For value mappings, use /api/equivalence.
     """
-    __tablename__ = "virtualized_configs"
+    __tablename__ = "silver_virtualized_configs"
     __table_args__ = (
         UniqueConstraint('name'),
         {'schema': 'datasets'}
@@ -178,7 +178,7 @@ class TransformConfig(AuditMixin, Base):
     Write mode is always OVERWRITE for simplicity and reliability.
     Delta Lake maintains version history automatically.
     """
-    __tablename__ = "transform_configs"
+    __tablename__ = "silver_persistent_configs"
     __table_args__ = (
         UniqueConstraint('name'),
         {'schema': 'datasets'}
@@ -257,11 +257,11 @@ class TransformExecution(AuditMixin, Base):
     
     Tracks each execution including versioning info and merge statistics.
     """
-    __tablename__ = "transform_executions"
+    __tablename__ = "silver_executions"
     __table_args__ = {'schema': 'datasets'}
 
     id = Column(Integer, primary_key=True)
-    config_id = Column(Integer, ForeignKey('datasets.transform_configs.id', ondelete='CASCADE'), nullable=False)
+    config_id = Column(Integer, ForeignKey('datasets.silver_persistent_configs.id', ondelete='CASCADE'), nullable=False)
     
     status = Column(SQLEnum(TransformStatus), nullable=False, default=TransformStatus.PENDING)
     started_at = Column(TIMESTAMP(timezone=True), nullable=True)

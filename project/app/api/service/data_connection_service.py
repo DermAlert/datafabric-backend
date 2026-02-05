@@ -13,6 +13,7 @@ from app.database.core import core
 from app.services.connection_manager import test_connection
 from app.utils.connection_validators import validate_metadata_connection
 from app.services.airflow_client import get_airflow_client
+from app.services.credential_service import get_credential_service
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +35,20 @@ class DataConnectionService:
         ct = await self.db_service.scalars_first(stmt_ct)
         if not ct:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Connection type not found")
-        obj = core.DataConnection(**data.model_dump())
+        
+        # SEGURANÇA: Criptografar credenciais antes de salvar
+        credential_service = get_credential_service()
+        data_dict = data.model_dump()
+        
+        if data_dict.get("connection_params"):
+            data_dict["connection_params"] = credential_service.encrypt_for_storage(
+                data_dict["connection_params"],
+                connection_type=ct.name,
+                connection_id=None  # ID ainda não existe
+            )
+            logger.info(f"[DataConnectionService] Credentials encrypted for new connection '{data.name}'")
+        
+        obj = core.DataConnection(**data_dict)
         self.db.add(obj)
         await self.db.commit()
         await self.db.refresh(obj)
@@ -78,7 +92,25 @@ class DataConnectionService:
             if existing:
                 raise HTTPException(status_code=status.HTTP_409_CONFLICT,
                                     detail=f"Connection with name '{data.name}' already exists in this organization")
-        for attr, value in data.model_dump(exclude_unset=True).items():
+        
+        # SEGURANÇA: Criptografar credenciais se estiverem sendo atualizadas
+        data_dict = data.model_dump(exclude_unset=True)
+        
+        if "connection_params" in data_dict and data_dict["connection_params"]:
+            # Buscar tipo de conexão para criptografia adequada
+            stmt_ct = select(core.ConnectionType).where(core.ConnectionType.id == obj.connection_type_id)
+            ct = await self.db_service.scalars_first(stmt_ct)
+            connection_type = ct.name if ct else "unknown"
+            
+            credential_service = get_credential_service()
+            data_dict["connection_params"] = credential_service.encrypt_for_storage(
+                data_dict["connection_params"],
+                connection_type=connection_type,
+                connection_id=id
+            )
+            logger.info(f"[DataConnectionService] Credentials encrypted for connection update id={id}")
+        
+        for attr, value in data_dict.items():
             if value is not None:
                 setattr(obj, attr, value)
         await self.db.commit()
@@ -115,18 +147,26 @@ class DataConnectionService:
         
         Args:
             connection_type_id: ID do tipo de conexão
-            connection_params: Parâmetros da conexão
+            connection_params: Parâmetros da conexão (podem estar criptografados)
             context: Contexto para logging (ex: "id=5" ou "params only")
         """
         ct = await self._get_connection_type(connection_type_id)
         
+        # SEGURANÇA: Descriptografar credenciais para teste
+        credential_service = get_credential_service()
+        decrypted_params = credential_service.decrypt_for_use(
+            connection_params,
+            purpose="connection_test"
+        )
+        
         logger.info(f"[DataConnectionService] Testing connection {context}")
         logger.info(f"[DataConnectionService] Connection type: {ct.name}")
-        logger.info(f"[DataConnectionService] Params (masked): {self._mask_sensitive_params(connection_params)}")
+        # SEGURANÇA: Usar mascaramento centralizado
+        logger.info(f"[DataConnectionService] Params (masked): {credential_service.mask_for_logging(decrypted_params, ct.name)}")
         
         success, message, details = await test_connection(
             connection_type=ct.name,
-            connection_params=connection_params
+            connection_params=decrypted_params
         )
         
         return ConnectionTestResult(success=success, message=message, details=details)

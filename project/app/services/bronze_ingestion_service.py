@@ -26,13 +26,14 @@ from sqlalchemy.future import select
 from sqlalchemy import and_
 from fastapi import HTTPException, status
 
-from ..database.core.core import DataConnection, Dataset
+from ..database.core.core import DataConnection, Dataset, ConnectionType
 from ..database.metadata.metadata import ExternalTables, ExternalColumn, ExternalSchema
 from ..database.metadata.relationships import (
     TableRelationship,
     RelationshipScope,
     RelationshipSource,
 )
+from ..services.credential_service import get_credential_service
 from ..database.datasets.bronze import (
     DatasetBronzeConfig,
     DatasetIngestionGroup,
@@ -62,7 +63,6 @@ from ..api.schemas.bronze_schemas import (
 )
 from .trino_manager import TrinoManager
 from minio import Minio
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -76,8 +76,8 @@ class BronzeIngestionService:
         self.db = db
         self.trino = TrinoManager()
         self.bronze_bucket = os.getenv("BRONZE_BUCKET", "datafabric-bronze")
-        self.bronze_catalog = "bronze"
-        self.bronze_schema = "default"
+        self.bronze_catalog = os.getenv("BRONZE_CATALOG", "bronze")
+        self.bronze_schema = os.getenv("BRONZE_SCHEMA", "default")
         
         # Ensure bronze infrastructure exists
         self._ensure_bronze_bucket()
@@ -86,16 +86,13 @@ class BronzeIngestionService:
     def _ensure_bronze_bucket(self):
         """Create the bronze bucket if it doesn't exist"""
         try:
-            endpoint = os.getenv("INTERNAL_S3_ENDPOINT", "http://minio:9000")
-            access_key = os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio"))
-            secret_key = os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123"))
-            
-            parsed = urlparse(endpoint)
-            endpoint_host = parsed.netloc if parsed.netloc else parsed.path
-            secure = parsed.scheme == "https"
+            endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+            access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
+            secret_key = os.getenv("MINIO_SECRET_KEY", "minio123")
+            secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
             
             client = Minio(
-                endpoint=endpoint_host,
+                endpoint=endpoint,
                 access_key=access_key,
                 secret_key=secret_key,
                 secure=secure
@@ -158,6 +155,70 @@ class BronzeIngestionService:
             asyncio.run(self._ensure_bronze_schema_async())
             self._bronze_schema_ensured = True
     
+    async def _ensure_source_catalogs_exist(self, connection_ids: List[int]) -> Dict[int, bool]:
+        """
+        Ensure all source catalogs exist in Trino before executing queries.
+        
+        With catalog.store=memory, catalogs are volatile and need to be
+        recreated when Trino restarts. This method ensures all required
+        source catalogs exist before running Bronze queries.
+        
+        Args:
+            connection_ids: List of connection IDs to ensure catalogs for
+            
+        Returns:
+            Dict mapping connection_id to success status
+        """
+        if not connection_ids:
+            return {}
+        
+        # Remove duplicates
+        unique_ids = list(set(connection_ids))
+        
+        # Fetch connection details with their types
+        query = select(
+            DataConnection.id,
+            DataConnection.name,
+            DataConnection.connection_params,
+            ConnectionType.name.label('type_name')
+        ).join(
+            ConnectionType, DataConnection.connection_type_id == ConnectionType.id
+        ).where(
+            DataConnection.id.in_(unique_ids)
+        )
+        
+        result = await self.db.execute(query)
+        connections = result.fetchall()
+        
+        results = {}
+        credential_service = get_credential_service()
+        
+        for conn in connections:
+            try:
+                # SEGURANÇA: Descriptografar credenciais para uso no Trino
+                decrypted_params = credential_service.decrypt_for_use(
+                    conn.connection_params,
+                    connection_id=conn.id,
+                    purpose="bronze_ingestion_catalog_creation"
+                )
+                
+                success = await self.trino.ensure_catalog_exists_async(
+                    connection_name=conn.name,
+                    connection_type=conn.type_name,
+                    params=decrypted_params,
+                    connection_id=conn.id
+                )
+                results[conn.id] = success
+                if success:
+                    logger.info(f"Ensured catalog exists for connection '{conn.name}' (id={conn.id})")
+                else:
+                    logger.warning(f"Failed to ensure catalog for connection '{conn.name}' (id={conn.id})")
+            except Exception as e:
+                logger.error(f"Error ensuring catalog for connection '{conn.name}' (id={conn.id}): {e}")
+                results[conn.id] = False
+        
+        return results
+
     def _get_dataset_folder_name(self, dataset_name: str, dataset_id: Optional[int] = None) -> str:
         """
         Generate dataset folder name in format: {id}-{name}
@@ -409,6 +470,16 @@ class BronzeIngestionService:
         # Generate plan if not provided
         if not preview:
             preview = await self.generate_ingestion_plan(dataset_data)
+        
+        # Ensure all source catalogs exist before executing queries
+        # With catalog.store=memory, catalogs are volatile and need to be recreated
+        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        if connection_ids:
+            logger.info(f"Ensuring source catalogs exist for connection_ids: {connection_ids}")
+            catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
+            failed_catalogs = [cid for cid, success in catalog_results.items() if not success]
+            if failed_catalogs:
+                logger.warning(f"Some catalogs could not be created: {failed_catalogs}")
         
         # Step 1: Create Dataset record
         dataset = Dataset(
@@ -1709,10 +1780,10 @@ AS
             
             # Create MinIO client for Bronze bucket
             bronze_minio = Minio(
-                endpoint=os.getenv("INTERNAL_S3_ENDPOINT", "minio:9000").replace("http://", "").replace("https://", ""),
-                access_key=os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio")),
-                secret_key=os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123")),
-                secure=False
+                endpoint=os.getenv("MINIO_ENDPOINT", "minio:9000"),
+                access_key=os.getenv("MINIO_ACCESS_KEY", "minio"),
+                secret_key=os.getenv("MINIO_SECRET_KEY", "minio123"),
+                secure=os.getenv("MINIO_SECURE", "false").lower() == "true"
             )
             
             # Ensure Bronze bucket exists
@@ -2110,6 +2181,16 @@ AS
         # Generate the plan (this gives us the SQL for each group)
         preview = await self.generate_ingestion_plan_simplified(dataset_data)
         
+        # Ensure all source catalogs exist before executing queries
+        # With catalog.store=memory, catalogs are volatile and need to be recreated
+        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        if connection_ids:
+            logger.info(f"Ensuring source catalogs exist for virtualized query: {connection_ids}")
+            catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
+            failed_catalogs = [cid for cid, success in catalog_results.items() if not success]
+            if failed_catalogs:
+                warnings.append(f"Some catalogs could not be created: {failed_catalogs}")
+        
         # Execute each group's SQL and collect results
         group_results = []
         total_rows = 0
@@ -2276,6 +2357,16 @@ AS
         )
         
         preview = await self.generate_ingestion_plan_simplified(dataset_data)
+        
+        # Ensure all source catalogs exist before executing queries
+        # With catalog.store=memory, catalogs are volatile and need to be recreated
+        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        if connection_ids:
+            logger.info(f"Ensuring source catalogs exist for connection_ids: {connection_ids}")
+            catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
+            failed_catalogs = [cid for cid, success in catalog_results.items() if not success]
+            if failed_catalogs:
+                logger.warning(f"Some catalogs could not be created: {failed_catalogs}")
         
         group_results = []
         total_rows = 0

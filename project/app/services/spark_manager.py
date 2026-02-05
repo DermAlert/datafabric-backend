@@ -59,9 +59,10 @@ class SparkManager:
         self.app_name = os.getenv("SPARK_APP_NAME", "DataFabric-Silver")
         
         # S3/MinIO configuration
-        self.s3_endpoint = os.getenv("INTERNAL_S3_ENDPOINT", "http://minio:9000")
-        self.s3_access_key = os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio"))
-        self.s3_secret_key = os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123"))
+        minio_endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+        self.s3_endpoint = f"http://{minio_endpoint}" if not minio_endpoint.startswith(('http://', 'https://')) else minio_endpoint
+        self.s3_access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
+        self.s3_secret_key = os.getenv("MINIO_SECRET_KEY", "minio123")
         self.s3_region = os.getenv("AWS_REGION", "us-east-1")
         
         # Buckets

@@ -1,10 +1,10 @@
 import os
 import asyncio
 from typing import Dict, Any, Optional
-from urllib.parse import urlparse
 import aiotrino
 from minio import Minio
 from ..utils.logger import logger
+from ..services.credential_service import get_credential_service
 
 
 class TrinoManager:
@@ -19,11 +19,12 @@ class TrinoManager:
         self.user = os.getenv("TRINO_USER", "admin")
         self.catalog = "system"  # Start with system catalog to manage others
         
-        # Internal MinIO/S3 config for storing metastore data
+        # MinIO/S3 config for storing metastore data
         self.internal_metastore_bucket = os.getenv("INTERNAL_METASTORE_BUCKET", "datafabric-metastore/")
-        self.internal_s3_endpoint = os.getenv("INTERNAL_S3_ENDPOINT", "http://minio:9000")
-        self.internal_s3_access_key = os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio"))
-        self.internal_s3_secret_key = os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123"))
+        self.minio_endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+        self.minio_access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
+        self.minio_secret_key = os.getenv("MINIO_SECRET_KEY", "minio123")
+        self.minio_secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
         
         # Ensure internal metastore bucket exists (sync operation at init)
         self._ensure_internal_metastore_bucket()
@@ -31,15 +32,11 @@ class TrinoManager:
     def _ensure_internal_metastore_bucket(self):
         """Create the internal metastore bucket if it doesn't exist"""
         try:
-            parsed = urlparse(self.internal_s3_endpoint)
-            endpoint = parsed.netloc if parsed.netloc else parsed.path
-            secure = parsed.scheme == "https"
-            
             client = Minio(
-                endpoint=endpoint,
-                access_key=self.internal_s3_access_key,
-                secret_key=self.internal_s3_secret_key,
-                secure=secure
+                endpoint=self.minio_endpoint,
+                access_key=self.minio_access_key,
+                secret_key=self.minio_secret_key,
+                secure=self.minio_secure
             )
             
             if not client.bucket_exists(self.internal_metastore_bucket):
@@ -77,10 +74,22 @@ class TrinoManager:
     def get_catalog_properties(self, connection_type: str, params: Dict[str, Any]) -> Dict[str, str]:
         """
         Maps connection parameters to Trino connector properties.
+        
+        SECURITY: Este método recebe parâmetros descriptografados.
+        As credenciais são descriptografadas sob demanda pelo CredentialService.
         """
         connection_type = connection_type.lower()
+        credential_service = get_credential_service()
+        
+        # Descriptografa credenciais se estiverem criptografadas
+        decrypted_params = credential_service.decrypt_for_use(
+            params, 
+            purpose="trino_catalog_creation"
+        )
+        params = decrypted_params
         
         logger.info(f"[TrinoManager] Getting catalog properties for type: {connection_type}")
+        # SEGURANÇA: Nunca logar valores de parâmetros, apenas as chaves
         logger.info(f"[TrinoManager] Input params keys: {list(params.keys())}")
         
         if connection_type in ["postgresql", "postgres"]:
@@ -121,13 +130,14 @@ class TrinoManager:
             
             if access_key:
                 props["s3.aws-access-key"] = access_key
-                logger.info(f"[TrinoManager] Mapped access_key: {access_key[:4]}***")
+                # SEGURANÇA: Não logar credenciais, nem parcialmente
+                logger.info(f"[TrinoManager] S3 access_key configured: [REDACTED]")
             if secret_key:
                 props["s3.aws-secret-key"] = secret_key
-                logger.info(f"[TrinoManager] Mapped secret_key: ***")
+                logger.info(f"[TrinoManager] S3 secret_key configured: [REDACTED]")
             if endpoint:
                 props["s3.endpoint"] = endpoint
-                logger.info(f"[TrinoManager] Mapped endpoint: {endpoint}")
+                logger.info(f"[TrinoManager] S3 endpoint configured: {endpoint}")
             
             logger.info(f"[TrinoManager] Final Delta catalog properties keys: {list(props.keys())}")
             
@@ -197,18 +207,16 @@ class TrinoManager:
             result = await cur.fetchall()
             
             if result:
-                # Catalog exists - drop and recreate to ensure fresh config
-                logger.info(f"Dropping existing catalog '{catalog_name}' to recreate with new config")
-                try:
-                    await cur.execute(f"DROP CATALOG \"{catalog_name}\"")
-                    await cur.fetchall()  # Consume result
-                except Exception as drop_error:
-                    logger.warning(f"Could not drop catalog {catalog_name}: {drop_error}")
+                # Catalog already exists - no need to recreate
+                # With catalog.store=memory, if it exists, it's already in this Trino session
+                logger.info(f"Catalog '{catalog_name}' already exists, skipping creation")
+                return True
             
-            # Create catalog with current properties
+            # Create catalog (only if it doesn't exist)
             logger.info(f"Creating Trino catalog '{catalog_name}' using {connector}")
             create_query = self.create_catalog_query(catalog_name, connector, properties)
-            logger.debug(f"Executing query: {create_query}")
+            # SEGURANÇA: Não logar a query pois contém credenciais em texto claro
+            logger.debug(f"Executing CREATE CATALOG for '{catalog_name}' (credentials redacted)")
             try:
                 await cur.execute(create_query)
                 await cur.fetchall()  # Consume result

@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 # Use generic Trino Extractor
 from .extractors.trino_extractor import TrinoExtractor
+from .credential_service import get_credential_service
 
 from ..database.metadata.metadata import ExternalTables, ExternalSchema, ExternalColumn
 from ..database.core.core import DataConnection, ConnectionType
@@ -108,8 +109,16 @@ class DataSourceExtractionService:
     async def _extract_data_generic(self, connection, connection_type, table, schema_name: str, limit: Optional[int]) -> Dict[str, Any]:
         """Generic data extraction using Trino"""
         try:
+            # SEGURANÇA: Descriptografar credenciais antes de usar
+            credential_service = get_credential_service()
+            decrypted_params = credential_service.decrypt_for_use(
+                connection.connection_params,
+                connection_id=connection.id,
+                purpose="data_extraction"
+            )
+            
             extractor = TrinoExtractor(
-                connection_params=connection.connection_params,
+                connection_params=decrypted_params,
                 connection_type=connection_type.name,
                 connection_name=connection.name,
                 connection_id=connection.id
@@ -128,8 +137,16 @@ class DataSourceExtractionService:
     async def _extract_data_generic_with_offset(self, connection, connection_type, table, schema_name: str, limit: int, offset: int) -> Dict[str, Any]:
         """Generic batch data extraction using Trino"""
         try:
+            # SEGURANÇA: Descriptografar credenciais antes de usar
+            credential_service = get_credential_service()
+            decrypted_params = credential_service.decrypt_for_use(
+                connection.connection_params,
+                connection_id=connection.id,
+                purpose="data_extraction_batch"
+            )
+            
             extractor = TrinoExtractor(
-                connection_params=connection.connection_params,
+                connection_params=decrypted_params,
                 connection_type=connection_type.name,
                 connection_name=connection.name,
                 connection_id=connection.id

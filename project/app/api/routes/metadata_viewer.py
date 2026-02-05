@@ -30,6 +30,7 @@ from ...services.distinct_values_service import DistinctValuesService
 from ...services.constraint_extraction_service import ConstraintExtractionService
 from ...services.trino_client import get_trino_client
 from ...services.trino_manager import TrinoManager
+from ...services.credential_service import get_credential_service
 
 router = APIRouter()
 
@@ -440,11 +441,19 @@ async def get_table_sample(
         trino_manager = TrinoManager()
         catalog_name = trino_manager.generate_catalog_name(conn.name, conn.id)
         
+        # SEGURANÇA: Descriptografar credenciais antes de usar
+        credential_service = get_credential_service()
+        decrypted_params = credential_service.decrypt_for_use(
+            conn.connection_params,
+            connection_id=conn.id,
+            purpose="table_sample_preview"
+        )
+        
         # Garantir que o catálogo existe no Trino
         await trino_manager.ensure_catalog_exists_async(
             connection_name=conn.name,
             connection_type=conn_type,
-            params=conn.connection_params,
+            params=decrypted_params,
             connection_id=conn.id
         )
         
@@ -620,11 +629,19 @@ async def get_distinct_values_for_column(
         trino_manager = TrinoManager()
         catalog_name = trino_manager.generate_catalog_name(conn.name, conn.id)
         
+        # SEGURANÇA: Descriptografar credenciais antes de usar
+        credential_service = get_credential_service()
+        decrypted_params = credential_service.decrypt_for_use(
+            conn.connection_params,
+            connection_id=conn.id,
+            purpose="distinct_values_query"
+        )
+        
         # Garantir que o catálogo existe no Trino
         await trino_manager.ensure_catalog_exists_async(
             connection_name=conn.name,
             connection_type=conn_type,
-            params=conn.connection_params,
+            params=decrypted_params,
             connection_id=conn.id
         )
         

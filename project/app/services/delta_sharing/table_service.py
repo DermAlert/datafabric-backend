@@ -370,24 +370,91 @@ class RecipientService:
     def __init__(self, db: AsyncSession):
         self.db = db
     
+    def _generate_identifier(self, name: str, organization_name: Optional[str] = None) -> str:
+        """Generate a unique identifier from name or organization"""
+        import re
+        import unicodedata
+        
+        # Use organization_name if provided, otherwise use name
+        base = organization_name if organization_name else name
+        
+        # Normalize unicode characters (remove accents)
+        base = unicodedata.normalize('NFKD', base).encode('ASCII', 'ignore').decode('ASCII')
+        
+        # Convert to lowercase, replace spaces and special chars with underscore
+        identifier = re.sub(r'[^a-zA-Z0-9]+', '_', base.lower())
+        
+        # Remove leading/trailing underscores and collapse multiple underscores
+        identifier = re.sub(r'_+', '_', identifier).strip('_')
+        
+        # Truncate if too long (leave room for suffix)
+        if len(identifier) > 200:
+            identifier = identifier[:200]
+        
+        return identifier
+    
+    async def _ensure_unique_identifier(self, base_identifier: str) -> str:
+        """Ensure identifier is unique, adding suffix if needed"""
+        identifier = base_identifier
+        counter = 1
+        
+        while True:
+            existing = await self.db.execute(
+                select(Recipient).where(Recipient.identifier == identifier)
+            )
+            if not existing.scalar_one_or_none():
+                return identifier
+            
+            # Add counter suffix
+            identifier = f"{base_identifier}_{counter}"
+            counter += 1
+            
+            # Safety limit
+            if counter > 1000:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Could not generate unique identifier"
+                )
+    
     async def create_recipient(self, recipient_data: RecipientCreate, organization_id: int) -> RecipientDetail:
         """Create a new recipient"""
-        # Check if identifier already exists
-        existing = await self.db.execute(
-            select(Recipient).where(Recipient.identifier == recipient_data.identifier)
+        # Check if name already exists
+        # TODO: No futuro, verificar unicidade por organização: .where(Recipient.organization_id == organization_id)
+        existing_name = await self.db.execute(
+            select(Recipient).where(Recipient.name == recipient_data.name)
         )
-        if existing.scalar_one_or_none():
+        if existing_name.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Recipient with identifier '{recipient_data.identifier}' already exists"
+                detail=f"Recipient with name '{recipient_data.name}' already exists"
             )
+        
+        # Generate or validate identifier
+        if recipient_data.identifier:
+            # User provided identifier - check if it already exists
+            existing = await self.db.execute(
+                select(Recipient).where(Recipient.identifier == recipient_data.identifier)
+            )
+            if existing.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Recipient with identifier '{recipient_data.identifier}' already exists"
+                )
+            identifier = recipient_data.identifier
+        else:
+            # Auto-generate identifier from name/organization
+            base_identifier = self._generate_identifier(
+                recipient_data.name, 
+                recipient_data.organization_name
+            )
+            identifier = await self._ensure_unique_identifier(base_identifier)
         
         # Generate bearer token
         bearer_token = self._generate_bearer_token()
         
         # Create new recipient
         db_recipient = Recipient(
-            identifier=recipient_data.identifier,
+            identifier=identifier,
             name=recipient_data.name,
             email=recipient_data.email,
             organization_name=recipient_data.organization_name,

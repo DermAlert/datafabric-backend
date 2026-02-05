@@ -27,9 +27,11 @@ class DatasetDeltaSharingService:
     def minio_client(self):
         """Lazy initialization of MinIO client"""
         if self._minio_client is None:
+            minio_endpoint = os.getenv('MINIO_ENDPOINT', 'minio:9000')
+            endpoint_url = f"http://{minio_endpoint}" if not minio_endpoint.startswith(('http://', 'https://')) else minio_endpoint
             self._minio_client = boto3.client(
                 's3',
-                endpoint_url=os.getenv('MINIO_ENDPOINT', 'http://localhost:9000'),
+                endpoint_url=endpoint_url,
                 aws_access_key_id=os.getenv('MINIO_ACCESS_KEY', 'minio'),
                 aws_secret_access_key=os.getenv('MINIO_SECRET_KEY', 'minio123'),
                 region_name='us-east-1'

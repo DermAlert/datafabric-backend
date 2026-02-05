@@ -17,10 +17,13 @@ from typing import Dict, Any, List, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy.future import select
+
 from ..api.schemas.silver_schemas import (
     SilverVersionInfo,
     SilverVersionHistoryResponse,
 )
+from ..database.datasets.silver import TransformExecution, TransformStatus
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +57,7 @@ class SilverVersioningService:
             output_path: S3A path for Delta table
             
         Returns:
-            Dict with delta_version, rows_inserted, total_rows
+            Dict with delta_version, rows_inserted, total_rows, size_bytes, num_files
         """
         from delta.tables import DeltaTable
         
@@ -67,10 +70,21 @@ class SilverVersioningService:
             .option("mergeSchema", "true") \
             .save(output_path)
         
-        # Get version info
+        # Get version info and metrics from Delta history
         delta_table = DeltaTable.forPath(spark, output_path)
         history = delta_table.history(1).collect()
-        version = history[0]["version"] if history else 0
+        
+        version = 0
+        size_bytes = None
+        num_files = None
+        
+        if history:
+            row_dict = history[0].asDict()
+            version = row_dict["version"]
+            metrics = row_dict.get("operationMetrics", {}) or {}
+            size_bytes = int(metrics.get("numOutputBytes", 0)) or None
+            num_files = int(metrics.get("numFiles", 0)) or int(metrics.get("numAddedFiles", 0)) or None
+        
         row_count = source_df.count()
         
         return {
@@ -78,58 +92,77 @@ class SilverVersioningService:
             'rows_inserted': row_count,
             'rows_updated': 0,
             'rows_deleted': 0,
-            'total_rows': row_count
+            'total_rows': row_count,
+            'size_bytes': size_bytes,
+            'num_files': num_files
         }
     
     async def get_version_history(
         self,
-        spark,
-        output_path: str,
         config_id: int,
         config_name: str,
         limit: int = 100
     ) -> SilverVersionHistoryResponse:
         """
-        Get Delta Lake version history for a config.
+        Get version history for a config from execution records.
+        
+        Uses TransformExecution table as source of truth for aggregated metrics.
+        This provides a unified view and includes config_snapshot for each version.
         
         Args:
-            spark: SparkSession
-            output_path: S3A path to Delta table
             config_id: Config ID
             config_name: Config name
             limit: Maximum versions to return
         
         Returns:
-            SilverVersionHistoryResponse with version list
+            SilverVersionHistoryResponse with version list including config_snapshot for each version
         """
-        from delta.tables import DeltaTable
-        
         try:
-            delta_table = DeltaTable.forPath(spark, output_path)
-            history_df = delta_table.history(limit)
-            history_rows = history_df.collect()
+            # Get all successful executions for this config (they have the aggregated metrics)
+            executions_result = await self.db.execute(
+                select(TransformExecution)
+                .where(
+                    TransformExecution.config_id == config_id,
+                    TransformExecution.status == TransformStatus.SUCCESS
+                )
+                .order_by(TransformExecution.started_at.desc())
+                .limit(limit)
+            )
+            executions = executions_result.scalars().all()
+            
+            if not executions:
+                return SilverVersionHistoryResponse(
+                    config_id=config_id,
+                    config_name=config_name,
+                    current_version=None,
+                    output_paths=[],
+                    versions=[]
+                )
+            
+            # Collect all unique output paths
+            all_output_paths = set()
+            for exec in executions:
+                if exec.output_path:
+                    all_output_paths.add(exec.output_path)
             
             versions = []
-            for row in history_rows:
-                row_dict = row.asDict()
-                metrics = row_dict.get("operationMetrics", {}) or {}
+            for exec in executions:
+                # Get size and file metrics from execution_details
+                exec_details = exec.execution_details or {}
                 
-                # Delta Lake registra como "WRITE", mas mostramos "OVERWRITE" 
-                # para consistência com Bronze (ambos fazem overwrite)
-                delta_operation = row_dict["operation"]
-                display_operation = "OVERWRITE" if delta_operation == "WRITE" else delta_operation
-                
+                # Use execution timestamp and metrics (already aggregated)
                 version_info = SilverVersionInfo(
-                    version=row_dict["version"],
-                    timestamp=row_dict["timestamp"],
-                    operation=display_operation,
-                    execution_id=None,
-                    rows_inserted=int(metrics.get("numTargetRowsInserted", 0)) or int(metrics.get("numOutputRows", 0)),
-                    rows_updated=int(metrics.get("numTargetRowsUpdated", 0)),
-                    rows_deleted=int(metrics.get("numTargetRowsDeleted", 0)),
-                    total_rows=None,
-                    num_files=int(metrics.get("numFiles", 0)) or int(metrics.get("numAddedFiles", 0)),
-                    size_bytes=int(metrics.get("numOutputBytes", 0)) or None
+                    version=exec.delta_version if exec.delta_version is not None else 0,
+                    timestamp=exec.finished_at or exec.started_at,
+                    operation=exec.write_mode_used.upper() if exec.write_mode_used else "OVERWRITE",
+                    execution_id=exec.id,
+                    rows_inserted=exec.rows_inserted,
+                    rows_updated=exec.rows_updated,
+                    rows_deleted=exec.rows_deleted,
+                    total_rows=exec.rows_output,
+                    num_files=exec_details.get('num_files'),
+                    size_bytes=exec_details.get('size_bytes'),
+                    config_snapshot=exec.config_snapshot
                 )
                 versions.append(version_info)
             
@@ -139,7 +172,7 @@ class SilverVersioningService:
                 config_id=config_id,
                 config_name=config_name,
                 current_version=current_version,
-                output_path=output_path,
+                output_paths=sorted(list(all_output_paths)),
                 versions=versions
             )
         
@@ -149,7 +182,7 @@ class SilverVersioningService:
                 config_id=config_id,
                 config_name=config_name,
                 current_version=None,
-                output_path=output_path,
+                output_paths=[],
                 versions=[]
             )
     

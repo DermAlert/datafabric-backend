@@ -1104,6 +1104,76 @@ async def query_silver_table(
     return result
 
 
+# ==================== EXECUTION HISTORY ====================
+
+@router.get(
+    "/persistent/configs/{config_id}/executions",
+    response_model=List[TransformExecutionResponse],
+    summary="List config executions",
+    description="List execution history for a transform config."
+)
+async def list_config_executions(
+    config_id: int,
+    limit: int = Query(20, ge=1, le=100, description="Maximum executions to return"),
+    db: AsyncSession = Depends(get_db),
+):
+    """List executions for a transform config."""
+    from sqlalchemy.future import select
+    
+    try:
+        # Check config exists
+        config_result = await db.execute(
+            select(TransformConfig).where(
+                TransformConfig.id == config_id
+            )
+        )
+        if not config_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Transform config {config_id} not found"
+            )
+        
+        # Get executions
+        result = await db.execute(
+            select(TransformExecution)
+            .where(TransformExecution.config_id == config_id)
+            .order_by(TransformExecution.started_at.desc())
+            .limit(limit)
+        )
+        executions = result.scalars().all()
+        
+        return [
+            TransformExecutionResponse(
+                id=e.id,
+                config_id=e.config_id,
+                status=e.status.value if e.status else None,
+                started_at=e.started_at,
+                finished_at=e.finished_at,
+                rows_processed=e.rows_processed,
+                rows_output=e.rows_output,
+                output_path=e.output_path,
+                error_message=e.error_message,
+                # Versioning fields
+                delta_version=e.delta_version,
+                write_mode_used=e.write_mode_used,
+                merge_keys_used=e.merge_keys_used,
+                rows_inserted=e.rows_inserted,
+                rows_updated=e.rows_updated,
+                rows_deleted=e.rows_deleted,
+            )
+            for e in executions
+        ]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to list config executions: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to list config executions: {str(e)}"
+        )
+
+
 # ==================== VERSIONING & TIME TRAVEL ====================
 
 @router.get(
@@ -1116,6 +1186,17 @@ Get the version history of a Silver Delta Lake table.
 Each execution creates a new version. You can use version numbers
 for time travel queries.
 
+**Metrics are retrieved from execution records** - This provides aggregated metrics
+and includes config_snapshot for each version (for diff comparison).
+
+---
+
+## **Query Parameters:**
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `limit` | int | 100 | Maximum versions to return (1-1000) |
+
 ---
 
 ## **Response:**
@@ -1125,23 +1206,38 @@ for time travel queries.
   "config_id": 1,
   "config_name": "patients_silver",
   "current_version": 5,
-  "output_path": "s3a://datafabric-silver/1-patients_silver/",
+  "output_paths": [
+    "s3a://datafabric-silver/1-patients_silver/"
+  ],
   "versions": [
     {
       "version": 5,
       "timestamp": "2024-01-20T14:30:00Z",
-      "operation": "MERGE",
+      "operation": "OVERWRITE",
+      "execution_id": 12,
       "rows_inserted": 150,
       "rows_updated": 23,
-      "total_rows": 10523
+      "total_rows": 10523,
+      "num_files": 4,
+      "size_bytes": 1048576,
+      "config_snapshot": {
+        "name": "patients_silver",
+        "source_bronze_dataset_id": 15,
+        "column_transformations": [...],
+        "snapshot_at": "2024-01-20T14:30:00"
+      }
     },
     {
       "version": 4,
       "timestamp": "2024-01-15T10:00:00Z",
-      "operation": "MERGE",
+      "operation": "OVERWRITE",
+      "execution_id": 11,
       "rows_inserted": 500,
       "rows_updated": 0,
-      "total_rows": 10350
+      "total_rows": 10350,
+      "num_files": 3,
+      "size_bytes": 950000,
+      "config_snapshot": {...}
     }
   ]
 }
@@ -1153,6 +1249,12 @@ for time travel queries.
 - See all versions available for time travel
 - Track changes over time
 - Audit data modifications
+- **Compare config snapshots between versions (git-like diff)** - Each version includes the exact config used at execution time
+
+## **Notes:**
+- Metrics are retrieved from execution records (not Delta Lake history directly)
+- `output_paths` lists all paths where data was written
+- `config_snapshot` contains the exact configuration used for each execution
 """
 )
 async def get_silver_version_history(
@@ -1178,42 +1280,13 @@ async def get_silver_version_history(
                 detail=f"Transform config {config_id} not found"
             )
         
-        # Get output path from the latest successful execution for accuracy
-        execution_result = await db.execute(
-            select(TransformExecution)
-            .where(
-                TransformExecution.config_id == config_id,
-                TransformExecution.status == TransformStatus.SUCCESS
-            )
-            .order_by(TransformExecution.started_at.desc())
-            .limit(1)
-        )
-        latest_execution = execution_result.scalar_one_or_none()
-        
-        if latest_execution and latest_execution.output_path:
-            output_path = latest_execution.output_path
-        else:
-            # Fallback to constructing path from config (for configs not yet executed)
-            silver_bucket = config.silver_bucket or "datafabric-silver"
-            if config.silver_path_prefix:
-                output_path = f"s3a://{silver_bucket}/{config.silver_path_prefix}"
-            else:
-                output_path = f"s3a://{silver_bucket}/{config.id}-{config.name}"
-        
-        # Get version history using Spark
-        from ...services.spark_manager import SparkManager
-        spark_manager = SparkManager()
-        
+        # Get version history from execution records (same pattern as Bronze)
         versioning_service = SilverVersioningService(db)
-        
-        with spark_manager.session_scope() as spark:
-            history = await versioning_service.get_version_history(
-                spark=spark,
-                output_path=output_path,
-                config_id=config_id,
-                config_name=config.name,
-                limit=limit
-            )
+        history = await versioning_service.get_version_history(
+            config_id=config_id,
+            config_name=config.name,
+            limit=limit
+        )
         
         return history
         

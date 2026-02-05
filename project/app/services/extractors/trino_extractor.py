@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 import aiotrino
 from ..trino_manager import TrinoManager
 from ...utils.logger import logger
@@ -331,6 +331,7 @@ class TrinoExtractor:
     async def extract_tables(self, schema_name: str) -> List[Dict[str, Any]]:
         """
         Extract tables from a schema (fully async with aiotrino).
+        Row counts are fetched in parallel for better performance.
         """
         try:
             conn = await self._get_connection()
@@ -347,18 +348,27 @@ class TrinoExtractor:
             """
             await cur.execute(tbl_query)
             rows = await cur.fetchall()
+            await conn.close()
             
-            tables = []
+            if not rows:
+                return []
+            
+            # Build table info list first (without row counts)
+            table_infos = []
             for row in rows:
                 table_name = row[0]
                 raw_table_type = row[1] if len(row) > 1 else None
-                
-                # Normalize to our internal convention
                 table_type = "view" if str(raw_table_type).lower() == "view" else "table"
-                
-                # Get row count
-                row_count = 0
+                table_infos.append({
+                    "table_name": table_name,
+                    "table_type": table_type
+                })
+            
+            # Fetch row counts in parallel
+            async def get_row_count(table_name: str) -> int:
                 try:
+                    conn = await self._get_connection()
+                    cur = await conn.cursor()
                     q = (
                         f"SELECT count(*) FROM "
                         f"{self._format_ident(self.catalog)}."
@@ -367,19 +377,30 @@ class TrinoExtractor:
                     )
                     await cur.execute(q)
                     count_res = await cur.fetchone()
-                    if count_res:
-                        row_count = count_res[0]
+                    await conn.close()
+                    return count_res[0] if count_res else 0
                 except Exception as e:
                     logger.warning(f"Could not get row count for {table_name}: {e}")
-
+                    return 0
+            
+            # Run all row count queries in parallel
+            row_counts = await asyncio.gather(
+                *[get_row_count(t["table_name"]) for t in table_infos],
+                return_exceptions=True
+            )
+            
+            # Build final result
+            tables = []
+            for i, info in enumerate(table_infos):
+                row_count = row_counts[i] if not isinstance(row_counts[i], Exception) else 0
                 tables.append({
-                    "table_name": table_name,
+                    "table_name": info["table_name"],
                     "external_reference": (
                         f"{self._quote_ident(self.catalog)}."
                         f"{self._quote_ident(schema_name)}."
-                        f"{self._quote_ident(table_name)}"
+                        f"{self._quote_ident(info['table_name'])}"
                     ),
-                    "table_type": table_type,
+                    "table_type": info["table_type"],
                     "estimated_row_count": row_count,
                     "total_size_bytes": 0,
                     "description": None,
@@ -390,9 +411,6 @@ class TrinoExtractor:
         except Exception as e:
             logger.error(f"Error extracting tables via Trino for {schema_name}: {str(e)}")
             return []
-        finally:
-            if 'conn' in locals():
-                await conn.close()
 
     async def extract_columns(self, schema_name: str, table_name: str) -> List[Dict[str, Any]]:
         """
@@ -446,24 +464,6 @@ class TrinoExtractor:
                 is_nullable = row[2] == 'YES'
                 position = row[3]
                 default_val = row[4]
-                
-                # Get statistics/samples
-                sample_values = []
-                try:
-                    sample_query = (
-                        f"SELECT DISTINCT {self._format_ident(col_name)} "
-                        f"FROM {self._format_ident(self.catalog)}."
-                        f"{self._format_ident(schema_name)}."
-                        f"{self._format_ident(table_name)} "
-                        f"WHERE {self._format_ident(col_name)} IS NOT NULL "
-                        f"LIMIT 5"
-                    )
-                    await cur.execute(sample_query)
-                    samples = await cur.fetchall()
-                    sample_values = [str(s[0]) for s in samples if s[0] is not None]
-                    logger.debug(f"Sample values for {table_name}.{col_name}: {sample_values}")
-                except Exception as e:
-                    logger.warning(f"Could not get sample values for {table_name}.{col_name}: {str(e)}")
 
                 columns.append({
                     "column_name": col_name,
@@ -480,7 +480,7 @@ class TrinoExtractor:
                     "default_value": default_val,
                     "description": None,
                     "statistics": {},
-                    "sample_values": sample_values,
+                    "sample_values": [],
                     "properties": {
                         "full_data_type": col_type
                     }
@@ -494,6 +494,91 @@ class TrinoExtractor:
             if 'conn' in locals():
                 await conn.close()
                 
+    async def extract_tables_batch(self, schema_names: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+        """
+        Extract tables from multiple schemas in parallel.
+        Returns a dict mapping schema_name -> list of tables.
+        """
+        async def extract_for_schema(schema_name: str) -> Tuple[str, List[Dict[str, Any]]]:
+            tables = await self.extract_tables(schema_name)
+            return (schema_name, tables)
+        
+        results = await asyncio.gather(
+            *[extract_for_schema(s) for s in schema_names],
+            return_exceptions=True
+        )
+        
+        schema_tables = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Error in batch table extraction: {result}")
+                continue
+            schema_name, tables = result
+            schema_tables[schema_name] = tables
+        
+        return schema_tables
+
+    async def extract_columns_batch(self, table_refs: List[Tuple[str, str]]) -> Dict[Tuple[str, str], List[Dict[str, Any]]]:
+        """
+        Extract columns from multiple tables in parallel.
+        table_refs: list of (schema_name, table_name) tuples
+        Returns a dict mapping (schema_name, table_name) -> list of columns.
+        """
+        async def extract_for_table(schema_name: str, table_name: str) -> Tuple[Tuple[str, str], List[Dict[str, Any]]]:
+            columns = await self.extract_columns(schema_name, table_name)
+            return ((schema_name, table_name), columns)
+        
+        results = await asyncio.gather(
+            *[extract_for_table(s, t) for s, t in table_refs],
+            return_exceptions=True
+        )
+        
+        table_columns = {}
+        for result in results:
+            if isinstance(result, Exception):
+                logger.error(f"Error in batch column extraction: {result}")
+                continue
+            key, columns = result
+            table_columns[key] = columns
+        
+        return table_columns
+
+    async def extract_full_metadata(self) -> Dict[str, Any]:
+        """
+        Extract all metadata (schemas, tables, columns) with maximum parallelism.
+        Returns a structured dict with all metadata.
+        """
+        # 1. Extract schemas
+        schemas = await self.extract_schemas()
+        schema_names = [s["schema_name"] for s in schemas]
+        
+        if not schema_names:
+            return {"schemas": [], "tables": {}, "columns": {}}
+        
+        # 2. Extract all tables in parallel across all schemas
+        schema_tables = await self.extract_tables_batch(schema_names)
+        
+        # 3. Collect all (schema, table) pairs for column extraction
+        table_refs = []
+        for schema_name, tables in schema_tables.items():
+            for table in tables:
+                table_refs.append((schema_name, table["table_name"]))
+        
+        # 4. Extract all columns in parallel (in batches to avoid overwhelming Trino)
+        batch_size = 20  # Process 20 tables at a time
+        all_columns = {}
+        
+        for i in range(0, len(table_refs), batch_size):
+            batch = table_refs[i:i + batch_size]
+            batch_columns = await self.extract_columns_batch(batch)
+            all_columns.update(batch_columns)
+        
+        return {
+            "schemas": schemas,
+            "tables": schema_tables,
+            "columns": all_columns
+        }
+
     async def extract_table_data(self, schema_name: str, table_name: str, limit: Optional[int] = None, offset: int = 0) -> Dict[str, Any]:
         """
         Extract actual data from a table via Trino (fully async with aiotrino).

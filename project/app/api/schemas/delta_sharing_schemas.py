@@ -245,7 +245,7 @@ class ShareTableDetail(BaseModel):
 
 class RecipientCreate(BaseModel):
     """Create recipient request"""
-    identifier: str = Field(description="Unique recipient identifier", min_length=1, max_length=255)
+    identifier: Optional[str] = Field(default=None, description="Unique recipient identifier (auto-generated if not provided)", max_length=255)
     name: str = Field(description="Recipient name", min_length=1, max_length=255)
     email: Optional[str] = Field(default=None, description="Recipient email")
     organization_name: Optional[str] = Field(default=None, description="Organization name")
@@ -257,6 +257,8 @@ class RecipientCreate(BaseModel):
 
     @validator('identifier')
     def validate_identifier(cls, v):
+        if v is None:
+            return v
         # Identifier validation
         import re
         if not re.match(r'^[a-zA-Z0-9_.-]+$', v):

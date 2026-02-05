@@ -29,6 +29,7 @@ s3fs="2025.5.1"
 redis="6.2.0"
 httpx="0.28.1"
 aiotrino = "^0.3.0"
+cryptography = "^44.0.0"  # Para criptografia de credenciais (AES-256-GCM)
 
 [build-system]
 requires = ["poetry>=1.0"]

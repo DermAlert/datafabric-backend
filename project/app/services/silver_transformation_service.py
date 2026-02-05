@@ -83,8 +83,8 @@ class SilverTransformationService:
         self.trino = TrinoManager()
         self.spark_manager = SparkManager()
         self.silver_bucket = os.getenv("SILVER_BUCKET", "datafabric-silver")
-        self.silver_catalog = "silver"
-        self.silver_schema = "default"
+        self.silver_catalog = os.getenv("SILVER_CATALOG", "silver")
+        self.silver_schema = os.getenv("SILVER_SCHEMA", "default")
         
         # Initialize Python normalizer if available
         self.normalizer = Normalizer() if Normalizer else None
@@ -97,19 +97,15 @@ class SilverTransformationService:
     def _ensure_silver_bucket(self):
         """Create the Silver bucket if it doesn't exist."""
         from minio import Minio
-        from urllib.parse import urlparse
         
         try:
-            endpoint = os.getenv("INTERNAL_S3_ENDPOINT", "http://minio:9000")
-            access_key = os.getenv("INTERNAL_S3_ACCESS_KEY", os.getenv("MINIO_ROOT_USER", "minio"))
-            secret_key = os.getenv("INTERNAL_S3_SECRET_KEY", os.getenv("MINIO_ROOT_PASSWORD", "minio123"))
-            
-            parsed = urlparse(endpoint)
-            endpoint_host = parsed.netloc if parsed.netloc else parsed.path
-            secure = parsed.scheme == "https"
+            endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+            access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
+            secret_key = os.getenv("MINIO_SECRET_KEY", "minio123")
+            secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
             
             client = Minio(
-                endpoint=endpoint_host,
+                endpoint=endpoint,
                 access_key=access_key,
                 secret_key=secret_key,
                 secure=secure
