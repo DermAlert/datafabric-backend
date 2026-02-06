@@ -5,10 +5,10 @@ from sqlalchemy import update
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from ...database.database import get_db
-from ...database.core import core
-from ...database.metadata import metadata
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...database.models import core
+from ...database.models import metadata
+from ...core.auth import get_current_user
 from ..schemas.metadata_schemas import (
     CatalogResponse,
     SchemaResponse,
@@ -26,11 +26,11 @@ from ..schemas.metadata_schemas import (
     JoinCardinalityResponse
 )
 # from ...services.data_preview import get_data_preview
-from ...services.distinct_values_service import DistinctValuesService
-from ...services.constraint_extraction_service import ConstraintExtractionService
-from ...services.trino_client import get_trino_client
-from ...services.trino_manager import TrinoManager
-from ...services.credential_service import get_credential_service
+from ...services.metadata.distinct_values_service import DistinctValuesService
+from ...services.metadata.constraint_extraction_service import ConstraintExtractionService
+from ...services.infrastructure.trino_client import get_trino_client
+from ...services.infrastructure.trino_manager import TrinoManager
+from ...services.infrastructure.credential_service import get_credential_service
 
 router = APIRouter()
 

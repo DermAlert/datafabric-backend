@@ -47,10 +47,10 @@ from ..schemas.silver_schemas import (
     SilverVersionHistoryResponse,
     SilverDataQueryResponse,
 )
-from ...services.silver_transformation_service import SilverTransformationService
-from ...services.silver_versioning_service import SilverVersioningService
-from ...database.database import get_db
-from ...database.datasets.silver import TransformConfig, TransformStatus, TransformExecution
+from ...services.silver.transformation_service import SilverTransformationService
+from ...services.silver.versioning_service import SilverVersioningService
+from ...database.session import get_db
+from ...database.models.silver import TransformConfig, TransformStatus, TransformExecution
 import logging
 
 logger = logging.getLogger(__name__)
@@ -1419,7 +1419,7 @@ async def query_silver_data_with_time_travel(
         output_path = latest_execution.output_path
         
         # Query using Spark
-        from ...services.spark_manager import SparkManager
+        from ...services.infrastructure.spark_manager import SparkManager
         spark_manager = SparkManager()
         
         versioning_service = SilverVersioningService(db)

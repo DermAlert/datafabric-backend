@@ -8,7 +8,7 @@ from typing import Optional, Dict, Any
 from datetime import datetime
 import logging
 
-from app.services.metadata_extraction import extract_metadata
+from app.services.metadata.metadata_extraction import extract_metadata
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

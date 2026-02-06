@@ -5,9 +5,9 @@ from typing import List, Optional
 from datetime import datetime
 import logging
 
-from ...database.database import get_db
-from ...database.core.core import Dataset
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...database.models.core import Dataset
+from ...core.auth import get_current_user
 from ..schemas.dataset_schemas import (
     DatasetCreate,
     DatasetUpdate,
@@ -21,8 +21,8 @@ from ..schemas.dataset_schemas import (
     DatasetImageStats
 )
 from ..schemas.search import SearchResult
-from ..service.dataset_service import DatasetService
-from ...services.dataset_image_service import DatasetImageService
+from ...services.datasets.dataset_service import DatasetService
+from ...services.datasets.dataset_image_service import DatasetImageService
 
 router = APIRouter()
 
@@ -68,7 +68,7 @@ async def create_unified_dataset(
     - auto_include_mapped_columns: Whether to include related mapped columns/tables
     - apply_value_mappings: Whether to apply value standardization mappings
     """
-    from app.services.airflow_client import AirflowClient
+    from app.services.infrastructure.airflow_client import AirflowClient
     
     try:
         # Basic validation - let the microservice handle detailed validation

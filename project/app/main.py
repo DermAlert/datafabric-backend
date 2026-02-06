@@ -6,16 +6,11 @@ import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import os
 
-# from app.database.populate_db import populate_db
-from app.database import database
-from app.database.core import core
-from app.database.equivalence import equivalence
-from app.database.metadata import metadata
-from app.database.storage import storage
-from app.database.workflow import workflow
-from app.database.delta_sharing import delta_sharing
-from app.database.datasets import bronze
-from app.database.metadata import relationships
+from app.database import session
+from app.database.models import (
+    core, equivalence, metadata, storage,
+    workflow, delta_sharing, bronze, relationships
+)
 
 # Configuração do thread pool para asyncio.to_thread()
 # Usado principalmente para operações MinIO (sync) - Trino agora usa aiotrino (async nativo)
@@ -31,11 +26,11 @@ async def lifespan(app: FastAPI):
     loop.set_default_executor(executor)
     print(f"Thread pool configured with {THREAD_POOL_SIZE} workers (for sync ops like MinIO)")
 
-    await database.create_schemas()
+    await session.create_schemas()
 
     print("Database schemas created successfully")
 
-    async with database.engine.begin() as conn:
+    async with session.engine.begin() as conn:
         # drop all tables
         # await conn.run_sync(core.Base.metadata.drop_all)
         # await conn.run_sync(workflow.Base.metadata.drop_all)

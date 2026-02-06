@@ -5,10 +5,10 @@ from sqlalchemy import update, and_
 from typing import List, Optional
 from datetime import datetime
 
-from ...database.database import get_db
-from ...database.core import core
-from ...database.metadata import metadata
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...database.models import core
+from ...database.models import metadata
+from ...core.auth import get_current_user
 from ..schemas.image_path_schemas import (
     UpdateImagePathRequest,
     BulkUpdateImagePathRequest,

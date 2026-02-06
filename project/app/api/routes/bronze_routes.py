@@ -28,9 +28,9 @@ from typing import List, Optional
 from datetime import datetime
 import logging
 
-from ...database.database import get_db
-from ...database.core.core import Dataset, DataConnection
-from ...database.datasets.bronze import (
+from ...database.session import get_db
+from ...database.models.core import Dataset, DataConnection
+from ...database.models.bronze import (
     DatasetBronzeConfig,
     DatasetIngestionGroup,
     IngestionGroupTable,
@@ -41,7 +41,7 @@ from ...database.datasets.bronze import (
     BronzeExecution,
     BronzeExecutionStatus,
 )
-from ...crud.token import get_current_user
+from ...core.auth import get_current_user
 from ..schemas.bronze_schemas import (
     DatasetBronzeCreateRequest,
     BronzeIngestionPreview,
@@ -70,8 +70,8 @@ from ..schemas.bronze_schemas import (
     BronzeVersionHistoryResponse,
     BronzeDataQueryResponse,
 )
-from ...services.bronze_ingestion_service import BronzeIngestionService
-from ...services.bronze_versioning_service import BronzeVersioningService
+from ...services.bronze.ingestion_service import BronzeIngestionService
+from ...services.bronze.versioning_service import BronzeVersioningService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -879,7 +879,7 @@ async def create_persistent_config(
         # Create config (always uses overwrite mode)
         tables_dict = [t.model_dump() for t in config_data.tables]
         
-        from ...database.datasets.bronze import WriteMode
+        from ...database.models.bronze import WriteMode
         
         config = BronzePersistentConfig(
             name=config_data.name,
@@ -1041,7 +1041,7 @@ async def update_persistent_config(
             update_data['output_format'] = update_data['output_format'].value
         
         # Always use overwrite mode (ignore write_mode/merge_keys from request)
-        from ...database.datasets.bronze import WriteMode
+        from ...database.models.bronze import WriteMode
         update_data['write_mode'] = WriteMode.OVERWRITE
         update_data['merge_keys'] = None
         update_data['merge_keys_source'] = None
@@ -1692,7 +1692,7 @@ async def query_bronze_data(
         output_path = output_paths[path_index]
         
         # Query using Spark
-        from ...services.spark_manager import SparkManager
+        from ...services.infrastructure.spark_manager import SparkManager
         spark_manager = SparkManager()
         
         versioning_service = BronzeVersioningService(db)

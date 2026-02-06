@@ -16,8 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import logging
 
-from ...database.database import get_db
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...core.auth import get_current_user
 from ..schemas.federation_schemas import (
     FederationCreate,
     FederationUpdate,
@@ -29,7 +29,7 @@ from ..schemas.federation_schemas import (
     FederationTablesResponse,
 )
 from ..schemas.search import SearchResult
-from ...services.federation_service import FederationService
+from ...services.metadata.federation_service import FederationService
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

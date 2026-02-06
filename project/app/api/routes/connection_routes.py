@@ -1,12 +1,12 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
-from app.database.database import get_db
+from app.database.session import get_db
 from app.api.schemas.connection_type import (
     ConnectionTypeCreate, ConnectionTypeUpdate, ConnectionTypeResponse, SearchConnectionType
 )
 from app.api.schemas.search import SearchResult 
-from app.api.service.connection_type_service import ConnectionTypeService 
+from app.services.connections.connection_type_service import ConnectionTypeService 
 
 # router = APIRouter(prefix="/connection-types", tags=["connection-types"])
 router = APIRouter()

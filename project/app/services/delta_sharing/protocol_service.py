@@ -21,12 +21,12 @@ try:
 except ImportError:
     PYARROW_AVAILABLE = False
 
-from ...database.delta_sharing.delta_sharing import (
+from ...database.models.delta_sharing import (
     Share, ShareSchema, ShareTable, Recipient, 
     RecipientAccessLog, ShareTableVersion, ShareTableFile,
     ShareStatus, TableShareStatus, recipient_shares
 )
-from ...database.core.core import Dataset
+from ...database.models.core import Dataset
 from ...api.schemas.delta_sharing_schemas import (
     DeltaSharingProtocol, TableMetadata, FileAction, RemoveFile,
     ShareResponse, ListSharesResponse, SchemaResponse, ListSchemasResponse,

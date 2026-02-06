@@ -7,12 +7,12 @@ import json
 import secrets
 from datetime import datetime, timedelta
 
-from ...database.delta_sharing.delta_sharing import (
+from ...database.models.delta_sharing import (
     Share, ShareSchema, ShareTable, Recipient, 
     RecipientAccessLog, ShareTableVersion, ShareTableFile,
     ShareStatus, TableShareStatus, recipient_shares
 )
-from ...database.core.core import Dataset, Organization
+from ...database.models.core import Dataset, Organization
 from ...api.schemas.delta_sharing_schemas import (
     ShareCreate, ShareUpdate, ShareDetail,
     SchemaCreate, SchemaUpdate, SchemaDetail,

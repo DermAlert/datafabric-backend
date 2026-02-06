@@ -1,5 +1,5 @@
 from fastapi import HTTPException, status
-from app.database.core.core import DataConnection
+from app.database.models.core import DataConnection
 
 def validate_metadata_connection(connection: DataConnection, operation: str = "operation"):
     """

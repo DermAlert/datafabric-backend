@@ -3,14 +3,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from datetime import timedelta
 from jose import JWTError, jwt
-from ...database.database import get_db
-from ...crud.token import authenticate_user, create_access_token, get_user_by_cpf, get_current_user
+from ...database.session import get_db
+from ...core.auth import authenticate_user, create_access_token, get_user_by_cpf, get_current_user
 from ...core.config import ACCESS_TOKEN_EXPIRE_MINUTES, REFRESH_TOKEN_EXPIRE_MINUTES, SECRET_KEY, ALGORITHM
-from ...database.core import core
-# from app.api.schemas import UserOut
+from ...database.models import core
 
-from ..schemas.token_routes import Token, TokenRefresh
-from ..schemas.token_routes import UserOut
+from ..schemas.token_schemas import Token, TokenRefresh
+from ..schemas.token_schemas import UserOut
 
 router = APIRouter()
 
