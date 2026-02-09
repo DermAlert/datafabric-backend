@@ -3,12 +3,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 from datetime import datetime
 import logging
-from app.database.database import get_db
+from app.database.session import get_db
 from app.api.schemas.data_connection import (
     DataConnectionCreate, DataConnectionUpdate, DataConnectionResponse, ConnectionTestResult, SearchDataConnection, ConnectionTestRequest
 )
 from app.api.schemas.search import SearchResult
-from app.api.service.data_connection_service import DataConnectionService
+from app.services.connections.data_connection_service import DataConnectionService
 from fastapi import BackgroundTasks
 
 # router = APIRouter(prefix="/data-connections", tags=["data-connections"])

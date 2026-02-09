@@ -21,12 +21,12 @@ try:
 except ImportError:
     PYARROW_AVAILABLE = False
 
-from ...database.delta_sharing.delta_sharing import (
+from ...database.models.delta_sharing import (
     Share, ShareSchema, ShareTable, Recipient, 
     RecipientAccessLog, ShareTableVersion, ShareTableFile,
     ShareStatus, TableShareStatus, recipient_shares
 )
-from ...database.core.core import Dataset
+from ...database.models.core import Dataset
 from ...api.schemas.delta_sharing_schemas import (
     DeltaSharingProtocol, TableMetadata, FileAction, RemoveFile,
     ShareResponse, ListSharesResponse, SchemaResponse, ListSchemasResponse,
@@ -44,10 +44,36 @@ class DeltaSharingProtocolService:
         self._minio_client = None  # Lazy initialization through property
         self._current_table_version = None  # Store current table version for headers
         self._spark = None  # Lazy initialization for Spark session
+        
+        # External endpoint for pre-signed URLs (accessible by clients outside Docker)
+        # Falls back to the same MINIO_ENDPOINT if not set
+        self._minio_external_endpoint = os.getenv('MINIO_EXTERNAL_ENDPOINT', '')
+        self._minio_internal_endpoint = os.getenv('MINIO_ENDPOINT', 'http://localhost:9000')
     
     def get_current_table_version(self) -> Optional[int]:
         """Get the current table version for response headers"""
         return self._current_table_version
+    
+    def _rewrite_presigned_url(self, url: str) -> str:
+        """Rewrite pre-signed URL to use the external MinIO endpoint.
+        
+        When the backend runs inside Docker, the internal endpoint (e.g. http://minio:9000)
+        is not reachable by external clients. This method replaces the internal hostname
+        with the external one (e.g. http://localhost:9000) so clients can download files.
+        """
+        if not self._minio_external_endpoint:
+            return url
+        
+        internal = self._minio_internal_endpoint
+        external = self._minio_external_endpoint
+        
+        # Normalize: ensure both have http:// prefix for matching
+        if not internal.startswith(('http://', 'https://')):
+            internal = f'http://{internal}'
+        if not external.startswith(('http://', 'https://')):
+            external = f'http://{external}'
+        
+        return url.replace(internal, external, 1)
     
     @property
     def minio_client(self):
@@ -699,6 +725,7 @@ class DeltaSharingProtocolService:
                                     Params={'Bucket': bucket_name, 'Key': key},
                                     ExpiresIn=3600  # 1 hour
                                 )
+                                presigned_url = self._rewrite_presigned_url(presigned_url)
                                 
                                 # Get file size (try to get from MinIO)
                                 file_size = 0
@@ -784,6 +811,7 @@ class DeltaSharingProtocolService:
                                 Params={'Bucket': bucket_name, 'Key': parquet_path},
                                 ExpiresIn=3600  # 1 hour
                             )
+                            presigned_url = self._rewrite_presigned_url(presigned_url)
                             
                             # Create file action
                             file_action = FileAction(

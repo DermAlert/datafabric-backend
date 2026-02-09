@@ -5,7 +5,7 @@ from typing import List, Optional
 import time
 from fastapi.responses import JSONResponse
 
-from ...database.database import get_db
+from ...database.session import get_db
 from ...api.schemas.delta_sharing_schemas import (
     ListSharesResponse, ShareResponse, ListSchemasResponse, ListTablesResponse,
     TableVersionResponse, QueryTableRequest, DeltaSharingError

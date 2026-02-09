@@ -10,9 +10,9 @@ import pandas as pd
 from datetime import datetime
 import logging
 
-from ...database.delta_sharing.delta_sharing import ShareTable, Share, ShareSchema
-from ...database.core.core import Dataset
-from ...services.dataset_image_service import DatasetImageService
+from ...database.models.delta_sharing import ShareTable, Share, ShareSchema
+from ...database.models.core import Dataset
+from ..datasets.dataset_image_service import DatasetImageService
 
 logger = logging.getLogger(__name__)
 

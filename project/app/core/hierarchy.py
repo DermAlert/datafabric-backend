@@ -1,7 +1,7 @@
 from enum import IntEnum
 from fastapi import Depends, HTTPException, status
-from ..database.core import core
-from ..crud.token import get_current_user
+from ..database.models import core
+from .auth import get_current_user
 
 class RoleEnum(IntEnum):
     USER = 3

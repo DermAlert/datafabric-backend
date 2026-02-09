@@ -15,8 +15,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 import logging
 
-from ...database.database import get_db
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...core.auth import get_current_user
 from ..schemas.relationship_schemas import (
     TableRelationshipCreate,
     TableRelationshipUpdate,
@@ -36,8 +36,8 @@ from ..schemas.relationship_schemas import (
     RelationshipCardinalityEnum,
 )
 from ..schemas.search import SearchResult
-from ...services.relationship_discovery_service import RelationshipDiscoveryService
-from ...services.trino_client import get_trino_client
+from ...services.metadata.relationship_discovery_service import RelationshipDiscoveryService
+from ...services.infrastructure.trino_client import get_trino_client
 
 router = APIRouter()
 logger = logging.getLogger(__name__)

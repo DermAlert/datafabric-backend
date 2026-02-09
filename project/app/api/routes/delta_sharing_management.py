@@ -3,8 +3,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
 from typing import List, Optional
 
-from ...database.database import get_db
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...core.auth import get_current_user
 from ...api.schemas.delta_sharing_schemas import (
     ShareCreate, ShareUpdate, ShareDetail,
     SchemaCreate, SchemaUpdate, SchemaDetail,
@@ -21,10 +21,10 @@ from ...services.delta_sharing.share_service import ShareService, SchemaService
 from ...services.delta_sharing.table_service import TableService, RecipientService
 from ...services.delta_sharing.dataset_integration_service import DatasetDeltaSharingService
 # Bronze/Silver models
-from ...database.datasets.bronze import BronzePersistentConfig, BronzeExecution, BronzeExecutionStatus
-from ...database.datasets.silver import TransformConfig, TransformExecution, TransformStatus
-from ...database.delta_sharing.delta_sharing import ShareTable, ShareSchema, Share, TableShareStatus
-from ...database.core.core import Dataset
+from ...database.models.bronze import BronzePersistentConfig, BronzeExecution, BronzeExecutionStatus
+from ...database.models.silver import TransformConfig, TransformExecution, TransformStatus
+from ...database.models.delta_sharing import ShareTable, ShareSchema, Share, TableShareStatus
+from ...database.models.core import Dataset
 
 router = APIRouter()
 

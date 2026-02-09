@@ -6,10 +6,10 @@ from sqlalchemy import and_, or_, func, case
 from typing import List, Optional, Dict, Any
 from sqlalchemy import join, outerjoin
 
-from ...database.database import get_db
-from ...database.equivalence import equivalence
-from ...database.metadata import metadata
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...database.models import equivalence
+from ...database.models import metadata
+from ...core.auth import get_current_user
 from ..schemas.equivalence_schemas import (
     SemanticDomainCreate,
     SemanticDomainUpdate,
@@ -43,7 +43,7 @@ from ..schemas.equivalence_schemas import (
 )
 from ..schemas.search import SearchResult
 
-from ...database.core import core
+from ...database.models import core
 
 router = APIRouter()
 

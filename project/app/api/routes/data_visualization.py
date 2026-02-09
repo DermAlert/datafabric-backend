@@ -6,16 +6,16 @@ from typing import List, Optional, Dict, Any, Union
 import json
 from datetime import datetime, date
 
-from ...database.database import get_db
-from ...database.core import core
-from ...database.metadata import metadata
-from ...crud.token import get_current_user
+from ...database.session import get_db
+from ...database.models import core
+from ...database.models import metadata
+from ...core.auth import get_current_user
 from ..schemas.data_visualization_schemas import (
     DataVisualizationResponse,
     DataVisualizationRequest,
     QueryExecutionResponse
 )
-from ...services.data_visualization import get_visualized_data, execute_custom_query
+from ...services.visualization.data_visualization import get_visualized_data, execute_custom_query
 
 router = APIRouter()
 
