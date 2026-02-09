@@ -2465,8 +2465,13 @@ AS
                     ))
             
         finally:
-            # Don't stop the Spark session - it may be shared
-            pass
+            # Stop the Spark session to prevent zombie JVM processes
+            # Each execution creates its own session to avoid stale Py4j connections
+            try:
+                spark_manager.stop_session()
+                logger.info("SparkSession stopped after bronze ingestion")
+            except Exception as cleanup_error:
+                logger.warning(f"Error stopping SparkSession after ingestion: {cleanup_error}")
         
         # Determine overall status
         success_count = sum(1 for g in group_results if g.status == IngestionStatusEnum.SUCCESS)

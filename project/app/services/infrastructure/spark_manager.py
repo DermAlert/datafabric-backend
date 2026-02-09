@@ -75,6 +75,58 @@ class SparkManager:
         self._initialized = True
         logger.info(f"SparkManager initialized with mode: {self.spark_mode}")
     
+    def _force_cleanup_spark_state(self):
+        """
+        Force cleanup of all PySpark/Py4j internal state.
+        
+        This is needed when the JVM process dies (becomes zombie) but PySpark
+        still holds stale references. Without this cleanup, getOrCreate() will
+        try to connect to the dead Py4j gateway and fail with ConnectionRefused.
+        """
+        from pyspark.sql import SparkSession
+        from pyspark import SparkContext
+        
+        # Clear PySpark's internal active session references
+        try:
+            SparkSession._instantiatedSession = None
+        except (AttributeError, Exception):
+            pass
+        
+        try:
+            SparkSession._activeSession = None
+        except (AttributeError, Exception):
+            pass
+        
+        # Clear SparkContext's active context reference
+        try:
+            if SparkContext._active_spark_context is not None:
+                try:
+                    SparkContext._active_spark_context.stop()
+                except Exception:
+                    pass
+                SparkContext._active_spark_context = None
+        except (AttributeError, Exception):
+            pass
+        
+        # Clear the gateway connection so Py4j creates a fresh one
+        try:
+            if SparkContext._gateway is not None:
+                try:
+                    SparkContext._gateway.shutdown()
+                except Exception:
+                    pass
+                SparkContext._gateway = None
+        except (AttributeError, Exception):
+            pass
+        
+        # Also clear the jvm reference
+        try:
+            SparkContext._jvm = None
+        except (AttributeError, Exception):
+            pass
+        
+        logger.info("Forced cleanup of all PySpark/Py4j internal state")
+    
     def get_or_create_session(self):
         """
         Get or create a SparkSession configured for Delta Lake.
@@ -98,6 +150,9 @@ class SparkManager:
                     pass
                 self._spark_session = None
                 SparkManager._spark_session = None  # Clear class-level reference too
+                # Force cleanup of all PySpark/Py4j internal state to avoid
+                # connecting to a dead JVM gateway (causes [Errno 111] Connection refused)
+                self._force_cleanup_spark_state()
         
         from pyspark.sql import SparkSession
         from delta import configure_spark_with_delta_pip
@@ -108,8 +163,11 @@ class SparkManager:
             if existing:
                 logger.info("Stopping existing active SparkSession")
                 existing.stop()
-        except:
-            pass
+        except Exception:
+            # If even getActiveSession fails, the Py4j gateway is dead
+            # Force cleanup everything
+            logger.warning("Failed to get active session, forcing full cleanup of PySpark state")
+            self._force_cleanup_spark_state()
         
         logger.info(f"Creating SparkSession with master: {self.spark_master}")
         
@@ -158,7 +216,13 @@ class SparkManager:
                         os.getenv("SPARK_MAX_EXECUTORS", "10"))
         
         # Use configure_spark_with_delta_pip for proper Delta Lake setup
-        self._spark_session = configure_spark_with_delta_pip(builder).getOrCreate()
+        # Include hadoop-aws for S3A filesystem support (required for MinIO/S3 writes)
+        extra_packages = [
+            "org.apache.hadoop:hadoop-aws:3.4.0",
+        ]
+        self._spark_session = configure_spark_with_delta_pip(
+            builder, extra_packages=extra_packages
+        ).getOrCreate()
         
         # Set log level
         self._spark_session.sparkContext.setLogLevel(
@@ -169,7 +233,7 @@ class SparkManager:
         return self._spark_session
     
     def stop_session(self):
-        """Stop the current SparkSession."""
+        """Stop the current SparkSession and clean up JVM resources."""
         if self._spark_session is not None:
             try:
                 self._spark_session.stop()
@@ -178,6 +242,9 @@ class SparkManager:
                 logger.warning(f"Error stopping SparkSession: {e}")
             finally:
                 self._spark_session = None
+                SparkManager._spark_session = None
+                # Clean up PySpark internal state to prevent zombie JVM accumulation
+                self._force_cleanup_spark_state()
     
     @contextmanager
     def session_scope(self):

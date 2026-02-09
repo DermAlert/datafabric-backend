@@ -21,7 +21,7 @@ from sqlalchemy.future import select
 from sqlalchemy import and_, or_, func
 from fastapi import HTTPException, status
 
-from ...database.models.core import DataConnection, Dataset
+from ...database.models.core import DataConnection, Dataset, ConnectionType
 from ...database.models.metadata import ExternalTables, ExternalColumn, ExternalSchema
 from ...database.models.relationships import TableRelationship, RelationshipScope, JoinType
 from ...database.models.bronze import (
@@ -60,6 +60,7 @@ from ...api.schemas.silver_schemas import (
 )
 from ..infrastructure.trino_manager import TrinoManager
 from ..infrastructure.spark_manager import SparkManager
+from ..infrastructure.credential_service import get_credential_service
 
 # Import the data normalizer
 import sys
@@ -949,6 +950,11 @@ class SilverTransformationService:
         
         start_time = datetime.now()
         
+        # Ensure all required Trino catalogs exist before querying
+        # (catalogs are in-memory and lost on Trino restart)
+        table_ids = [t['table_id'] for t in config.tables]
+        await self._ensure_catalogs_for_tables(table_ids)
+        
         sql, columns, warnings = await self._generate_virtualized_sql(config)
         
         # Add OFFSET/LIMIT (Trino requires OFFSET before LIMIT)
@@ -1523,6 +1529,68 @@ class SilverTransformationService:
             }
             for row in rows
         }
+    
+    async def _ensure_catalogs_for_tables(self, table_ids: List[int]) -> None:
+        """
+        Ensure Trino catalogs exist for all connections referenced by the given tables.
+        
+        Since Trino is configured with catalog.store=memory, catalogs are lost on restart
+        and must be recreated dynamically before querying.
+        """
+        if not table_ids:
+            return
+        
+        # Get connections referenced by the tables
+        query = select(
+            DataConnection.id,
+            DataConnection.name,
+            DataConnection.connection_params,
+            ConnectionType.name.label('type_name')
+        ).join(
+            ExternalTables, ExternalTables.connection_id == DataConnection.id
+        ).join(
+            ConnectionType, DataConnection.connection_type_id == ConnectionType.id
+        ).where(
+            ExternalTables.id.in_(table_ids)
+        )
+        
+        result = await self.db.execute(query)
+        rows = result.fetchall()
+        
+        if not rows:
+            return
+        
+        # Deduplicate by connection ID (can't use DISTINCT with JSON columns)
+        seen_ids = set()
+        connections = []
+        for row in rows:
+            if row.id not in seen_ids:
+                seen_ids.add(row.id)
+                connections.append(row)
+        
+        credential_service = get_credential_service()
+        
+        for conn in connections:
+            try:
+                decrypted_params = credential_service.decrypt_for_use(
+                    conn.connection_params,
+                    connection_id=conn.id,
+                    purpose="virtualized_query_catalog_creation"
+                )
+                
+                success = await self.trino.ensure_catalog_exists_async(
+                    connection_name=conn.name,
+                    connection_type=conn.type_name,
+                    params=decrypted_params,
+                    connection_id=conn.id
+                )
+                
+                if success:
+                    logger.info(f"Ensured catalog exists for connection '{conn.name}' (id={conn.id})")
+                else:
+                    logger.warning(f"Failed to ensure catalog for connection '{conn.name}' (id={conn.id})")
+            except Exception as e:
+                logger.error(f"Error ensuring catalog for connection '{conn.name}' (id={conn.id}): {e}")
     
     # ==================== TRANSFORM CONFIG ====================
     
