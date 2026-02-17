@@ -2,7 +2,7 @@
 from fastapi import APIRouter
 
 from app.api.routes import (
-    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes, delta_sharing_management, delta_sharing_protocol, bronze_routes, relationship_routes, federation_routes, silver_routes, internal, storage_browser
+    delta, token_routes, connection_routes, data_connection, metadata_viewer, data_visualization, equivalence, image_path_routes, dataset_routes, delta_sharing_management, delta_sharing_protocol, delta_sharing_data_api, bronze_routes, relationship_routes, federation_routes, silver_routes, internal, storage_browser
 )
 
 api_router = APIRouter()
@@ -68,6 +68,11 @@ api_router.include_router(
 # Delta Sharing Protocol APIs (compatible with standard clients)
 api_router.include_router(
     delta_sharing_protocol.router, prefix="/delta-sharing", tags=["Delta Sharing Protocol"]
+)
+
+# Delta Sharing Data API (REST access for virtualized tables)
+api_router.include_router(
+    delta_sharing_data_api.router, prefix="/delta-sharing", tags=["Delta Sharing Data API"]
 )
 
 # Storage Browser (Object Storage file/folder navigation)

@@ -18,7 +18,7 @@ x-airflow-common:
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
     AWS_REGION: us-east-1
     AWS_S3_ALLOW_UNSAFE_RENAME: "true"
-    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-minio deltalake==1.0.2 pyarrow==20.0.0 fsspec==2023.12.0 s3fs==2023.12.0}
+    _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-minio deltalake==1.4.2 beautifulsoup4 openpyxl}
   volumes:
     - ${AIRFLOW_PROJ_DIR:-.}/dags:/opt/airflow/dags
     - ${AIRFLOW_PROJ_DIR:-.}/logs:/opt/airflow/logs
@@ -39,7 +39,9 @@ x-airflow-common:
 services:
   dermalert-backend:
     build: ./project
-    command: poetry run uvicorn app.main:app --reload --workers 1 --host 0.0.0.0 --port 8000
+    command: >
+      bash -c "poetry run alembic upgrade head &&
+      poetry run uvicorn app.main:app --reload --workers 1 --host 0.0.0.0 --port 8000"
     env_file:
       - .env
     volumes:
@@ -47,8 +49,10 @@ services:
     ports:
       - 8004:8000
     depends_on:
-      - postgres-backend
-      - trino
+      postgres-backend:
+        condition: service_healthy
+      trino:
+        condition: service_started
       # - hive-metastore
     extra_hosts:
       - "localhost:host-gateway"  # Mapeia localhost para o host

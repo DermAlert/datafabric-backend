@@ -42,6 +42,13 @@ from fastapi import HTTPException, status
 from app.database.utils import DatabaseService
 from app.database.models import core
 from app.services.infrastructure.credential_service import get_credential_service
+from app.services.infrastructure.tunnel_manager import (
+    get_tunnel_manager,
+    has_tunnel_config,
+    extract_tunnel_config,
+    get_remote_address_from_params,
+    TunnelError,
+)
 from app.api.schemas.storage_browser_schemas import (
     StorageItem, StorageItemType, BucketInfo,
     BucketsResponse, StorageBrowseResponse, StorageObjectDetail, DownloadUrlResponse,
@@ -703,6 +710,10 @@ class StorageBrowserService:
         """
         Busca a conexão, descriptografa credenciais e cria o provider.
         
+        Se a conexão tiver túnel SSH configurado, o túnel será iniciado e
+        o endpoint do storage será substituído pelo endereço local do túnel.
+        O StorageBrowser roda no mesmo container, então usa ``127.0.0.1``.
+        
         Returns:
             Tupla com (provider, connection, connection_type, decrypted_params)
         """
@@ -714,8 +725,67 @@ class StorageBrowserService:
             purpose="storage_browse"
         )
 
+        # Iniciar túnel SSH e substituir endpoint se configurado
+        if has_tunnel_config(decrypted_params):
+            decrypted_params = await self._apply_tunnel_to_params(
+                connection.id, conn_type.name, decrypted_params
+            )
+
         provider = self._create_provider(conn_type.name, decrypted_params)
         return provider, connection, conn_type, decrypted_params
+    
+    async def _apply_tunnel_to_params(
+        self, connection_id: int, conn_type_name: str, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """
+        Inicia túnel SSH e retorna params com endpoint substituído.
+        
+        Para o StorageBrowser (mesmo container), usa ``127.0.0.1:porta_local``.
+        """
+        tunnel_config = extract_tunnel_config(params)
+        if not tunnel_config:
+            return params
+        
+        remote_host, remote_port = get_remote_address_from_params(conn_type_name, params)
+        
+        try:
+            tunnel_manager = get_tunnel_manager()
+            _, local_port = await tunnel_manager.get_or_create_tunnel(
+                connection_id=connection_id,
+                tunnel_config=tunnel_config,
+                remote_host=remote_host,
+                remote_port=remote_port,
+            )
+        except TunnelError as e:
+            logger.error(f"[StorageBrowser] Failed to create SSH tunnel for connection {connection_id}: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail=f"Falha ao criar túnel SSH: {str(e)}"
+            )
+        
+        # Substituir endpoint nos params (usa 127.0.0.1 pois está no mesmo container)
+        tunneled_params = params.copy()
+        name = conn_type_name.lower()
+        
+        # Determinar scheme do endpoint original
+        original_endpoint = (
+            params.get("endpoint_url") or params.get("s3a_endpoint")
+            or params.get("endpoint") or ""
+        )
+        scheme = "https" if original_endpoint.startswith("https") else "http"
+        tunneled_endpoint = f"{scheme}://127.0.0.1:{local_port}"
+        
+        if name == "deltalake":
+            tunneled_params["s3a_endpoint"] = tunneled_endpoint
+        elif name in ("s3", "minio"):
+            tunneled_params["endpoint"] = tunneled_endpoint
+        
+        logger.info(
+            f"[StorageBrowser] Using tunnel for connection {connection_id}: "
+            f"endpoint={tunneled_endpoint} (original: {original_endpoint})"
+        )
+        
+        return tunneled_params
 
     def _get_default_bucket(
         self, conn_type_name: str, params: Dict[str, Any]

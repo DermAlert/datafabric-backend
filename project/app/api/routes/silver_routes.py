@@ -12,10 +12,11 @@ Use ColumnGroup and ColumnMapping from Equivalence for semantic unification.
 NOTE: Filters are now defined inline within each config (not as separate entities).
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 
+from ..schemas.data_query_schemas import SilverDataQueryRequest
 from ..schemas.silver_schemas import (
     # Normalization Rules
     NormalizationRuleCreate,
@@ -43,6 +44,10 @@ from ..schemas.silver_schemas import (
     TransformExecuteResponse,
     SilverWriteModeEnum,
     TransformExecutionResponse,
+    # LLM Extraction
+    LLMExtractionTestRequest,
+    LLMExtractionTestResponse,
+    LLMExtractionOutputType,
     # Versioning
     SilverVersionHistoryResponse,
     SilverDataQueryResponse,
@@ -1464,4 +1469,278 @@ async def query_silver_data_with_time_travel(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to query Silver data: {str(e)}"
+        )
+
+
+# ==============================================================================
+# DATA QUERY WITH FILTERS (Excel-like filtering)
+# ==============================================================================
+
+@router.post(
+    "/persistent/configs/{config_id}/data/query",
+    response_model=SilverDataQueryResponse,
+    summary="Query Silver data with filters, sorting, and time travel",
+    description="""
+Query the Silver Delta Lake table with **Excel-like column filters**, sorting,
+and optional time travel. Use this endpoint for rich data browsing in the frontend.
+
+---
+
+## **Request Body:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit` | int | 1000 | Maximum rows to return (1-100000) |
+| `offset` | int | 0 | Rows to skip for pagination |
+| `version` | int | null | Query specific Delta version |
+| `as_of_timestamp` | string | null | Query as of timestamp (ISO format) |
+| `column_filters` | array | null | List of column filter conditions |
+| `column_filters_logic` | string | "AND" | Logic for combining filters: AND or OR |
+| `sort_by` | string | null | Column name to sort by |
+| `sort_order` | string | "asc" | Sort direction: asc or desc |
+
+---
+
+## **Filter Operators:**
+
+| Operator | Label | Applicable Types | Description |
+|----------|-------|-----------------|-------------|
+| `eq` | Equals | all | column = value |
+| `neq` | Not equals | all | column != value |
+| `contains` | Contains | string | Case-insensitive substring match |
+| `not_contains` | Does not contain | string | Case-insensitive negated substring |
+| `starts_with` | Starts with | string | Case-insensitive prefix match |
+| `ends_with` | Ends with | string | Case-insensitive suffix match |
+| `gt` | Greater than | number, date | column > value |
+| `gte` | Greater or equal | number, date | column >= value |
+| `lt` | Less than | number, date | column < value |
+| `lte` | Less or equal | number, date | column <= value |
+| `is_null` | Is empty | all | column IS NULL |
+| `is_not_null` | Is not empty | all | column IS NOT NULL |
+| `in` | Is one of | string, number | column IN (v1, v2, ...) |
+
+---
+
+## **Example Request:**
+
+```json
+{
+    "limit": 15,
+    "offset": 0,
+    "column_filters": [
+        {"column": "especialidade", "operator": "eq", "value": "HEMATOLOGIA"},
+        {"column": "data_consulta", "operator": "gte", "value": "2024-01-01"},
+        {"column": "descricao", "operator": "contains", "value": "AVC"}
+    ],
+    "column_filters_logic": "AND",
+    "sort_by": "data_consulta",
+    "sort_order": "desc"
+}
+```
+
+---
+
+## **Response:**
+
+```json
+{
+    "config_id": 1,
+    "config_name": "patients_silver",
+    "version": null,
+    "columns": ["patient_id", "especialidade", "data_consulta", "descricao"],
+    "data": [
+        {"patient_id": 42, "especialidade": "HEMATOLOGIA", "data_consulta": "2024-03-15", "descricao": "Paciente com AVC"},
+        ...
+    ],
+    "row_count": 15,
+    "total_rows": 127,
+    "execution_time_seconds": 0.8
+}
+```
+
+**Note:** `total_rows` reflects the count AFTER filtering (not total table rows).
+"""
+)
+async def query_silver_data_filtered(
+    config_id: int,
+    body: SilverDataQueryRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Query Silver data with column filters, sorting, and time travel."""
+    import time
+    from sqlalchemy.future import select
+    
+    start_time = time.time()
+    
+    try:
+        # Get config
+        result = await db.execute(
+            select(TransformConfig).where(
+                TransformConfig.id == config_id
+            )
+        )
+        config = result.scalar_one_or_none()
+        
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Transform config {config_id} not found"
+            )
+        
+        if not config.last_execution_status or config.last_execution_status == TransformStatus.FAILED:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Config has not been successfully executed yet. Run execute first."
+            )
+        
+        # Get output path from the latest successful execution
+        execution_result = await db.execute(
+            select(TransformExecution)
+            .where(
+                TransformExecution.config_id == config_id,
+                TransformExecution.status == TransformStatus.SUCCESS
+            )
+            .order_by(TransformExecution.started_at.desc())
+            .limit(1)
+        )
+        latest_execution = execution_result.scalar_one_or_none()
+        
+        if not latest_execution or not latest_execution.output_path:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No successful execution found with output path. Run execute first."
+            )
+        
+        output_path = latest_execution.output_path
+        
+        # Query using Spark with filters
+        from ...services.infrastructure.spark_manager import SparkManager
+        spark_manager = SparkManager()
+        
+        versioning_service = SilverVersioningService(db)
+        
+        with spark_manager.session_scope() as spark:
+            columns, data, total_rows = await versioning_service.query_at_version(
+                spark=spark,
+                output_path=output_path,
+                version=body.version,
+                timestamp=body.as_of_timestamp,
+                limit=body.limit,
+                offset=body.offset,
+                column_filters=body.column_filters,
+                column_filters_logic=body.column_filters_logic.value,
+                sort_by=body.sort_by,
+                sort_order=body.sort_order.value,
+            )
+        
+        execution_time = time.time() - start_time
+        
+        parsed_timestamp = None
+        if body.as_of_timestamp:
+            try:
+                from datetime import datetime
+                parsed_timestamp = datetime.fromisoformat(body.as_of_timestamp.replace('Z', '+00:00'))
+            except Exception:
+                pass
+        
+        return SilverDataQueryResponse(
+            config_id=config_id,
+            config_name=config.name,
+            version=body.version,
+            as_of_timestamp=parsed_timestamp,
+            columns=columns,
+            data=data,
+            row_count=len(data),
+            total_rows=total_rows,
+            execution_time_seconds=round(execution_time, 3)
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid filter parameter: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to query Silver data with filters: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query Silver data: {str(e)}"
+        )
+
+
+# ==============================================================================
+# LLM EXTRACTION (FREE-TEXT → STRUCTURED DATA)
+# ==============================================================================
+
+@router.post(
+    "/llm-extraction/test",
+    response_model=LLMExtractionTestResponse,
+    summary="Test an LLM extraction prompt",
+    description="""
+Test an LLM extraction prompt with a sample text before running a full transform.
+
+Use this endpoint to validate your prompt produces the expected results.
+This calls the configured LLM model (via LLM_BASE_URL, LLM_API_KEY, LLM_MODEL env vars)
+with PydanticAI structured output to guarantee type-safe responses.
+
+**Bool example:**
+```json
+{
+    "text": "Paciente masculino, 68 anos, admitido com quadro de AVC isquemico agudo...",
+    "prompt": "O texto menciona que o paciente teve AVC (Acidente Vascular Cerebral)?",
+    "output_type": "bool"
+}
+```
+
+**Enum example:**
+```json
+{
+    "text": "Paciente em estado grave, necessitando de UTI...",
+    "prompt": "Classifique a gravidade do quadro clinico descrito no texto.",
+    "output_type": "enum",
+    "enum_values": ["leve", "moderado", "grave", "nao_identificado"]
+}
+```
+"""
+)
+async def test_llm_extraction(
+    request: LLMExtractionTestRequest,
+):
+    """Test an LLM extraction prompt with a sample text."""
+    from ...services.silver.llm_extraction_service import get_llm_extraction_service
+    
+    try:
+        llm_service = get_llm_extraction_service()
+        
+        result = await llm_service.extract_single(
+            text=request.text,
+            prompt=request.prompt,
+            output_type=request.output_type.value,
+            enum_values=request.enum_values,
+        )
+        
+        text_preview = request.text[:200] + ("..." if len(request.text) > 200 else "")
+        
+        return LLMExtractionTestResponse(
+            success=result["success"],
+            result=result["result"],
+            output_type=request.output_type.value,
+            prompt_used=request.prompt,
+            text_preview=text_preview,
+            model_used=llm_service.model_name,
+            error=result.get("error"),
+        )
+        
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"LLM extraction test failed: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"LLM extraction test failed: {str(e)}"
         )

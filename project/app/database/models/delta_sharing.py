@@ -17,6 +17,14 @@ class TableShareStatus(enum.Enum):
     ACTIVE = "active"
     INACTIVE = "inactive"
 
+class ShareTableSourceType(enum.Enum):
+    """Source type of a shared table"""
+    DELTA = "delta"                                # Generic Delta Lake table (legacy/direct)
+    BRONZE = "bronze"                              # Materialized from Bronze Persistent Config
+    SILVER = "silver"                              # Materialized from Silver Transform Config
+    BRONZE_VIRTUALIZED = "bronze_virtualized"      # On-demand query via Bronze VirtualizedConfig
+    SILVER_VIRTUALIZED = "silver_virtualized"      # On-demand query via Silver VirtualizedConfig
+
 # Association tables for many-to-many relationships
 recipient_shares = Table(
     'recipient_shares', Base.metadata,
@@ -85,8 +93,20 @@ class ShareTable(AuditMixin, Base):
     name = Column(String(255), nullable=False)
     description = Column(TEXT, nullable=True)
     
-    # Reference to the actual dataset
-    dataset_id = Column(Integer, ForeignKey('core.datasets.id'), nullable=False)
+    # Reference to the actual dataset (nullable for virtualized tables)
+    dataset_id = Column(Integer, ForeignKey('core.datasets.id'), nullable=True)
+    
+    # Source type: delta (materialized), bronze_virtualized, silver_virtualized
+    source_type = Column(
+        Enum(ShareTableSourceType), 
+        nullable=False, 
+        default=ShareTableSourceType.DELTA,
+        server_default='DELTA'
+    )
+    
+    # Reference to virtualized config (only one should be set, based on source_type)
+    bronze_virtualized_config_id = Column(Integer, nullable=True)
+    silver_virtualized_config_id = Column(Integer, nullable=True)
     
     # Delta Sharing specific configuration
     status = Column(Enum(TableShareStatus), nullable=False, default=TableShareStatus.ACTIVE)

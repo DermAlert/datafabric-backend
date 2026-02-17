@@ -21,13 +21,14 @@ Key endpoints:
 - GET /bronze/configs/persistent/{id}/executions: View execution history
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from typing import List, Optional
 from datetime import datetime
 import logging
 
+from ..schemas.data_query_schemas import BronzeDataQueryRequest
 from ...database.session import get_db
 from ...database.models.core import Dataset, DataConnection
 from ...database.models.bronze import (
@@ -1734,6 +1735,204 @@ async def query_bronze_data(
         raise
     except Exception as e:
         logger.error(f"Failed to query Bronze data: {str(e)}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to query Bronze data: {str(e)}"
+        )
+
+
+# ==============================================================================
+# DATA QUERY WITH FILTERS (Excel-like filtering)
+# ==============================================================================
+
+@router.post(
+    "/configs/persistent/{config_id}/data/query",
+    response_model=BronzeDataQueryResponse,
+    summary="Query Bronze data with filters, sorting, and time travel",
+    description="""
+Query the Bronze Delta Lake table with **Excel-like column filters**, sorting,
+and optional time travel. Use this endpoint for rich data browsing in the frontend.
+
+---
+
+## **Request Body:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `limit` | int | 1000 | Maximum rows to return (1-100000) |
+| `offset` | int | 0 | Rows to skip for pagination |
+| `version` | int | null | Query specific Delta version |
+| `as_of_timestamp` | string | null | Query as of timestamp (ISO format) |
+| `path_index` | int | 0 | Index of output path to query |
+| `column_filters` | array | null | List of column filter conditions |
+| `column_filters_logic` | string | "AND" | Logic for combining filters: AND or OR |
+| `sort_by` | string | null | Column name to sort by |
+| `sort_order` | string | "asc" | Sort direction: asc or desc |
+
+---
+
+## **Filter Operators:**
+
+| Operator | Label | Applicable Types | Description |
+|----------|-------|-----------------|-------------|
+| `eq` | Equals | all | column = value |
+| `neq` | Not equals | all | column != value |
+| `contains` | Contains | string | Case-insensitive substring match |
+| `not_contains` | Does not contain | string | Case-insensitive negated substring |
+| `starts_with` | Starts with | string | Case-insensitive prefix match |
+| `ends_with` | Ends with | string | Case-insensitive suffix match |
+| `gt` | Greater than | number, date | column > value |
+| `gte` | Greater or equal | number, date | column >= value |
+| `lt` | Less than | number, date | column < value |
+| `lte` | Less or equal | number, date | column <= value |
+| `is_null` | Is empty | all | column IS NULL |
+| `is_not_null` | Is not empty | all | column IS NOT NULL |
+| `in` | Is one of | string, number | column IN (v1, v2, ...) |
+
+---
+
+## **Example Request:**
+
+```json
+{
+    "limit": 15,
+    "offset": 0,
+    "path_index": 0,
+    "column_filters": [
+        {"column": "_source_table", "operator": "eq", "value": "patients"},
+        {"column": "name", "operator": "contains", "value": "Silva"},
+        {"column": "age", "operator": "gte", "value": 18}
+    ],
+    "column_filters_logic": "AND",
+    "sort_by": "name",
+    "sort_order": "asc"
+}
+```
+
+---
+
+## **Response:**
+
+```json
+{
+    "config_id": 1,
+    "config_name": "patients_bronze",
+    "version": null,
+    "columns": ["patient_id", "name", "age", "_source_table", "_ingestion_timestamp"],
+    "data": [
+        {"patient_id": 42, "name": "Ana Silva", "age": 28, "_source_table": "patients", ...},
+        ...
+    ],
+    "row_count": 15,
+    "total_rows": 89,
+    "execution_time_seconds": 0.6
+}
+```
+
+**Note:** `total_rows` reflects the count AFTER filtering (not total table rows).
+"""
+)
+async def query_bronze_data_filtered(
+    config_id: int,
+    body: BronzeDataQueryRequest = Body(...),
+    db: AsyncSession = Depends(get_db),
+):
+    """Query Bronze data with column filters, sorting, and time travel."""
+    import time
+    start_time = time.time()
+    
+    try:
+        # Get config
+        result = await db.execute(
+            select(BronzePersistentConfig).where(
+                BronzePersistentConfig.id == config_id
+            )
+        )
+        config = result.scalar_one_or_none()
+        
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Persistent config {config_id} not found"
+            )
+        
+        # Get output path from the latest successful execution
+        execution_result = await db.execute(
+            select(BronzeExecution)
+            .where(
+                BronzeExecution.config_id == config_id,
+                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+            )
+            .order_by(BronzeExecution.started_at.desc())
+            .limit(1)
+        )
+        latest_execution = execution_result.scalar_one_or_none()
+        
+        if not latest_execution or not latest_execution.output_paths:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No successful execution found with output paths. Run execute first."
+            )
+        
+        output_paths = latest_execution.output_paths
+        if body.path_index >= len(output_paths):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"path_index {body.path_index} is out of range. Available paths: {len(output_paths)} (0-{len(output_paths)-1})"
+            )
+        
+        output_path = output_paths[body.path_index]
+        
+        # Query using Spark with filters
+        from ...services.infrastructure.spark_manager import SparkManager
+        spark_manager = SparkManager()
+        
+        versioning_service = BronzeVersioningService(db)
+        
+        with spark_manager.session_scope() as spark:
+            columns, data, total_rows = await versioning_service.query_at_version(
+                spark=spark,
+                output_path=output_path,
+                version=body.version,
+                timestamp=body.as_of_timestamp,
+                limit=body.limit,
+                offset=body.offset,
+                column_filters=body.column_filters,
+                column_filters_logic=body.column_filters_logic.value,
+                sort_by=body.sort_by,
+                sort_order=body.sort_order.value,
+            )
+        
+        execution_time = time.time() - start_time
+        
+        parsed_timestamp = None
+        if body.as_of_timestamp:
+            try:
+                parsed_timestamp = datetime.fromisoformat(body.as_of_timestamp.replace('Z', '+00:00'))
+            except Exception:
+                pass
+        
+        return BronzeDataQueryResponse(
+            config_id=config_id,
+            config_name=config.name,
+            version=body.version,
+            as_of_timestamp=parsed_timestamp,
+            columns=columns,
+            data=data,
+            row_count=len(data),
+            total_rows=total_rows,
+            execution_time_seconds=round(execution_time, 3)
+        )
+        
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Invalid filter parameter: {str(e)}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to query Bronze data with filters: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to query Bronze data: {str(e)}"

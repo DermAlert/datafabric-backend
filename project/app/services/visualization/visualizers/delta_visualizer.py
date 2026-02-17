@@ -1,6 +1,7 @@
 from typing import Dict, Any, List, Tuple, Optional
 
 from ...infrastructure.trino_extractor import TrinoExtractor
+from ...infrastructure.trino_manager import TrinoManager
 from ....utils.logger import logger
 from ....api.schemas.data_visualization_schemas import Filter, Sort
 
@@ -30,6 +31,14 @@ async def visualize_delta_data(
         
         # Construct Trino SQL query
         catalog = extractor.catalog
+        
+        # Flush metadata cache so Trino sees the latest Delta files
+        trino_manager = TrinoManager()
+        await trino_manager.flush_metadata_cache(
+            catalog_name=catalog,
+            schema_name=schema_name,
+            table_name=table_name,
+        )
         
         # Basic Select
         select_clause = "*"
@@ -126,10 +135,9 @@ async def execute_delta_query(
             connection_name="custom_query"
         )
         
-        # Note: The incoming query might be Spark SQL. Trino SQL is ANSI SQL compliant but might differ slightly.
-        # We assume the user provides Trino-compatible SQL or simple SQL.
-        # If the query assumes a specific catalog name that differs from our dynamic one, this might fail.
-        # ideally we should inject the catalog name.
+        # Flush metadata cache so Trino sees the latest Delta files
+        trino_manager = TrinoManager()
+        await trino_manager.flush_metadata_cache(catalog_name=extractor.catalog)
         
         conn = await extractor._get_connection()
         cur = await conn.cursor()

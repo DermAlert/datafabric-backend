@@ -44,12 +44,15 @@ SELECT
         ELSE 'UNIQUE'
     END as constraint_type,
     REFERENCED_TABLE_NAME as referenced_table,
-    REFERENCED_COLUMN_NAME as referenced_column
+    REFERENCED_COLUMN_NAME as referenced_column,
+    REFERENCED_TABLE_SCHEMA as referenced_schema
 FROM information_schema.KEY_COLUMN_USAGE
 WHERE TABLE_SCHEMA = '{schema}'
 """
 
 # PostgreSQL - Uses information_schema with joins
+# Note: The LEFT JOIN on ccu does NOT restrict by table_schema, allowing
+# cross-schema FK references (e.g. vendas.pedidos -> public.clientes).
 POSTGRESQL_PK_FK_QUERY = """
 SELECT 
     tc.table_name,
@@ -57,14 +60,14 @@ SELECT
     tc.constraint_name,
     tc.constraint_type,
     ccu.table_name AS referenced_table,
-    ccu.column_name AS referenced_column
+    ccu.column_name AS referenced_column,
+    ccu.table_schema AS referenced_schema
 FROM information_schema.table_constraints tc
 JOIN information_schema.key_column_usage kcu 
     ON tc.constraint_name = kcu.constraint_name 
     AND tc.table_schema = kcu.table_schema
 LEFT JOIN information_schema.constraint_column_usage ccu 
-    ON tc.constraint_name = ccu.constraint_name 
-    AND tc.table_schema = ccu.table_schema
+    ON tc.constraint_name = ccu.constraint_name
 WHERE tc.table_schema = '{schema}' 
     AND tc.constraint_type IN ('PRIMARY KEY', 'FOREIGN KEY', 'UNIQUE')
 """
@@ -81,7 +84,8 @@ SELECT
         WHEN kc.type = 'UQ' THEN 'UNIQUE'
     END AS constraint_type,
     rt.name AS referenced_table,
-    rc.name AS referenced_column
+    rc.name AS referenced_column,
+    SCHEMA_NAME(rt.schema_id) AS referenced_schema
 FROM sys.key_constraints kc
 JOIN sys.index_columns ic ON kc.parent_object_id = ic.object_id AND kc.unique_index_id = ic.index_id
 JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
@@ -258,8 +262,11 @@ class ConstraintExtractionService:
         fk_count = 0
         
         # Process each constraint
+        # Columns: table_name, column_name, constraint_name, constraint_type,
+        #          referenced_table, referenced_column, referenced_schema
         for row in rows:
             table_name, column_name, constraint_name, constraint_type, ref_table, ref_column = row[:6]
+            ref_schema = row[6] if len(row) > 6 else None
             
             # Find the column in our metadata
             column = await self._find_column(connection_id, schema, table_name, column_name)
@@ -271,9 +278,19 @@ class ConstraintExtractionService:
                 pk_count += 1
                 
             elif constraint_type == 'FOREIGN KEY' and ref_table and ref_column:
-                # Find referenced column
-                ref_col = await self._find_column(connection_id, schema, ref_table, ref_column)
-                ref_table_obj = await self._find_table(connection_id, schema, ref_table)
+                # Use referenced_schema if available, fallback to current schema
+                lookup_schema = ref_schema or schema
+                
+                # Find referenced column and table (may be in a different schema)
+                ref_col = await self._find_column(connection_id, lookup_schema, ref_table, ref_column)
+                ref_table_obj = await self._find_table(connection_id, lookup_schema, ref_table)
+                
+                if not ref_col and ref_schema and ref_schema != schema:
+                    # Log cross-schema FK that couldn't be resolved
+                    logger.warning(
+                        f"Cross-schema FK not resolved: {schema}.{table_name}.{column_name} -> "
+                        f"{ref_schema}.{ref_table}.{ref_column} (referenced schema metadata may not be extracted)"
+                    )
                 
                 await self._update_column_fk(
                     column.id,
