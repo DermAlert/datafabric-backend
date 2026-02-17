@@ -13,7 +13,7 @@ SQLAlchemy = "2.0.37"
 uvicorn = "0.34.0"
 bcrypt = "4.2.1"
 python-jose = "3.3.0"
-pydantic = { version = "2.10", extras = ["email"] }
+pydantic = { version = "2.10.3", extras = ["email"] }
 passlib = "1.7.4"
 python-multipart = "0.0.20"
 minio = "7.2.15"
@@ -30,6 +30,9 @@ redis="6.2.0"
 httpx="0.28.1"
 aiotrino = "^0.3.0"
 cryptography = "^44.0.0"  # Para criptografia de credenciais (AES-256-GCM)
+sshtunnel = "^0.4.0"  # Para SSH tunneling de conexões em redes privadas
+paramiko = ">=3.0,<4.0"  # Pinado <4.0: sshtunnel usa paramiko.DSSKey removido em 4.0
+pydantic-ai-slim = {version = "^1.59.0", extras = ["openai"]}  # Para extração LLM no Silver Layer
 google-cloud-storage = {version = "^2.18.0", optional = true}  # Para Storage Browser (GCS)
 azure-storage-blob = {version = "^12.23.0", optional = true}  # Para Storage Browser (Azure)
 azure-identity = {version = "^1.19.0", optional = true}  # Para Azure service principal auth

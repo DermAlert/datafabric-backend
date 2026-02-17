@@ -21,6 +21,7 @@ class SchemaResponse(BaseModel):
     connection_id: int
     schema_name: str
     external_reference: Optional[str] = None
+    is_system_schema: bool = False
     properties: Dict[str, Any]
     fl_ativo: bool
     

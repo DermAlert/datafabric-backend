@@ -10,18 +10,10 @@ from app.api.schemas.search import BaseSearchRequest, SearchDataResult
 
 from app.database.utils import DatabaseService
 from app.database.models import core
-from app.services.connections.connection_manager import test_connection
+from app.services.connection_manager import test_connection
 from app.utils.connection_validators import validate_metadata_connection
-from app.services.infrastructure.airflow_client import get_airflow_client
-from app.services.infrastructure.credential_service import get_credential_service
-from app.services.infrastructure.tunnel_manager import (
-    get_tunnel_manager,
-    has_tunnel_config,
-    extract_tunnel_config,
-    get_remote_address_from_params,
-    TunnelError,
-)
-from app.services.storage.storage_browser_service import StorageBrowserService, OBJECT_STORAGE_TYPES
+from app.services.airflow_client import get_airflow_client
+from app.services.credential_service import get_credential_service
 
 logger = logging.getLogger(__name__)
 
@@ -127,14 +119,6 @@ class DataConnectionService:
 
     async def delete(self, id: int):
         obj = await self.get(id)
-        
-        # Encerrar túnel SSH ativo (se houver)
-        try:
-            tunnel_manager = get_tunnel_manager()
-            await tunnel_manager.stop_tunnel(id)
-        except Exception as e:
-            logger.warning(f"[DataConnectionService] Error stopping tunnel for connection {id}: {e}")
-        
         # TODO: check if in use by datasets (implement if you have that logic)
         await self.db.delete(obj)
         await self.db.commit()
@@ -157,25 +141,14 @@ class DataConnectionService:
                 safe_params[k] = v
         return safe_params
 
-    async def _do_test(
-        self, connection_type_id: int, connection_params: dict,
-        context: str = "", connection_id: Optional[int] = None,
-    ) -> ConnectionTestResult:
+    async def _do_test(self, connection_type_id: int, connection_params: dict, context: str = "") -> ConnectionTestResult:
         """
         Lógica central de teste de conexão.
-        
-        Detecta automaticamente o tipo de conexão:
-        - Object Storage (s3, gcs, azure_storage, deltalake): testa via StorageBrowserService
-        - Metadata (postgresql, mysql, etc.): testa via Trino
-        
-        Suporta túnel SSH automaticamente se ``connection_params`` contiver
-        bloco ``tunnel`` com ``enabled: true``.
         
         Args:
             connection_type_id: ID do tipo de conexão
             connection_params: Parâmetros da conexão (podem estar criptografados)
             context: Contexto para logging (ex: "id=5" ou "params only")
-            connection_id: ID da conexão (para gerenciamento de túnel)
         """
         ct = await self._get_connection_type(connection_type_id)
         
@@ -188,32 +161,12 @@ class DataConnectionService:
         
         logger.info(f"[DataConnectionService] Testing connection {context}")
         logger.info(f"[DataConnectionService] Connection type: {ct.name}")
+        # SEGURANÇA: Usar mascaramento centralizado
         logger.info(f"[DataConnectionService] Params (masked): {credential_service.mask_for_logging(decrypted_params, ct.name)}")
         
-        # Object Storage: delegar para StorageBrowserService
-        if ct.name.lower() in OBJECT_STORAGE_TYPES:
-            logger.info(f"[DataConnectionService] Using storage browser test for type '{ct.name}'")
-            storage_service = StorageBrowserService(self.db)
-            
-            # Aplicar túnel ao endpoint se configurado
-            test_params = decrypted_params
-            if has_tunnel_config(decrypted_params):
-                test_params = await storage_service._apply_tunnel_to_params(
-                    connection_id or 0, ct.name, decrypted_params
-                )
-            
-            result = await storage_service._do_storage_test(ct.name, test_params)
-            return ConnectionTestResult(
-                success=result.success,
-                message=result.message,
-                details=result.details,
-            )
-        
-        # Metadata/Relational: testar via Trino (tunnel é gerenciado internamente)
         success, message, details = await test_connection(
             connection_type=ct.name,
-            connection_params=decrypted_params,
-            connection_id=connection_id,
+            connection_params=decrypted_params
         )
         
         return ConnectionTestResult(success=success, message=message, details=details)
@@ -225,8 +178,7 @@ class DataConnectionService:
         result = await self._do_test(
             connection_type_id=obj.connection_type_id,
             connection_params=obj.connection_params,
-            context=f"id={id}",
-            connection_id=id,
+            context=f"id={id}"
         )
         
         # Atualiza status no banco

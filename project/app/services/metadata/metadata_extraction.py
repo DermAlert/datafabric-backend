@@ -109,8 +109,11 @@ async def _get_or_create_schema(
     )
     existing = (await db.execute(stmt)).scalars().first()
     
+    is_system = schema_info.get("is_system_schema", False)
+    
     if existing:
         existing.last_scanned = datetime.now()
+        existing.is_system_schema = is_system
         return existing
     
     # Try to create
@@ -120,6 +123,7 @@ async def _get_or_create_schema(
             schema_name=schema_name,
             catalog_id=catalog_id,
             external_reference=schema_info.get("external_reference"),
+            is_system_schema=is_system,
             properties=schema_info.get("properties", {})
         )
         db.add(schema_obj)

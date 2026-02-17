@@ -117,9 +117,15 @@ class TableService:
     
     async def get_table(self, share_id: int, schema_id: int, table_id: int, organization_id: int) -> ShareTableDetail:
         """Get table by ID"""
-        query = select(ShareTable, ShareSchema, Share, Dataset).join(
-            ShareSchema
-        ).join(Share).join(Dataset).where(
+        query = select(ShareTable, ShareSchema, Share, Dataset).select_from(
+            ShareTable
+        ).join(
+            ShareSchema, ShareTable.schema_id == ShareSchema.id
+        ).join(
+            Share, ShareSchema.share_id == Share.id
+        ).outerjoin(
+            Dataset, ShareTable.dataset_id == Dataset.id
+        ).where(
             and_(
                 ShareTable.id == table_id,
                 ShareTable.schema_id == schema_id,
@@ -141,9 +147,15 @@ class TableService:
     
     async def get_table_by_name(self, share_name: str, schema_name: str, table_name: str, organization_id: int) -> ShareTableDetail:
         """Get table by name"""
-        query = select(ShareTable, ShareSchema, Share, Dataset).join(
-            ShareSchema
-        ).join(Share).join(Dataset).where(
+        query = select(ShareTable, ShareSchema, Share, Dataset).select_from(
+            ShareTable
+        ).join(
+            ShareSchema, ShareTable.schema_id == ShareSchema.id
+        ).join(
+            Share, ShareSchema.share_id == Share.id
+        ).outerjoin(
+            Dataset, ShareTable.dataset_id == Dataset.id
+        ).where(
             and_(
                 ShareTable.name == table_name,
                 ShareSchema.name == schema_name,
@@ -165,9 +177,15 @@ class TableService:
     
     async def update_table(self, share_id: int, schema_id: int, table_id: int, table_data: ShareTableUpdate, organization_id: int) -> ShareTableDetail:
         """Update an existing shared table"""
-        query = select(ShareTable, ShareSchema, Share, Dataset).join(
-            ShareSchema
-        ).join(Share).join(Dataset).where(
+        query = select(ShareTable, ShareSchema, Share, Dataset).select_from(
+            ShareTable
+        ).join(
+            ShareSchema, ShareTable.schema_id == ShareSchema.id
+        ).join(
+            Share, ShareSchema.share_id == Share.id
+        ).outerjoin(
+            Dataset, ShareTable.dataset_id == Dataset.id
+        ).where(
             and_(
                 ShareTable.id == table_id,
                 ShareTable.schema_id == schema_id,
@@ -281,7 +299,11 @@ class TableService:
         
         db_schema, db_share = schema_share
         
-        query = select(ShareTable, Dataset).join(Dataset).where(ShareTable.schema_id == schema_id)
+        query = select(ShareTable, Dataset).select_from(
+            ShareTable
+        ).outerjoin(
+            Dataset, ShareTable.dataset_id == Dataset.id
+        ).where(ShareTable.schema_id == schema_id)
         
         # Apply filters
         if search_params.search:
@@ -341,8 +363,13 @@ class TableService:
         
         self.db.add(version)
     
-    async def _build_table_detail(self, table: ShareTable, schema: ShareSchema, share: Share, dataset: Dataset) -> ShareTableDetail:
-        """Build detailed table information"""
+    async def _build_table_detail(self, table: ShareTable, schema: ShareSchema, share: Share, dataset=None) -> ShareTableDetail:
+        """Build detailed table information. Dataset may be None for virtualized tables."""
+        # Get source_type as string value
+        source_type_value = "delta"
+        if hasattr(table, 'source_type') and table.source_type is not None:
+            source_type_value = table.source_type.value if hasattr(table.source_type, 'value') else str(table.source_type)
+        
         return ShareTableDetail(
             id=table.id,
             name=table.name,
@@ -352,7 +379,7 @@ class TableService:
             share_id=schema.share_id,
             share_name=share.name,
             dataset_id=table.dataset_id,
-            dataset_name=dataset.name,
+            dataset_name=dataset.name if dataset else None,
             status=table.status,
             share_mode=table.share_mode,
             filter_condition=table.filter_condition,
@@ -360,6 +387,9 @@ class TableService:
             table_format=table.table_format,
             partition_columns=table.partition_columns,
             storage_location=table.storage_location,
+            source_type=source_type_value,
+            bronze_virtualized_config_id=getattr(table, 'bronze_virtualized_config_id', None),
+            silver_virtualized_config_id=getattr(table, 'silver_virtualized_config_id', None),
             data_criacao=table.data_criacao,
             data_atualizacao=table.data_atualizacao
         )

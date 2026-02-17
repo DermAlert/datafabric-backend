@@ -4,7 +4,7 @@ Pydantic Schemas for Silver Layer
 These schemas define the API contracts for the Silver layer transformation system.
 """
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 from enum import Enum
@@ -107,6 +107,17 @@ class SilverWriteModeEnum(str, Enum):
     OVERWRITE = "overwrite"
     APPEND = "append"
     MERGE = "merge"
+
+
+class LLMExtractionOutputType(str, Enum):
+    """
+    Output type for LLM-based column extraction from free-text fields.
+    
+    - **bool**: True/False extraction (e.g., "Does the patient have AVC?")
+    - **enum**: Categorical extraction with predefined values (e.g., severity: leve/moderado/grave)
+    """
+    BOOL = "bool"
+    ENUM = "enum"
 
 
 # ==================== TABLE SELECTION ====================
@@ -307,6 +318,134 @@ class ColumnTransformation(BaseModel):
     rule_id: Optional[int] = Field(None, description="normalization_rule.id (required for type=template)")
 
 
+# ==================== LLM EXTRACTION (FREE-TEXT → STRUCTURED) ====================
+
+class LLMExtractionDefinition(BaseModel):
+    """
+    Definition for extracting structured data from a free-text column using LLM.
+    
+    Creates a NEW column in the Silver output with data extracted via LLM prompt.
+    The LLM is forced to return structured output matching the specified type
+    (bool or enum) using PydanticAI structured output.
+    
+    Examples:
+        Bool extraction (yes/no question about the text):
+        ```json
+        {
+            "source_column_id": 170,
+            "new_column_name": "tem_avc",
+            "prompt": "O texto menciona que o paciente teve AVC (Acidente Vascular Cerebral)?",
+            "output_type": "bool"
+        }
+        ```
+        
+        Enum extraction (classify text into categories):
+        ```json
+        {
+            "source_column_id": 170,
+            "new_column_name": "gravidade",
+            "prompt": "Classifique a gravidade do quadro clinico descrito no texto.",
+            "output_type": "enum",
+            "enum_values": ["leve", "moderado", "grave", "nao_identificado"]
+        }
+        ```
+    
+    Notes:
+        - source_column_id uses the same external_column.id as column_transformations
+        - Multiple extractions can reference the same source column
+        - Only available in Transform (materialized), not in Virtualized queries
+        - LLM model, URL, and API key are configured via environment variables
+    """
+    source_column_id: int = Field(
+        ..., 
+        description="external_column.id of the free-text column to extract from"
+    )
+    new_column_name: str = Field(
+        ..., 
+        min_length=1, 
+        max_length=255,
+        pattern=r'^[a-zA-Z_][a-zA-Z0-9_]*$',
+        description="Name for the new derived column (must be a valid column name)"
+    )
+    prompt: str = Field(
+        ..., 
+        min_length=1,
+        max_length=2000,
+        description="Prompt describing what to extract from the text. "
+                    "Be specific about what constitutes a positive/negative result."
+    )
+    output_type: LLMExtractionOutputType = Field(
+        ..., 
+        description="Type of the output: 'bool' for True/False, 'enum' for categorical values"
+    )
+    enum_values: Optional[List[str]] = Field(
+        None, 
+        min_length=2,
+        description="Accepted values for enum output_type (required when output_type='enum', min 2 values). "
+                    "The LLM will be forced to choose one of these values."
+    )
+    
+    @model_validator(mode='after')
+    def validate_enum_config(self):
+        if self.output_type == LLMExtractionOutputType.ENUM:
+            if not self.enum_values or len(self.enum_values) < 2:
+                raise ValueError("enum_values is required with at least 2 values when output_type is 'enum'")
+        if self.output_type == LLMExtractionOutputType.BOOL and self.enum_values:
+            raise ValueError("enum_values should not be provided when output_type is 'bool'")
+        return self
+
+
+class LLMExtractionTestRequest(BaseModel):
+    """
+    Test an LLM extraction prompt with a sample text before running the full transform.
+    
+    Use this to validate your prompt works as expected before processing an entire table.
+    
+    Example:
+    ```json
+    {
+        "text": "Paciente masculino, 68 anos, admitido com quadro de AVC isquemico...",
+        "prompt": "O texto menciona que o paciente teve AVC?",
+        "output_type": "bool"
+    }
+    ```
+    """
+    text: str = Field(..., min_length=1, description="Sample text to extract from")
+    prompt: str = Field(..., min_length=1, max_length=2000, description="Extraction prompt")
+    output_type: LLMExtractionOutputType = Field(..., description="Expected output type")
+    enum_values: Optional[List[str]] = Field(None, min_length=2, description="Accepted values for enum type")
+    
+    @model_validator(mode='after')
+    def validate_enum_config(self):
+        if self.output_type == LLMExtractionOutputType.ENUM:
+            if not self.enum_values or len(self.enum_values) < 2:
+                raise ValueError("enum_values is required with at least 2 values when output_type is 'enum'")
+        if self.output_type == LLMExtractionOutputType.BOOL and self.enum_values:
+            raise ValueError("enum_values should not be provided when output_type is 'bool'")
+        return self
+
+
+class LLMExtractionTestResponse(BaseModel):
+    """Response from testing an LLM extraction."""
+    success: bool
+    result: Optional[Any] = Field(None, description="Extracted value (bool or enum string)")
+    output_type: str
+    prompt_used: str
+    text_preview: str = Field(..., description="First 200 chars of input text")
+    model_used: str
+    error: Optional[str] = None
+
+
+class LLMExtractionColumnResult(BaseModel):
+    """Result summary for a single LLM extraction column after transform execution."""
+    column_name: str
+    output_type: str
+    rows_processed: int
+    rows_success: int
+    rows_failed: int
+    error_rate: float = Field(..., description="Percentage of failed extractions (0.0 to 1.0)")
+
+
 # ==================== VIRTUALIZED CONFIG ====================
 
 class VirtualizedConfigCreate(BaseModel):
@@ -464,6 +603,14 @@ class TransformConfigCreate(BaseModel):
     
     image_labeling_config: Optional[TransformImageLabeling] = None
     
+    # LLM-based extraction from free-text columns
+    llm_extractions: Optional[List[LLMExtractionDefinition]] = Field(
+        None,
+        description="LLM-based extraction definitions. Creates new columns by extracting structured data "
+                    "(bool/enum) from free-text columns using an LLM prompt. "
+                    "Each definition creates one new column in the Silver output."
+    )
+    
     exclude_unified_source_columns: bool = Field(
         False,
         description="When True, excludes original source columns after semantic unification. "
@@ -485,6 +632,7 @@ class TransformConfigUpdate(BaseModel):
     filters: Optional[InlineFilter] = None
     column_transformations: Optional[List[ColumnTransformation]] = None
     image_labeling_config: Optional[TransformImageLabeling] = None
+    llm_extractions: Optional[List[LLMExtractionDefinition]] = None
     exclude_unified_source_columns: Optional[bool] = None
     is_active: Optional[bool] = None
 
@@ -510,6 +658,7 @@ class TransformConfigResponse(BaseModel):
     filters: Optional[Dict[str, Any]]
     column_transformations: Optional[List[Dict[str, Any]]]
     image_labeling_config: Optional[Dict[str, Any]]
+    llm_extractions: Optional[List[Dict[str, Any]]] = None
     exclude_unified_source_columns: bool = False
     
     # Versioning (always overwrite)
@@ -555,6 +704,9 @@ class TransformExecuteResponse(BaseModel):
     
     # Statistics
     rows_inserted: Optional[int] = None
+    
+    # LLM extraction results (if any)
+    llm_extraction_results: Optional[List[LLMExtractionColumnResult]] = None
     
     # Config snapshot at execution time (for reproducibility)
     config_snapshot: Optional[Dict[str, Any]] = None

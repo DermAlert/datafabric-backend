@@ -14,16 +14,19 @@ from ...api.schemas.delta_sharing_schemas import (
     SearchShares, SearchSchemas, SearchTables, SearchRecipients,
     # Bronze/Silver Integration
     AvailableDataset, DatasetSourceType,
-    CreateTableFromBronze, CreateTableFromSilver, IntegrationTableDetail
+    CreateTableFromBronze, CreateTableFromSilver, IntegrationTableDetail,
+    # Virtualized Integration
+    CreateTableFromBronzeVirtualized, CreateTableFromSilverVirtualized,
+    VirtualizedSourceType
 )
 from ...api.schemas.search import SearchResult
 from ...services.delta_sharing.share_service import ShareService, SchemaService
 from ...services.delta_sharing.table_service import TableService, RecipientService
 from ...services.delta_sharing.dataset_integration_service import DatasetDeltaSharingService
 # Bronze/Silver models
-from ...database.models.bronze import BronzePersistentConfig, BronzeExecution, BronzeExecutionStatus
-from ...database.models.silver import TransformConfig, TransformExecution, TransformStatus
-from ...database.models.delta_sharing import ShareTable, ShareSchema, Share, TableShareStatus
+from ...database.models.bronze import BronzePersistentConfig, BronzeExecution, BronzeExecutionStatus, BronzeVirtualizedConfig
+from ...database.models.silver import TransformConfig, TransformExecution, TransformStatus, VirtualizedConfig
+from ...database.models.delta_sharing import ShareTable, ShareSchema, Share, TableShareStatus, ShareTableSourceType
 from ...database.models.core import Dataset
 
 router = APIRouter()
@@ -699,6 +702,7 @@ async def create_table_from_bronze(
             name=data.name,
             description=data.description or f"Bronze data from {bronze_config.name}",
             dataset_id=legacy_dataset.id,
+            source_type=ShareTableSourceType.BRONZE,
             storage_location=storage_location,
             status=TableShareStatus.ACTIVE,
             share_mode=data.share_mode,
@@ -844,6 +848,7 @@ async def create_table_from_silver(
             name=data.name,
             description=data.description or f"Silver data from {silver_config.name}",
             dataset_id=legacy_dataset.id,
+            source_type=ShareTableSourceType.SILVER,
             storage_location=storage_location,
             status=TableShareStatus.ACTIVE,
             share_mode=data.share_mode,
@@ -984,3 +989,222 @@ async def get_silver_dataset_info(
             detail=f"Error getting Silver config info: {str(e)}"
         )
 
+
+# ==================== VIRTUALIZED TABLE INTEGRATION ====================
+
+@router.post("/shares/{share_id}/schemas/{schema_id}/tables/from-bronze-virtualized",
+             response_model=IntegrationTableDetail,
+             status_code=status.HTTP_201_CREATED)
+async def create_table_from_bronze_virtualized(
+    share_id: int,
+    schema_id: int,
+    data: CreateTableFromBronzeVirtualized,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a Delta Sharing table from a Bronze Virtualized Config.
+    
+    The table will serve data on-demand via Trino (no materialization).
+    Recipients can access the data through the Data API endpoint:
+    POST /api/delta-sharing/shares/{share}/schemas/{schema}/tables/{table}/data
+    """
+    try:
+        organization_id = 1  # Hardcoded for now
+
+        # Verify share and schema exist
+        schema_query = select(ShareSchema, Share).join(Share).where(
+            and_(
+                ShareSchema.id == schema_id,
+                ShareSchema.share_id == share_id,
+                Share.organization_id == organization_id
+            )
+        )
+        schema_result = await db.execute(schema_query)
+        row = schema_result.first()
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Schema or share not found"
+            )
+        db_schema, db_share = row
+
+        # Get Bronze Virtualized Config
+        config_query = select(BronzeVirtualizedConfig).where(
+            and_(
+                BronzeVirtualizedConfig.id == data.bronze_virtualized_config_id,
+                BronzeVirtualizedConfig.is_active == True
+            )
+        )
+        config_result = await db.execute(config_query)
+        config = config_result.scalar_one_or_none()
+
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Bronze Virtualized Config {data.bronze_virtualized_config_id} not found or inactive"
+            )
+
+        # Check if table name already exists in this schema
+        existing = await db.execute(
+            select(ShareTable).where(
+                and_(ShareTable.schema_id == schema_id, ShareTable.name == data.name)
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Table '{data.name}' already exists in this schema"
+            )
+
+        # Create the virtualized share table (no storage_location, no dataset_id needed)
+        db_table = ShareTable(
+            schema_id=schema_id,
+            name=data.name,
+            description=data.description or f"Virtualized Bronze data from {config.name}",
+            dataset_id=None,
+            source_type=ShareTableSourceType.BRONZE_VIRTUALIZED,
+            bronze_virtualized_config_id=config.id,
+            silver_virtualized_config_id=None,
+            storage_location=None,
+            status=TableShareStatus.ACTIVE,
+            share_mode='full',
+            current_version=1,
+            table_format="virtualized"
+        )
+
+        db.add(db_table)
+        await db.commit()
+        await db.refresh(db_table)
+
+        return IntegrationTableDetail(
+            table_id=db_table.id,
+            table_name=db_table.name,
+            share_id=db_share.id,
+            share_name=db_share.name,
+            schema_id=db_schema.id,
+            schema_name=db_schema.name,
+            source_type=DatasetSourceType.BRONZE,
+            source_config_id=config.id,
+            source_config_name=config.name,
+            storage_location=None,
+            current_version=db_table.current_version,
+            share_mode=db_table.share_mode,
+            status=db_table.status.value
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating table from Bronze Virtualized: {str(e)}"
+        )
+
+
+@router.post("/shares/{share_id}/schemas/{schema_id}/tables/from-silver-virtualized",
+             response_model=IntegrationTableDetail,
+             status_code=status.HTTP_201_CREATED)
+async def create_table_from_silver_virtualized(
+    share_id: int,
+    schema_id: int,
+    data: CreateTableFromSilverVirtualized,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Create a Delta Sharing table from a Silver Virtualized Config.
+    
+    The table will serve data on-demand via Trino (no materialization).
+    Recipients can access the data through the Data API endpoint:
+    POST /api/delta-sharing/shares/{share}/schemas/{schema}/tables/{table}/data
+    """
+    try:
+        organization_id = 1  # Hardcoded for now
+
+        # Verify share and schema exist
+        schema_query = select(ShareSchema, Share).join(Share).where(
+            and_(
+                ShareSchema.id == schema_id,
+                ShareSchema.share_id == share_id,
+                Share.organization_id == organization_id
+            )
+        )
+        schema_result = await db.execute(schema_query)
+        row = schema_result.first()
+        if not row:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Schema or share not found"
+            )
+        db_schema, db_share = row
+
+        # Get Silver Virtualized Config
+        config_query = select(VirtualizedConfig).where(
+            and_(
+                VirtualizedConfig.id == data.silver_virtualized_config_id,
+                VirtualizedConfig.is_active == True
+            )
+        )
+        config_result = await db.execute(config_query)
+        config = config_result.scalar_one_or_none()
+
+        if not config:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Silver Virtualized Config {data.silver_virtualized_config_id} not found or inactive"
+            )
+
+        # Check if table name already exists in this schema
+        existing = await db.execute(
+            select(ShareTable).where(
+                and_(ShareTable.schema_id == schema_id, ShareTable.name == data.name)
+            )
+        )
+        if existing.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Table '{data.name}' already exists in this schema"
+            )
+
+        # Create the virtualized share table
+        db_table = ShareTable(
+            schema_id=schema_id,
+            name=data.name,
+            description=data.description or f"Virtualized Silver data from {config.name}",
+            dataset_id=None,
+            source_type=ShareTableSourceType.SILVER_VIRTUALIZED,
+            bronze_virtualized_config_id=None,
+            silver_virtualized_config_id=config.id,
+            storage_location=None,
+            status=TableShareStatus.ACTIVE,
+            share_mode='full',
+            current_version=1,
+            table_format="virtualized"
+        )
+
+        db.add(db_table)
+        await db.commit()
+        await db.refresh(db_table)
+
+        return IntegrationTableDetail(
+            table_id=db_table.id,
+            table_name=db_table.name,
+            share_id=db_share.id,
+            share_name=db_share.name,
+            schema_id=db_schema.id,
+            schema_name=db_schema.name,
+            source_type=DatasetSourceType.SILVER,
+            source_config_id=config.id,
+            source_config_name=config.name,
+            storage_location=None,
+            current_version=db_table.current_version,
+            share_mode=db_table.share_mode,
+            status=db_table.status.value
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error creating table from Silver Virtualized: {str(e)}"
+        )

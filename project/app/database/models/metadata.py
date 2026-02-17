@@ -43,6 +43,7 @@ class ExternalSchema(AuditMixin, Base):
     connection_id = Column(Integer, ForeignKey('core.data_connections.id', ondelete='CASCADE'), nullable=False)
     schema_name = Column(String(255), nullable=False)
     external_reference = Column(String(255), nullable=True)
+    is_system_schema = Column(Boolean, nullable=False, default=False)
     properties = Column(JSON, nullable=False, default={})
 
 class ExternalColumn(AuditMixin, Base):

@@ -231,8 +231,8 @@ class ShareTableDetail(BaseModel):
     schema_name: str = Field(description="Schema name")
     share_id: int = Field(description="Share ID")
     share_name: str = Field(description="Share name")
-    dataset_id: int = Field(description="Dataset ID")
-    dataset_name: str = Field(description="Dataset name")
+    dataset_id: Optional[int] = Field(default=None, description="Dataset ID (null for virtualized)")
+    dataset_name: Optional[str] = Field(default=None, description="Dataset name (null for virtualized)")
     status: TableShareStatus = Field(description="Table status")
     share_mode: str = Field(description="Share mode")
     filter_condition: Optional[str] = Field(default=None, description="Filter condition")
@@ -240,6 +240,9 @@ class ShareTableDetail(BaseModel):
     table_format: str = Field(description="Table format")
     partition_columns: Optional[List[str]] = Field(default=None, description="Partition columns")
     storage_location: Optional[str] = Field(default=None, description="Storage location")
+    source_type: Optional[str] = Field(default="delta", description="Source type: delta, bronze_virtualized, silver_virtualized")
+    bronze_virtualized_config_id: Optional[int] = Field(default=None, description="Bronze virtualized config ID")
+    silver_virtualized_config_id: Optional[int] = Field(default=None, description="Silver virtualized config ID")
     data_criacao: datetime = Field(description="Creation timestamp")
     data_atualizacao: datetime = Field(description="Last update timestamp")
 
@@ -406,7 +409,85 @@ class IntegrationTableDetail(BaseModel):
     source_type: DatasetSourceType = Field(description="Source type: bronze or silver")
     source_config_id: int = Field(description="Source config ID")
     source_config_name: str = Field(description="Source config name")
-    storage_location: str = Field(description="Delta Lake storage location")
+    storage_location: Optional[str] = Field(default=None, description="Delta Lake storage location (null for virtualized)")
     current_version: int = Field(description="Current table version")
     share_mode: str = Field(description="Share mode")
     status: str = Field(description="Table status")
+
+
+# ===================== Virtualized Table Integration Models =====================
+
+class VirtualizedSourceType(str, Enum):
+    """Source type for virtualized tables"""
+    BRONZE_VIRTUALIZED = "bronze_virtualized"
+    SILVER_VIRTUALIZED = "silver_virtualized"
+
+class CreateTableFromBronzeVirtualized(BaseModel):
+    """Create Delta Sharing table from a Bronze Virtualized Config"""
+    bronze_virtualized_config_id: int = Field(description="Bronze Virtualized Config ID")
+    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description")
+
+    @validator('name')
+    def validate_name(cls, v):
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
+        return v.lower().replace('-', '_')
+
+class CreateTableFromSilverVirtualized(BaseModel):
+    """Create Delta Sharing table from a Silver Virtualized Config"""
+    silver_virtualized_config_id: int = Field(description="Silver Virtualized Config ID")
+    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description")
+
+    @validator('name')
+    def validate_name(cls, v):
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
+            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
+        return v.lower().replace('-', '_')
+
+
+# ===================== Data API Models (REST access for virtualized tables) =====================
+
+class DataAPIFormat(str, Enum):
+    """Output format for Data API"""
+    JSON = "json"
+    CSV = "csv"
+    NDJSON = "ndjson"
+
+class DataAPIRequest(BaseModel):
+    """Request for querying data via the Data API"""
+    format: DataAPIFormat = Field(default=DataAPIFormat.JSON, description="Output format")
+    limit: int = Field(default=1000, ge=1, le=50000, description="Maximum rows to return")
+    offset: int = Field(default=0, ge=0, description="Rows to skip (pagination)")
+
+    @validator('limit')
+    def cap_limit(cls, v):
+        if v > 50000:
+            raise ValueError('Limit cannot exceed 50000 rows per request')
+        return v
+
+class DataAPIColumnInfo(BaseModel):
+    """Column info in data API response"""
+    name: str = Field(description="Column name")
+    type: Optional[str] = Field(default=None, description="Column data type")
+
+class DataAPIResponse(BaseModel):
+    """Response for Data API queries"""
+    share: str = Field(description="Share name")
+    schema_name: str = Field(description="Schema name")  # 'schema' is reserved in Pydantic
+    table: str = Field(description="Table name")
+    source_type: str = Field(description="Source type (delta, bronze_virtualized, silver_virtualized)")
+    columns: List[DataAPIColumnInfo] = Field(description="Column metadata")
+    data: List[Dict[str, Any]] = Field(description="Query results as list of row dicts")
+    row_count: int = Field(description="Number of rows returned")
+    has_more: bool = Field(description="Whether more rows exist beyond limit+offset")
+    execution_time_seconds: float = Field(description="Query execution time")
+
+class DataAPIErrorResponse(BaseModel):
+    """Error response for Data API"""
+    error: str = Field(description="Error type")
+    message: str = Field(description="Human-readable error message")
+    detail: Optional[str] = Field(default=None, description="Technical detail")

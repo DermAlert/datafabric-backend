@@ -224,6 +224,11 @@ class TransformConfig(AuditMixin, Base):
     # {column_name: "image_path", model: "classifier", output_column: "label"}
     image_labeling_config = Column(JSON, nullable=True)
     
+    # LLM-based extraction from free-text columns (optional)
+    # [{source_column_id: 170, new_column_name: "tem_avc", prompt: "...", output_type: "bool"}]
+    # [{source_column_id: 170, new_column_name: "gravidade", prompt: "...", output_type: "enum", enum_values: [...]}]
+    llm_extractions = Column(JSON, nullable=True)
+    
     # When True, excludes original source columns after semantic unification
     # E.g., if sex_group unifies clinical_sex and sexo, only sex_group will appear
     exclude_unified_source_columns = Column(Boolean, default=False, nullable=False)

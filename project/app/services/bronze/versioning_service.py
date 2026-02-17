@@ -195,10 +195,15 @@ class BronzeVersioningService:
         version: Optional[int] = None,
         timestamp: Optional[str] = None,
         limit: int = 1000,
-        offset: int = 0
+        offset: int = 0,
+        column_filters: Optional[List] = None,
+        column_filters_logic: str = "AND",
+        sort_by: Optional[str] = None,
+        sort_order: str = "asc",
     ) -> Tuple[List[str], List[Dict[str, Any]], int]:
         """
-        Query Delta table at a specific version or timestamp.
+        Query Delta table at a specific version or timestamp, with optional
+        column filtering and sorting.
         
         Args:
             spark: SparkSession
@@ -207,10 +212,17 @@ class BronzeVersioningService:
             timestamp: Timestamp for time travel (optional)
             limit: Max rows to return
             offset: Rows to skip
+            column_filters: List of ColumnFilter objects for filtering
+            column_filters_logic: "AND" or "OR" logic for combining filters
+            sort_by: Column name to sort by
+            sort_order: "asc" or "desc"
         
         Returns:
             Tuple of (columns, data, total_rows)
         """
+        from ..data_query_service import apply_filters_and_sorting
+        from ...api.schemas.data_query_schemas import ColumnFilterLogic, SortOrder
+        
         reader = spark.read.format("delta")
         
         if version is not None:
@@ -223,6 +235,20 @@ class BronzeVersioningService:
         df = reader.load(output_path)
         
         columns = df.columns
+        
+        # Apply column filters and sorting before counting/pagination
+        filters_logic = ColumnFilterLogic(column_filters_logic) if column_filters_logic else ColumnFilterLogic.AND
+        sort_ord = SortOrder(sort_order) if sort_order else SortOrder.asc
+        
+        df = apply_filters_and_sorting(
+            df,
+            filters=column_filters,
+            filters_logic=filters_logic,
+            sort_by=sort_by,
+            sort_order=sort_ord,
+        )
+        
+        # Count AFTER filtering (this is the filtered total)
         total_rows = df.count()
         
         # Apply pagination

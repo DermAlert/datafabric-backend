@@ -86,6 +86,7 @@ async def list_schemas(
     connection_id: int,
     catalog_id: Optional[int] = None,
     fl_ativo: Optional[bool] = Query(None, description="Filter by fl_ativo status. If not provided, returns all schemas."),
+    is_system_schema: Optional[bool] = Query(None, description="Filter by system schema flag. If not provided, returns all schemas. Use false to hide system schemas."),
     db: AsyncSession = Depends(get_db),
     # current_user: core.User = Depends(get_current_user),
 ):
@@ -115,6 +116,9 @@ async def list_schemas(
             
         if fl_ativo is not None:
             query = query.where(metadata.ExternalSchema.fl_ativo == fl_ativo)
+        
+        if is_system_schema is not None:
+            query = query.where(metadata.ExternalSchema.is_system_schema == is_system_schema)
             
         query = query.order_by(metadata.ExternalSchema.schema_name)
         
@@ -477,6 +481,15 @@ async def get_table_sample(
             for col in columns_db
         ]
         
+        # Flush Trino metadata cache for Delta Lake connections so that
+        # recently written Parquet files (e.g. from Airflow DAGs) are visible.
+        if conn_type in ("deltalake", "delta", "minio", "s3"):
+            await trino_manager.flush_metadata_cache(
+                catalog_name=catalog_name,
+                schema_name=schema_name,
+                table_name=table_name,
+            )
+        
         # Executar query via Trino
         import aiotrino
         
@@ -551,8 +564,13 @@ async def get_table_sample(
 @router.get("/columns/{column_id}/distinct-values")
 async def get_distinct_values_for_column(
     column_id: int,
-    limit: int = 100,
+    limit: int = Query(100, ge=1, le=1000),
+    offset: int = Query(0, ge=0),
     search: Optional[str] = Query(None, description="Search/filter distinct values by text. Case insensitive partial match."),
+    order_by: str = Query(
+        "value_asc",
+        description="Ordenacao dos valores: value_asc, frequency_desc, frequency_asc."
+    ),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -681,37 +699,66 @@ async def get_distinct_values_for_column(
             count_result = await cur.fetchone()
             total_distinct = count_result[0] if count_result else 0
             
-            # Build query with optional search filter
+            allowed_order = {"value_asc", "frequency_desc", "frequency_asc"}
+            if order_by not in allowed_order:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Parametro order_by invalido. Use um dos seguintes: {', '.join(sorted(allowed_order))}"
+                )
+
+            if order_by == "frequency_desc":
+                order_clause = 'ORDER BY occurrence_count DESC, value'
+            elif order_by == "frequency_asc":
+                order_clause = 'ORDER BY occurrence_count ASC, value'
+            else:
+                order_clause = 'ORDER BY value ASC'
+
+            # Build query with optional search filter.
+            # We always compute occurrence_count so values can be ordered by frequency when requested.
             if search:
-                # Case-insensitive search using lower()
                 query = f'''
-                    SELECT DISTINCT "{column_name}" 
-                    FROM "{catalog_name}"."{schema_name}"."{table_name}" 
+                    SELECT
+                        "{column_name}" AS value,
+                        COUNT(*) AS occurrence_count
+                    FROM "{catalog_name}"."{schema_name}"."{table_name}"
                     WHERE lower(cast("{column_name}" as varchar)) LIKE '%{safe_search.lower()}%'
-                    ORDER BY "{column_name}" 
+                    GROUP BY "{column_name}"
+                    {order_clause}
+                    OFFSET {offset}
                     LIMIT {limit}
                 '''
             else:
                 query = f'''
-                    SELECT DISTINCT "{column_name}" 
-                    FROM "{catalog_name}"."{schema_name}"."{table_name}" 
-                    ORDER BY "{column_name}" 
+                    SELECT
+                        "{column_name}" AS value,
+                        COUNT(*) AS occurrence_count
+                    FROM "{catalog_name}"."{schema_name}"."{table_name}"
+                    GROUP BY "{column_name}"
+                    {order_clause}
+                    OFFSET {offset}
                     LIMIT {limit}
                 '''
             
             await cur.execute(query)
             rows = await cur.fetchall()
             
-            # Extract values
+            # Extract values and occurrence counts
             values = []
+            value_occurrences = []
             for row in rows:
                 val = row[0]
+                occurrence_count = row[1]
                 if val is None:
                     values.append(None)
                 elif isinstance(val, (int, float, str, bool)):
                     values.append(val)
                 else:
                     values.append(str(val))
+
+                value_occurrences.append({
+                    "value": values[-1],
+                    "count": occurrence_count
+                })
             
         finally:
             await trino_conn.close()
@@ -724,7 +771,12 @@ async def get_distinct_values_for_column(
             "total_distinct": total_distinct,
             "total_returned": len(values),
             "search_filter": search,
-            "limit": limit
+            "limit": limit,
+            "offset": offset,
+            "next_offset": offset + len(values),
+            "has_more": (offset + len(values)) < total_distinct,
+            "order_by": order_by,
+            "distinct_values_with_count": value_occurrences
         }
         
     except HTTPException:

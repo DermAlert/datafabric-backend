@@ -55,6 +55,14 @@ SENSITIVE_FIELDS_BY_CONNECTION_TYPE: Dict[str, List[str]] = {
     "gcs": ["service_account_key", "access_token"],
 }
 
+# Campos sensíveis dentro do bloco "tunnel" de connection_params.
+# Aplicáveis a QUALQUER tipo de conexão que tenha tunnel configurado.
+TUNNEL_SENSITIVE_FIELDS: List[str] = [
+    "ssh_password",
+    "ssh_private_key",
+    "ssh_passphrase",
+]
+
 
 class CredentialEncryptionError(Exception):
     """Exceção base para erros de criptografia de credenciais."""
@@ -267,6 +275,7 @@ class CredentialEncryption:
         
         Apenas os campos definidos em SENSITIVE_FIELDS_BY_CONNECTION_TYPE para
         o tipo de conexão especificado serão criptografados.
+        Também criptografa campos sensíveis no bloco ``tunnel`` (se presente).
         
         Args:
             params: Dicionário de parâmetros de conexão
@@ -285,20 +294,27 @@ class CredentialEncryption:
                 f"Tipo de conexão '{connection_type}' não está mapeado em "
                 f"SENSITIVE_FIELDS_BY_CONNECTION_TYPE. Nenhum campo será criptografado."
             )
-            return params, []
         
         encrypted_params = params.copy()
         encrypted_fields = []
         
-        # Converte para lowercase para comparação case-insensitive
+        # 1. Criptografar campos do nível raiz
         sensitive_fields_lower = [f.lower() for f in sensitive_fields]
         
         for key, value in params.items():
-            # Verifica se o campo está na lista de sensíveis (case-insensitive)
+            if key == "tunnel":
+                continue  # Tratado separadamente abaixo
             if key.lower() in sensitive_fields_lower and value and isinstance(value, str):
                 encrypted_params[key] = self.encrypt(value)
                 encrypted_fields.append(key)
                 logger.debug(f"Campo '{key}' criptografado com sucesso")
+        
+        # 2. Criptografar campos sensíveis dentro de "tunnel" (se presente)
+        tunnel_data = params.get("tunnel")
+        if tunnel_data and isinstance(tunnel_data, dict):
+            encrypted_tunnel, tunnel_encrypted_fields = self._encrypt_tunnel_params(tunnel_data)
+            encrypted_params["tunnel"] = encrypted_tunnel
+            encrypted_fields.extend(f"tunnel.{f}" for f in tunnel_encrypted_fields)
         
         if encrypted_fields:
             logger.info(
@@ -308,12 +324,37 @@ class CredentialEncryption:
         
         return encrypted_params, encrypted_fields
     
+    def _encrypt_tunnel_params(
+        self, tunnel_params: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], List[str]]:
+        """
+        Criptografa campos sensíveis dentro do bloco tunnel.
+        
+        Args:
+            tunnel_params: Dicionário do bloco tunnel
+            
+        Returns:
+            Tupla com (tunnel_criptografado, lista_de_campos_criptografados)
+        """
+        encrypted = tunnel_params.copy()
+        encrypted_fields = []
+        tunnel_sensitive_lower = [f.lower() for f in TUNNEL_SENSITIVE_FIELDS]
+        
+        for key, value in tunnel_params.items():
+            if key.lower() in tunnel_sensitive_lower and value and isinstance(value, str):
+                encrypted[key] = self.encrypt(value)
+                encrypted_fields.append(key)
+                logger.debug(f"Campo tunnel '{key}' criptografado com sucesso")
+        
+        return encrypted, encrypted_fields
+    
     def decrypt_connection_params(
         self, 
         params: Dict[str, Any]
     ) -> Dict[str, Any]:
         """
         Descriptografa todos os campos criptografados em connection_params.
+        Também descriptografa campos dentro do bloco ``tunnel`` (se presente).
         
         Args:
             params: Dicionário de parâmetros (possivelmente criptografados)
@@ -327,9 +368,21 @@ class CredentialEncryption:
         decrypted_params = params.copy()
         
         for key, value in params.items():
+            if key == "tunnel":
+                continue  # Tratado separadamente abaixo
             if value and isinstance(value, str) and self.is_encrypted(value):
                 decrypted_params[key] = self.decrypt(value)
                 logger.debug(f"Campo '{key}' descriptografado")
+        
+        # Descriptografar campos dentro de "tunnel" (se presente)
+        tunnel_data = params.get("tunnel")
+        if tunnel_data and isinstance(tunnel_data, dict):
+            decrypted_tunnel = tunnel_data.copy()
+            for key, value in tunnel_data.items():
+                if value and isinstance(value, str) and self.is_encrypted(value):
+                    decrypted_tunnel[key] = self.decrypt(value)
+                    logger.debug(f"Campo tunnel '{key}' descriptografado")
+            decrypted_params["tunnel"] = decrypted_tunnel
         
         return decrypted_params
     
@@ -357,6 +410,7 @@ class CredentialEncryption:
     ) -> Dict[str, Any]:
         """
         Mascara campos sensíveis para logging seguro.
+        Também mascara campos sensíveis dentro do bloco ``tunnel`` (se presente).
         
         Args:
             params: Dicionário de parâmetros
@@ -373,6 +427,9 @@ class CredentialEncryption:
         sensitive_fields_lower = [f.lower() for f in sensitive_fields]
         
         for key, value in params.items():
+            if key == "tunnel":
+                continue  # Tratado separadamente abaixo
+            
             key_lower = key.lower()
             
             # Verifica se é sensível por:
@@ -387,6 +444,23 @@ class CredentialEncryption:
                 masked_params[key] = self.mask_sensitive_value(str(value))
             else:
                 masked_params[key] = value
+        
+        # Mascarar campos dentro de "tunnel" (se presente)
+        tunnel_data = params.get("tunnel")
+        if tunnel_data and isinstance(tunnel_data, dict):
+            tunnel_sensitive_lower = [f.lower() for f in TUNNEL_SENSITIVE_FIELDS]
+            masked_tunnel = {}
+            for key, value in tunnel_data.items():
+                key_lower = key.lower()
+                is_sensitive = (
+                    key_lower in tunnel_sensitive_lower or
+                    (isinstance(value, str) and self.is_encrypted(value))
+                )
+                if is_sensitive and value:
+                    masked_tunnel[key] = self.mask_sensitive_value(str(value))
+                else:
+                    masked_tunnel[key] = value
+            masked_params["tunnel"] = masked_tunnel
         
         return masked_params
 

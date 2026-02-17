@@ -58,6 +58,7 @@ from ...api.schemas.silver_schemas import (
     TransformExecuteResponse,
     TransformStatusEnum,
 )
+from ...api.schemas.bronze_schemas import DatasetBronzeCreateRequest, TableColumnSelection
 from ..infrastructure.trino_manager import TrinoManager
 from ..infrastructure.spark_manager import SparkManager
 from ..infrastructure.credential_service import get_credential_service
@@ -670,6 +671,303 @@ class SilverTransformationService:
             'value_mappings_by_column': value_mappings_by_column
         }
     
+    # ==================== DERIVED COLUMN NAME VALIDATION ====================
+    
+    async def _validate_derived_column_names(
+        self,
+        source_column_names: set,
+        column_group_ids: Optional[List[int]],
+        llm_extractions: Optional[List]
+    ) -> None:
+        """
+        Validate that derived column names (LLM + Equivalence) don't collide
+        with each other or with source columns.
+        
+        Called at config creation/update time BEFORE saving.
+        
+        Raises HTTPException 400 on collision.
+        """
+        # --- Collect Equivalence unified names and their source column names ---
+        equiv_unified_names = {}  # unified_name_lower -> {set of source column_names_lower}
+        if column_group_ids:
+            equiv_data = await self.load_equivalence_for_virtualized(column_group_ids)
+            for group_info in equiv_data.get('groups', []):
+                unified_name = group_info['name']
+                unified_lower = unified_name.lower()
+                source_names = {
+                    cm['column_name'].lower()
+                    for cm in group_info.get('column_mappings', [])
+                    if cm.get('column_name')
+                }
+                if unified_lower in equiv_unified_names:
+                    # Two different groups with same unified name
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Equivalence groups have duplicate unified name '{unified_name}'. "
+                            f"Each column group must have a unique name."
+                        )
+                    )
+                equiv_unified_names[unified_lower] = source_names
+        
+        # --- Validate Equivalence unified names vs source columns ---
+        source_names_lower = {n.lower() for n in source_column_names}
+        for unified_lower, group_source_names in equiv_unified_names.items():
+            if unified_lower in source_names_lower:
+                # Check if it's a source of this group (allowed) or unrelated (collision)
+                if unified_lower not in group_source_names:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Equivalence group unified name '{unified_lower}' conflicts with "
+                            f"existing source column '{unified_lower}' which is not a source of "
+                            f"this group. Rename the column group to avoid ambiguity."
+                        )
+                    )
+        
+        # --- Validate LLM column names ---
+        if llm_extractions:
+            llm_names_seen = set()
+            all_equiv_unified = set(equiv_unified_names.keys())
+            
+            for ext in llm_extractions:
+                ext_dict = ext.model_dump() if hasattr(ext, 'model_dump') else ext
+                new_col = ext_dict.get('new_column_name', '')
+                new_col_lower = new_col.lower()
+                
+                # Duplicate LLM names
+                if new_col_lower in llm_names_seen:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Duplicate LLM column name '{new_col}'. Each LLM extraction must have a unique column name."
+                    )
+                llm_names_seen.add(new_col_lower)
+                
+                # LLM vs source columns
+                if new_col_lower in source_names_lower:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"LLM column name '{new_col}' conflicts with existing source column. "
+                            f"Choose a different name for this LLM extraction."
+                        )
+                    )
+                
+                # LLM vs Equivalence unified names
+                if new_col_lower in all_equiv_unified:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"LLM column name '{new_col}' conflicts with Equivalence unified column. "
+                            f"Choose a different name for this LLM extraction."
+                        )
+                    )
+    
+    async def _get_source_column_names_for_bronze_config(
+        self,
+        bronze_config_id: int
+    ) -> set:
+        """
+        Get all source column names for a Bronze Persistent Config.
+        Used for name collision validation at config creation time.
+        """
+        config_result = await self.db.execute(
+            select(BronzePersistentConfig).where(
+                BronzePersistentConfig.id == bronze_config_id
+            )
+        )
+        bronze_config = config_result.scalar_one_or_none()
+        if not bronze_config or not bronze_config.tables:
+            return set()
+        
+        column_names = set()
+        for table_sel in bronze_config.tables:
+            table_id = table_sel.get('table_id')
+            if not table_id:
+                continue
+            
+            if table_sel.get('select_all', True):
+                cols_result = await self.db.execute(
+                    select(ExternalColumn.column_name).where(
+                        ExternalColumn.table_id == table_id
+                    )
+                )
+            else:
+                col_ids = table_sel.get('column_ids', [])
+                if not col_ids:
+                    continue
+                cols_result = await self.db.execute(
+                    select(ExternalColumn.column_name).where(
+                        ExternalColumn.id.in_(col_ids)
+                    )
+                )
+            
+            for row in cols_result.fetchall():
+                column_names.add(row[0])
+        
+        return column_names
+    
+    async def _get_source_column_names_for_tables(
+        self,
+        tables: List[Dict[str, Any]]
+    ) -> set:
+        """
+        Get all source column names for Virtualized config tables.
+        Used for name collision validation at config creation time.
+        """
+        column_names = set()
+        for table_sel in tables:
+            table_sel_dict = table_sel.model_dump() if hasattr(table_sel, 'model_dump') else table_sel
+            table_id = table_sel_dict.get('table_id')
+            if not table_id:
+                continue
+            
+            if table_sel_dict.get('select_all', True):
+                cols_result = await self.db.execute(
+                    select(ExternalColumn.column_name).where(
+                        ExternalColumn.table_id == table_id
+                    )
+                )
+            else:
+                col_ids = table_sel_dict.get('column_ids', [])
+                if not col_ids:
+                    continue
+                cols_result = await self.db.execute(
+                    select(ExternalColumn.column_name).where(
+                        ExternalColumn.id.in_(col_ids)
+                    )
+                )
+            
+            for row in cols_result.fetchall():
+                column_names.add(row[0])
+        
+        return column_names
+    
+    # ==================== FILTER CLASSIFICATION ====================
+    
+    def _classify_filter_conditions(
+        self,
+        filters: Optional[Dict],
+        column_transformations: Optional[List],
+        equivalence_data: Optional[Dict],
+        llm_extractions: Optional[List],
+        exclude_unified_source_columns: bool,
+        bronze_column_names: Optional[set] = None
+    ) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict]]:
+        """
+        Classify each filter condition into pre, post-transform, or post-llm phase.
+        
+        Returns:
+            (pre_filters, post_transform_filters, post_llm_filters)
+            Each is a dict {logic, conditions} or None if empty.
+        
+        Classification rules (in priority order):
+        1. column_name matches llm_extractions[].new_column_name -> post_llm
+        2. column_name matches equivalence unified name -> post_transform
+        3. column_id in column_transformations[].column_id -> post_transform
+        4. column_id is source of equivalence + exclude_unified_source_columns -> post_transform
+        5. column_name not in bronze columns (unknown/derived) -> post_transform
+        6. Otherwise -> pre_filter
+        """
+        if not filters:
+            return None, None, None
+        
+        conditions = filters.get('conditions', [])
+        logic = filters.get('logic', 'AND')
+        
+        if not conditions:
+            return None, None, None
+        
+        # Build lookup sets
+        llm_column_names = set()
+        if llm_extractions:
+            for ext in llm_extractions:
+                ext_dict = ext if isinstance(ext, dict) else (ext.model_dump() if hasattr(ext, 'model_dump') else {})
+                name = ext_dict.get('new_column_name', '')
+                if name:
+                    llm_column_names.add(name.lower())
+        
+        equiv_unified_names = set()
+        equiv_source_column_ids = set()
+        if equivalence_data:
+            for group_info in equivalence_data.get('groups', []):
+                equiv_unified_names.add(group_info['name'].lower())
+            for col_id in equivalence_data.get('unified_columns', {}):
+                equiv_source_column_ids.add(col_id)
+        
+        transformed_column_ids = set()
+        if column_transformations:
+            for t in column_transformations:
+                t_dict = t if isinstance(t, dict) else (t.model_dump() if hasattr(t, 'model_dump') else {})
+                col_id = t_dict.get('column_id')
+                if col_id:
+                    transformed_column_ids.add(col_id)
+        
+        bronze_names_lower = {n.lower() for n in bronze_column_names} if bronze_column_names else set()
+        
+        # Classify each condition
+        pre_conditions = []
+        post_transform_conditions = []
+        post_llm_conditions = []
+        
+        for cond in conditions:
+            col_name = (cond.get('column_name') or '').lower()
+            col_id = cond.get('column_id')
+            
+            # Rule 1: LLM column
+            if col_name and col_name in llm_column_names:
+                post_llm_conditions.append(cond)
+                logger.info(f"Filter classified as post-LLM: column_name='{col_name}' (matches LLM extraction)")
+                continue
+            
+            # Rule 2: Equivalence unified name
+            if col_name and col_name in equiv_unified_names:
+                post_transform_conditions.append(cond)
+                logger.info(f"Filter classified as post-transform: column_name='{col_name}' (matches equivalence unified name)")
+                continue
+            
+            # Rule 3: Column has transformation applied
+            if col_id and col_id in transformed_column_ids:
+                post_transform_conditions.append(cond)
+                logger.info(f"Filter classified as post-transform: column_id={col_id} (has transformation applied)")
+                continue
+            
+            # Rule 4: Column is source of equivalence and will be excluded
+            if col_id and col_id in equiv_source_column_ids and exclude_unified_source_columns:
+                post_transform_conditions.append(cond)
+                logger.info(f"Filter classified as post-transform: column_id={col_id} (equivalence source, will be excluded)")
+                continue
+            
+            # Rule 5: Column name doesn't exist in source data
+            if col_name and bronze_names_lower and col_name not in bronze_names_lower:
+                # Also check if column_id was provided and resolved
+                if not col_id:
+                    post_transform_conditions.append(cond)
+                    logger.info(f"Filter classified as post-transform: column_name='{col_name}' (not found in source columns)")
+                    continue
+            
+            # Rule 6: Default - pre-filter
+            pre_conditions.append(cond)
+            logger.info(f"Filter classified as pre-filter: column_id={col_id}, column_name='{col_name}' (no modifications)")
+        
+        def _build_filter(conds):
+            if not conds:
+                return None
+            return {'logic': logic, 'conditions': conds}
+        
+        pre_f = _build_filter(pre_conditions)
+        post_t_f = _build_filter(post_transform_conditions)
+        post_llm_f = _build_filter(post_llm_conditions)
+        
+        logger.info(
+            f"Filter classification result: "
+            f"{len(pre_conditions)} pre-filters, "
+            f"{len(post_transform_conditions)} post-transform, "
+            f"{len(post_llm_conditions)} post-LLM"
+        )
+        
+        return pre_f, post_t_f, post_llm_f
+    
     # ==================== INLINE FILTER HELPERS ====================
     
     def _inline_filter_to_sql(
@@ -795,6 +1093,88 @@ class SilverTransformationService:
         logic = filters.get('logic', 'AND')
         return f" {logic} ".join(condition_sqls)
     
+    def _post_filter_to_sql(
+        self,
+        filters: Dict[str, Any],
+        column_metadata: Optional[Dict[int, Dict[str, Any]]] = None
+    ) -> Optional[str]:
+        """
+        Convert post-transform filter conditions to SQL for use in a subquery wrapper.
+        
+        Uses column_name as output column names (no table aliases). For conditions
+        that have column_id but no column_name, resolves via column_metadata.
+        Used for post-transform filters operating on transformed/unified data.
+        """
+        if not filters:
+            return None
+        
+        conditions = filters.get('conditions', [])
+        if not conditions:
+            return None
+        
+        def format_value(val) -> str:
+            if val is None:
+                return "NULL"
+            try:
+                float(val)
+                return str(val)
+            except (ValueError, TypeError):
+                escaped = str(val).replace("'", "''")
+                return f"'{escaped}'"
+        
+        condition_sqls = []
+        for cond in conditions:
+            col_name = cond.get('column_name')
+            
+            # Resolve column_id to column_name if not provided
+            if not col_name and cond.get('column_id') and column_metadata:
+                col_id = cond['column_id']
+                col_info = column_metadata.get(col_id)
+                if col_info:
+                    col_name = col_info.get('column_name')
+                    logger.info(f"Post-filter resolved column_id {col_id} to '{col_name}'")
+            
+            if not col_name:
+                logger.warning(f"Post-filter condition could not resolve column name: {cond}")
+                continue
+            
+            col_ref = f'"{col_name}"'
+            op = cond.get('operator', '=')
+            value = cond.get('value')
+            value_min = cond.get('value_min')
+            value_max = cond.get('value_max')
+            
+            if op in ('IS NULL', 'IS NOT NULL'):
+                condition_sqls.append(f"{col_ref} {op}")
+            elif op == 'BETWEEN':
+                val_min = format_value(value_min)
+                val_max = format_value(value_max)
+                condition_sqls.append(f"{col_ref} BETWEEN {val_min} AND {val_max}")
+            elif op in ('IN', 'NOT IN'):
+                import json
+                try:
+                    values_list = json.loads(value) if isinstance(value, str) else value
+                    if isinstance(values_list, list):
+                        values_str = ", ".join([format_value(v) for v in values_list])
+                        condition_sqls.append(f"{col_ref} {op} ({values_str})")
+                except Exception:
+                    pass
+            elif op in ('LIKE', 'ILIKE'):
+                formatted_val = format_value(value)
+                if op == 'ILIKE':
+                    condition_sqls.append(f"LOWER({col_ref}) LIKE LOWER({formatted_val})")
+                else:
+                    condition_sqls.append(f"{col_ref} LIKE {formatted_val}")
+            else:
+                formatted_val = format_value(value)
+                condition_sqls.append(f"{col_ref} {op} {formatted_val}")
+        
+        if not condition_sqls:
+            return None
+        
+        logic = filters.get('logic', 'AND')
+        return f" {logic} ".join(condition_sqls)
+    
     # ==================== VIRTUALIZED CONFIG ====================
     
     async def create_virtualized_config(
@@ -811,6 +1191,15 @@ class SilverTransformationService:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Config with name '{data.name}' already exists"
+            )
+        
+        # Validate derived column names (Equivalence) for collisions
+        if data.column_group_ids:
+            source_col_names = await self._get_source_column_names_for_tables(data.tables)
+            await self._validate_derived_column_names(
+                source_column_names=source_col_names,
+                column_group_ids=data.column_group_ids,
+                llm_extractions=None
             )
         
         config = VirtualizedConfig(
@@ -895,6 +1284,19 @@ class SilverTransformationService:
         # Clear cached SQL
         update_data['generated_sql'] = None
         update_data['sql_generated_at'] = None
+        
+        # Validate derived column names (Equivalence) for collisions
+        final_group_ids = update_data.get('column_group_ids', config.column_group_ids)
+        final_tables = update_data.get('tables', config.tables)
+        if final_group_ids:
+            source_col_names = await self._get_source_column_names_for_tables(
+                final_tables if isinstance(final_tables, list) else []
+            )
+            await self._validate_derived_column_names(
+                source_column_names=source_col_names,
+                column_group_ids=final_group_ids,
+                llm_extractions=None
+            )
         
         for key, value in update_data.items():
             setattr(config, key, value)
@@ -1212,7 +1614,8 @@ class SilverTransformationService:
                 
                 # If NOT excluding source columns, also add the original column
                 if not exclude_source_columns:
-                    select_columns.append(f'{col_expr_with_mapping} AS "{output_name}"')
+                    # Keep source columns untouched; apply Equivalence mapping only to unified output
+                    select_columns.append(f'{col_expr} AS "{output_name}"')
                     output_columns.append(output_name)
                     
             elif col_id in join_column_unification:
@@ -1275,10 +1678,29 @@ class SilverTransformationService:
                 'table_name': table_info.get('table_name', '')
             }
         
-        # Build WHERE clause from inline filters
-        where_clauses = []
+        # ==================== CLASSIFY FILTERS ====================
+        # Classify filter conditions into pre (WHERE) and post (subquery wrapper)
+        filters_dict = None
         if config.filters:
-            filter_sql = self._inline_filter_to_sql(config.filters, column_metadata, table_aliases)
+            filters_dict = config.filters if isinstance(config.filters, dict) else (
+                config.filters.model_dump() if hasattr(config.filters, 'model_dump') else config.filters
+            )
+        
+        bronze_col_names = set(col_info['column_name'] for col_info in column_metadata.values())
+        
+        pre_filters, post_transform_filters, _ = self._classify_filter_conditions(
+            filters=filters_dict,
+            column_transformations=config.column_transformations if hasattr(config, 'column_transformations') else None,
+            equivalence_data=equivalence_data,
+            llm_extractions=None,  # Virtualized has no LLM
+            exclude_unified_source_columns=getattr(config, 'exclude_unified_source_columns', False),
+            bronze_column_names=bronze_col_names
+        )
+        
+        # Build WHERE clause from pre-filters only
+        where_clauses = []
+        if pre_filters:
+            filter_sql = self._inline_filter_to_sql(pre_filters, column_metadata, table_aliases)
             if filter_sql:
                 where_clauses.append(f"({filter_sql})")
         
@@ -1303,6 +1725,13 @@ class SilverTransformationService:
         
         if where_clauses:
             sql += f" WHERE {' AND '.join(where_clauses)}"
+        
+        # Wrap in subquery for post-transform filters (operates on output column names)
+        if post_transform_filters:
+            post_sql = self._post_filter_to_sql(post_transform_filters, column_metadata)
+            if post_sql:
+                sql = f"SELECT * FROM ({sql}) _sub WHERE {post_sql}"
+                logger.info(f"Wrapped SQL with post-transform filter subquery")
         
         # Debug: log the full SQL
         logger.info(f"Generated virtualized SQL:\n{sql}")
@@ -1635,6 +2064,17 @@ class SilverTransformationService:
                 detail=f"Bronze Persistent Config {data.source_bronze_config_id} has not been executed successfully yet"
             )
         
+        # Validate derived column names (LLM + Equivalence) for collisions
+        if data.llm_extractions or data.column_group_ids:
+            source_col_names = await self._get_source_column_names_for_bronze_config(
+                data.source_bronze_config_id
+            )
+            await self._validate_derived_column_names(
+                source_column_names=source_col_names,
+                column_group_ids=data.column_group_ids,
+                llm_extractions=data.llm_extractions
+            )
+        
         config = TransformConfig(
             name=data.name,
             description=data.description,
@@ -1646,6 +2086,7 @@ class SilverTransformationService:
             filters=data.filters.model_dump() if data.filters else None,
             column_transformations=[t.model_dump() for t in data.column_transformations] if data.column_transformations else None,
             image_labeling_config=data.image_labeling_config.model_dump() if data.image_labeling_config else None,
+            llm_extractions=[e.model_dump() for e in data.llm_extractions] if data.llm_extractions else None,
             exclude_unified_source_columns=data.exclude_unified_source_columns,
             config_snapshot=data.model_dump(),
             is_active=True
@@ -1694,6 +2135,7 @@ class SilverTransformationService:
             filters=config.filters,
             column_transformations=config.column_transformations,
             image_labeling_config=config.image_labeling_config,
+            llm_extractions=config.llm_extractions,
             exclude_unified_source_columns=config.exclude_unified_source_columns,
             write_mode="overwrite",
             current_delta_version=config.current_delta_version,
@@ -1754,6 +2196,24 @@ class SilverTransformationService:
         if 'image_labeling_config' in update_data and update_data['image_labeling_config']:
             if hasattr(update_data['image_labeling_config'], 'model_dump'):
                 update_data['image_labeling_config'] = update_data['image_labeling_config'].model_dump()
+        if 'llm_extractions' in update_data and update_data['llm_extractions']:
+            update_data['llm_extractions'] = [
+                e.model_dump() if hasattr(e, 'model_dump') else e
+                for e in update_data['llm_extractions']
+            ]
+        
+        # Validate derived column names for collisions (merge updated + existing values)
+        final_llm = update_data.get('llm_extractions', config.llm_extractions)
+        final_group_ids = update_data.get('column_group_ids', config.column_group_ids)
+        bronze_config_id = update_data.get('source_bronze_config_id', config.source_bronze_config_id)
+        
+        if (final_llm or final_group_ids) and bronze_config_id:
+            source_col_names = await self._get_source_column_names_for_bronze_config(bronze_config_id)
+            await self._validate_derived_column_names(
+                source_column_names=source_col_names,
+                column_group_ids=final_group_ids,
+                llm_extractions=final_llm
+            )
         
         for key, value in update_data.items():
             setattr(config, key, value)
@@ -1812,6 +2272,15 @@ class SilverTransformationService:
                 elif trans_type == 'template' and rule_id:
                     python_transforms.append(f"column_id {col_id}: template (rule_id={rule_id})")
         
+        # Include LLM extraction columns in output
+        llm_columns = []
+        if config.llm_extractions:
+            for ext in config.llm_extractions:
+                col_name = ext.get('new_column_name', 'unknown')
+                out_type = ext.get('output_type', 'unknown')
+                output_columns.append(col_name)
+                llm_columns.append(f"{col_name} ({out_type}): {ext.get('prompt', '')[:80]}...")
+        
         # Build output path
         output_path = f"s3a://{config.silver_bucket or self.silver_bucket}/"
         if config.silver_path_prefix:
@@ -1819,16 +2288,23 @@ class SilverTransformationService:
         else:
             output_path += f"{config.id}-{config.name}/"
         
+        warnings = []
+        if llm_columns:
+            warnings.append(
+                f"LLM extractions configured: {len(llm_columns)} column(s) will be created via LLM. "
+                "This may take significant time depending on row count and LLM API speed."
+            )
+        
         return TransformPreviewResponse(
             config_id=config.id,
             config_name=config.name,
             source_bronze_dataset=config.source_bronze_dataset_name or str(config.source_bronze_dataset_id),
             sql_transformations="\n".join(sql_transforms) if sql_transforms else "No SQL transformations",
-            python_transformations=python_transforms,
+            python_transformations=python_transforms + llm_columns,
             output_columns=output_columns,
             estimated_rows=None,
             output_path=output_path,
-            warnings=[]
+            warnings=warnings
         )
     
     async def execute_transform_config(
@@ -1868,6 +2344,7 @@ class SilverTransformationService:
             "filters": config.filters,
             "column_transformations": config.column_transformations,
             "image_labeling_config": config.image_labeling_config,
+            "llm_extractions": config.llm_extractions,
             "exclude_unified_source_columns": config.exclude_unified_source_columns,
             "write_mode": "overwrite",  # Always overwrite
             "snapshot_at": start_time.isoformat(),
@@ -1905,11 +2382,40 @@ class SilverTransformationService:
                 output_path = f"s3a://{output_bucket}/{config.id}-{config.name}"
             
             # Execute transformation with Spark
-            rows_processed, rows_output = await self._execute_spark_transform(
+            rows_processed, rows_output, post_llm_filters, delta_version = await self._execute_spark_transform(
                 bronze_info=bronze_info,
                 config=config,
                 output_path=output_path
             )
+            
+            # Execute LLM extractions if configured (post-Spark processing)
+            llm_extraction_results = []
+            if config.llm_extractions:
+                llm_extraction_results = await self._execute_llm_extractions(
+                    config=config,
+                    bronze_info=bronze_info,
+                    output_path=output_path,
+                    post_llm_filters=post_llm_filters
+                )
+                # Re-read row count and delta version after LLM columns added
+                import asyncio as _asyncio
+                from concurrent.futures import ThreadPoolExecutor as _TPE
+                _loop = _asyncio.get_event_loop()
+                def _recount_and_version():
+                    from delta.tables import DeltaTable
+                    spark = self.spark_manager.get_or_create_session()
+                    count = spark.read.format("delta").load(output_path).count()
+                    ver = delta_version
+                    try:
+                        dt = DeltaTable.forPath(spark, output_path)
+                        h = dt.history(1).collect()
+                        if h:
+                            ver = h[0].asDict().get("version", ver)
+                    except Exception:
+                        pass
+                    return count, ver
+                with _TPE(max_workers=1) as _executor:
+                    rows_output, delta_version = await _loop.run_in_executor(_executor, _recount_and_version)
             
             # Update execution record
             execution.status = TransformStatus.SUCCESS
@@ -1917,13 +2423,21 @@ class SilverTransformationService:
             execution.rows_processed = rows_processed
             execution.rows_output = rows_output
             execution.output_path = output_path
+            execution.delta_version = delta_version
+            execution.write_mode_used = "overwrite"
+            execution.rows_inserted = rows_output
             execution.execution_details = {
                 "bronze_tables": bronze_info.get('tables', []),
                 "transformations_applied": {
                     "column_transformations": len(config.column_transformations or []),
                     "column_groups": len(config.column_group_ids or []),
-                    "filters": 1 if config.filters else 0
-                }
+                    "filters": 1 if config.filters else 0,
+                    "llm_extractions": len(config.llm_extractions or [])
+                },
+                "llm_extraction_results": [
+                    {k: v for k, v in r.items() if k != "values"}
+                    for r in llm_extraction_results
+                ] if llm_extraction_results else None
             }
             
             # Update config status
@@ -1935,6 +2449,7 @@ class SilverTransformationService:
             config_obj.last_execution_status = TransformStatus.SUCCESS
             config_obj.last_execution_rows = rows_output
             config_obj.last_execution_error = None
+            config_obj.current_delta_version = delta_version
             
             await self.db.commit()
             
@@ -1952,6 +2467,22 @@ class SilverTransformationService:
                 table_name = self.trino._sanitize_identifier(f"{config_id}_{config.name}")
                 message += f". Table registered in Trino as {self.silver_catalog}.{self.silver_schema}.{table_name}"
             
+            # Build LLM extraction result summaries for response
+            llm_result_summaries = None
+            if llm_extraction_results:
+                from ...api.schemas.silver_schemas import LLMExtractionColumnResult
+                llm_result_summaries = [
+                    LLMExtractionColumnResult(
+                        column_name=r["column_name"],
+                        output_type=r["output_type"],
+                        rows_processed=r["rows_processed"],
+                        rows_success=r["rows_success"],
+                        rows_failed=r["rows_failed"],
+                        error_rate=r["error_rate"],
+                    )
+                    for r in llm_extraction_results
+                ]
+            
             return TransformExecuteResponse(
                 config_id=config_id,
                 config_name=config.name,
@@ -1962,6 +2493,7 @@ class SilverTransformationService:
                 output_path=output_path,
                 execution_time_seconds=execution_time,
                 message=message,
+                llm_extraction_results=llm_result_summaries,
                 config_snapshot=config_snapshot,
             )
             
@@ -2127,23 +2659,147 @@ class SilverTransformationService:
         if not latest_execution or not latest_execution.output_paths:
             logger.warning(f"No successful execution found for Bronze config {bronze_config_id}")
             return None
-        
-        # Build tables info from output_paths
+
+        # Rebuild Bronze execution plan to recover column mappings and inter-source links.
+        # Silver persistent transformations need these mappings to resolve external_column.id
+        # to the real Bronze column names (including prefixed names when duplicates exist).
+        preview = None
+        try:
+            from ..bronze.ingestion_service import BronzeIngestionService
+
+            table_selections = [
+                TableColumnSelection(**t)
+                for t in (bronze_config.tables or [])
+            ]
+            preview_request = DatasetBronzeCreateRequest(
+                name=bronze_config.name,
+                description=bronze_config.description,
+                tables=table_selections,
+                relationship_ids=bronze_config.relationship_ids,
+                enable_federated_joins=bronze_config.enable_federated_joins,
+            )
+
+            bronze_service = BronzeIngestionService(self.db)
+            preview = await bronze_service.generate_ingestion_plan_simplified(preview_request)
+        except Exception as e:
+            # Keep backward-compatible behavior if we cannot rebuild preview.
+            logger.warning(
+                f"Could not rebuild Bronze plan for config {bronze_config_id}: {e}. "
+                "Falling back to execution paths without column mappings."
+            )
+
+        # Build output-path mapping from execution (preferred source of truth).
+        # group_results keeps group_name/output_path pairs.
+        execution_groups = latest_execution.group_results or []
+        group_path_by_name = {}
+        for g in execution_groups:
+            if not isinstance(g, dict):
+                continue
+            group_name = g.get('group_name')
+            output_path = g.get('output_path')
+            if group_name and output_path:
+                group_path_by_name[group_name] = output_path
+
+        fallback_paths = list(latest_execution.output_paths or [])
+        fallback_idx = 0
+
         tables = []
-        for idx, output_path in enumerate(latest_execution.output_paths):
-            tables.append({
-                'group_id': idx,
-                'group_name': f"bronze_table_{idx}",
-                'output_path': output_path,
-                'rows_ingested': latest_execution.rows_ingested
-            })
-        
+        column_map = {}
+        inter_source_links = []
+
+        if preview and preview.ingestion_groups:
+            for idx, group_preview in enumerate(preview.ingestion_groups):
+                output_path = group_path_by_name.get(group_preview.group_name)
+                if not output_path and fallback_idx < len(fallback_paths):
+                    output_path = fallback_paths[fallback_idx]
+                    fallback_idx += 1
+                if not output_path:
+                    continue
+
+                tables.append({
+                    'group_id': idx,
+                    'group_name': group_preview.group_name,
+                    'output_path': output_path,
+                    'rows_ingested': latest_execution.rows_ingested
+                })
+
+                for mapping in (group_preview.column_mappings or []):
+                    ext_col_id = mapping.get('external_column_id')
+                    bronze_col_name = mapping.get('bronze_column_name')
+                    if not ext_col_id or not bronze_col_name:
+                        continue
+                    column_map[int(ext_col_id)] = {
+                        'bronze_column_name': bronze_col_name,
+                        'original_column_name': mapping.get('original_column_name'),
+                        'original_table_name': mapping.get('original_table_name'),
+                        'data_type': mapping.get('data_type'),
+                        'group_index': idx,
+                        'external_table_id': mapping.get('external_table_id')
+                    }
+
+            # Convert preview inter-db links to the structure used by Spark joins
+            # Build lookup by (table_name, connection_name) to avoid extra DB calls.
+            table_group_idx = {}
+            for idx, group_preview in enumerate(preview.ingestion_groups):
+                group_conn = group_preview.connection_name
+                for t in group_preview.tables or []:
+                    table_name = t.get('table_name')
+                    table_conn = t.get('connection_name') or group_conn
+                    if table_name:
+                        table_group_idx[(table_name, table_conn)] = idx
+
+            for link_idx, link in enumerate(preview.inter_db_links or []):
+                left_table = link.get('left_table')
+                right_table = link.get('right_table')
+                if not left_table or not right_table:
+                    continue
+
+                left_conn = link.get('left_connection')
+                right_conn = link.get('right_connection')
+
+                left_idx = table_group_idx.get((left_table, left_conn))
+                right_idx = table_group_idx.get((right_table, right_conn))
+
+                # Fallback to table-name-only match if connection names are missing.
+                if left_idx is None:
+                    for (table_name, _conn_name), group_idx in table_group_idx.items():
+                        if table_name == left_table:
+                            left_idx = group_idx
+                            break
+                if right_idx is None:
+                    for (table_name, _conn_name), group_idx in table_group_idx.items():
+                        if table_name == right_table:
+                            right_idx = group_idx
+                            break
+
+                if left_idx is None or right_idx is None:
+                    continue
+
+                inter_source_links.append({
+                    'id': link_idx + 1,
+                    'left_group_index': left_idx,
+                    'left_column_name': link.get('left_column'),
+                    'right_group_index': right_idx,
+                    'right_column_name': link.get('right_column'),
+                    'join_strategy': (link.get('join_strategy') or 'full').lower()
+                })
+
+        # Fallback: keep old behavior if preview is unavailable
+        if not tables:
+            for idx, output_path in enumerate(fallback_paths):
+                tables.append({
+                    'group_id': idx,
+                    'group_name': f"bronze_table_{idx}",
+                    'output_path': output_path,
+                    'rows_ingested': latest_execution.rows_ingested
+                })
+
         return {
             'config_id': bronze_config.id,
             'config_name': bronze_config.name,
             'tables': tables,
-            'column_mappings': {},  # Not needed for new architecture
-            'inter_source_links': [],  # Not needed for new architecture
+            'column_mappings': column_map,
+            'inter_source_links': inter_source_links,
             'delta_version': version or latest_execution.delta_version,
             'execution_id': latest_execution.id
         }
@@ -2153,14 +2809,16 @@ class SilverTransformationService:
         bronze_info: Dict[str, Any],
         config: TransformConfigResponse,
         output_path: str
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, int, Optional[Dict], int]:
         """
         Execute the transformation using PySpark.
         
         This runs in a separate thread to avoid blocking the async event loop.
         
         Returns:
-            Tuple of (rows_processed, rows_output)
+            Tuple of (rows_processed, rows_output, post_llm_filters, delta_version)
+            post_llm_filters is returned so the caller can pass it to _execute_llm_extractions.
+            delta_version is the Delta Lake version after writing.
         """
         import asyncio
         from concurrent.futures import ThreadPoolExecutor
@@ -2168,8 +2826,8 @@ class SilverTransformationService:
         # Get transformation config for Spark
         transform_config = {
             'config_id': config.id,
-            'column_transformations': config.column_transformations,  # Same format as Virtualized
-            'filters': config.filters,  # Inline filters
+            'column_transformations': config.column_transformations,
+            'filters': config.filters,
             'column_group_ids': config.column_group_ids,
             'exclude_unified_source_columns': getattr(config, 'exclude_unified_source_columns', False)
         }
@@ -2179,14 +2837,35 @@ class SilverTransformationService:
         transform_config['normalization_rules'] = norm_rules
         
         # Load column group info from Equivalence
+        equiv_data = None
         if transform_config.get('column_group_ids'):
             equiv_data = await self.load_equivalence_for_virtualized(transform_config['column_group_ids'])
             transform_config['equivalence_data'] = equiv_data
         
+        # Classify filter conditions into pre/post phases (BEFORE thread pool)
+        bronze_col_names = set()
+        for mapping in bronze_info.get('column_mappings', {}).values():
+            name = mapping.get('bronze_column_name') or mapping.get('original_column_name', '')
+            if name:
+                bronze_col_names.add(name)
+        
+        pre_filters, post_transform_filters, post_llm_filters = self._classify_filter_conditions(
+            filters=transform_config.get('filters'),
+            column_transformations=config.column_transformations,
+            equivalence_data=equiv_data,
+            llm_extractions=config.llm_extractions if hasattr(config, 'llm_extractions') else None,
+            exclude_unified_source_columns=transform_config.get('exclude_unified_source_columns', False),
+            bronze_column_names=bronze_col_names
+        )
+        
+        # Replace filters with classified versions for Spark
+        transform_config['filters'] = pre_filters
+        transform_config['post_transform_filters'] = post_transform_filters
+        
         # Execute Spark transformation in thread pool
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=1) as executor:
-            rows_processed, rows_output = await loop.run_in_executor(
+            rows_processed, rows_output, delta_version = await loop.run_in_executor(
                 executor,
                 self._run_spark_transform,
                 bronze_info,
@@ -2194,7 +2873,219 @@ class SilverTransformationService:
                 output_path
             )
         
-        return rows_processed, rows_output
+        return rows_processed, rows_output, post_llm_filters, delta_version
+    
+    async def _execute_llm_extractions(
+        self,
+        config: TransformConfigResponse,
+        bronze_info: Dict[str, Any],
+        output_path: str,
+        post_llm_filters: Optional[Dict] = None
+    ) -> List[Dict[str, Any]]:
+        """
+        Execute LLM extractions on the Silver data after Spark transform.
+        
+        This method:
+        1. Reads the Silver Delta table written by Spark
+        2. For each LLM extraction definition:
+           a. Resolves source_column_id to the actual column name in the data
+           b. Collects column values from the DataFrame
+           c. Calls LLMExtractionService to process all values via LLM
+           d. Adds the new column to the DataFrame
+        3. Applies post-LLM filters if any (conditions on LLM-created columns)
+        4. Overwrites the Silver Delta table with the new columns added
+        
+        Returns:
+            List of extraction result dicts with stats per column.
+        """
+        from .llm_extraction_service import get_llm_extraction_service
+        from concurrent.futures import ThreadPoolExecutor
+        import asyncio
+        
+        llm_service = get_llm_extraction_service()
+        extractions = config.llm_extractions or []
+        
+        if not extractions:
+            return []
+        
+        logger.info(f"Starting LLM extractions: {len(extractions)} column(s) to create")
+        
+        # Resolve source_column_id to actual column names in the data
+        bronze_column_map = bronze_info.get('column_mappings', {})
+        
+        # Read Silver data in a thread (Spark is blocking)
+        loop = asyncio.get_event_loop()
+        
+        def _read_silver_data():
+            spark = self.spark_manager.get_or_create_session()
+            df = spark.read.format("delta").load(output_path)
+            return df
+        
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            df = await loop.run_in_executor(executor, _read_silver_data)
+        
+        all_columns = df.columns
+        all_results = []
+        
+        for ext_def in extractions:
+            source_col_id = ext_def.get('source_column_id')
+            new_col_name = ext_def['new_column_name']
+            
+            # Resolve source_column_id to bronze column name
+            source_col_name = None
+            if source_col_id and bronze_column_map:
+                mapping = bronze_column_map.get(str(source_col_id)) or bronze_column_map.get(source_col_id)
+                if isinstance(mapping, dict):
+                    # bronze_column_map returns dicts like {bronze_column_name: "col", ...}
+                    source_col_name = mapping.get('bronze_column_name') or mapping.get('original_column_name')
+                elif isinstance(mapping, str):
+                    source_col_name = mapping
+            
+            # If found in mapping but not in DataFrame, check with prefixes
+            if source_col_name and source_col_name not in all_columns:
+                for col in all_columns:
+                    if col == source_col_name or col.endswith(f"_{source_col_name}"):
+                        source_col_name = col
+                        break
+            
+            # If not found in mapping at all, try to find by looking up external column name
+            if not source_col_name:
+                from ...database.models.metadata import ExternalColumn
+                col_result = await self.db.execute(
+                    select(ExternalColumn.column_name).where(ExternalColumn.id == source_col_id)
+                )
+                ext_col_name = col_result.scalar_one_or_none()
+                if ext_col_name:
+                    # Check if the column name exists in the DataFrame (may be prefixed)
+                    for col in all_columns:
+                        if col == ext_col_name or col.endswith(f"_{ext_col_name}"):
+                            source_col_name = col
+                            break
+            
+            if not source_col_name or source_col_name not in all_columns:
+                logger.error(
+                    f"LLM extraction '{new_col_name}': source column ID {source_col_id} "
+                    f"not found in data (resolved to: {source_col_name}, "
+                    f"available: {all_columns})"
+                )
+                all_results.append({
+                    "column_name": new_col_name,
+                    "output_type": ext_def.get("output_type", "unknown"),
+                    "values": [],
+                    "rows_processed": 0,
+                    "rows_success": 0,
+                    "rows_failed": 0,
+                    "error_rate": 1.0,
+                })
+                continue
+            
+            logger.info(
+                f"LLM extraction '{new_col_name}': reading values from column '{source_col_name}'"
+            )
+            
+            # Collect column values from Spark DataFrame (blocking)
+            def _collect_values():
+                from pyspark.sql import functions as F
+                rows = df.select(F.col(source_col_name).cast("string")).collect()
+                return [row[0] for row in rows]
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                column_values = await loop.run_in_executor(executor, _collect_values)
+            
+            # Run LLM extraction (async with concurrency)
+            result = await llm_service.process_extraction(ext_def, column_values)
+            all_results.append(result)
+            
+            # Add the new column to the DataFrame via pandas (reliable row ordering)
+            extracted_values = result["values"]
+            
+            def _add_column_to_df(current_df, col_name, values, output_type):
+                """
+                Add LLM-extracted column to Spark DataFrame using pandas as intermediary.
+                This guarantees correct row ordering (monotonically_increasing_id is
+                partition-dependent and unreliable for cross-DataFrame joins).
+                """
+                spark = self.spark_manager.get_or_create_session()
+                
+                # Convert to pandas, add column, convert back
+                pdf = current_df.toPandas()
+                
+                if len(values) != len(pdf):
+                    logger.warning(
+                        f"LLM values count ({len(values)}) != DataFrame rows ({len(pdf)}). "
+                        f"Padding/truncating to match."
+                    )
+                    # Pad with None or truncate
+                    if len(values) < len(pdf):
+                        values = values + [None] * (len(pdf) - len(values))
+                    else:
+                        values = values[:len(pdf)]
+                
+                # Use Python-native None (not pd.NA) -- Spark rejects pandas.NA types.
+                # Use object dtype for both bool and enum to safely hold None values.
+                if output_type == "bool":
+                    col_values = [bool(v) if v is not None else None for v in values]
+                else:
+                    col_values = [str(v) if v is not None else None for v in values]
+                
+                pdf[col_name] = col_values  # object dtype, Python None
+                
+                # Build explicit Spark schema to avoid type inference failures
+                # (when all values are None, Spark can't guess the type)
+                from pyspark.sql.types import StructType, StructField, BooleanType, StringType
+                
+                spark_schema = StructType()
+                for field in current_df.schema.fields:
+                    spark_schema.add(field)
+                
+                if output_type == "bool":
+                    spark_schema.add(StructField(col_name, BooleanType(), True))
+                else:
+                    spark_schema.add(StructField(col_name, StringType(), True))
+                
+                return spark.createDataFrame(pdf, schema=spark_schema)
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                df = await loop.run_in_executor(
+                    executor, 
+                    _add_column_to_df, 
+                    df, 
+                    new_col_name, 
+                    extracted_values,
+                    ext_def.get("output_type", "bool")
+                )
+        
+        # Apply post-LLM filters if any (conditions on LLM-created columns)
+        if post_llm_filters and all_results:
+            from pyspark.sql import functions as F
+            
+            def _apply_post_llm_filters():
+                nonlocal df
+                filter_config = {'filters': post_llm_filters}
+                pre_count = df.count()
+                df = self._apply_spark_filters(df, filter_config, None)
+                post_count = df.count()
+                logger.info(f"Post-LLM filter applied: {pre_count} rows before, {post_count} rows after")
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                await loop.run_in_executor(executor, _apply_post_llm_filters)
+        
+        # Write back the DataFrame with new LLM columns (and post-LLM filters applied)
+        if all_results:
+            def _write_back():
+                logger.info(f"Writing Silver data with {len(all_results)} LLM column(s) to: {output_path}")
+                df.write \
+                    .format("delta") \
+                    .mode("overwrite") \
+                    .option("overwriteSchema", "true") \
+                    .option("mergeSchema", "true") \
+                    .save(output_path)
+            
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                await loop.run_in_executor(executor, _write_back)
+        
+        logger.info(f"LLM extractions complete: {len(all_results)} column(s) processed")
+        return all_results
     
     def _run_spark_transform(
         self,
@@ -2265,13 +3156,12 @@ class SilverTransformationService:
         
         logger.info(f"Total rows to process: {total_rows}")
         
-        # Apply filters FIRST (before transformations) - consistent with Virtualized behavior
-        # In SQL (Virtualized), WHERE clause filters original data before SELECT transforms
-        # We do the same here: filter on original values, then transform
+        # Apply PRE-FILTERS on original Bronze data (only conditions on unmodified columns)
+        # Pre-filters are classified by _classify_filter_conditions in _execute_spark_transform
         pre_filter_count = df.count()
         df = self._apply_spark_filters(df, transform_config, bronze_info)
         post_filter_count = df.count()
-        logger.info(f"Filter applied: {pre_filter_count} rows before, {post_filter_count} rows after")
+        logger.info(f"Pre-filter applied: {pre_filter_count} rows before, {post_filter_count} rows after")
         
         # Apply column_transformations (same format as Virtualized, uses column_id)
         # This resolves column_id → bronze_column_name using BronzeColumnMapping
@@ -2281,11 +3171,23 @@ class SilverTransformationService:
         # This handles both column unification and value mappings from Equivalence
         df = self._apply_equivalence_groups(df, transform_config, bronze_info)
         
+        # Apply POST-TRANSFORM FILTERS on transformed/unified data
+        # These are conditions on columns modified by transformations or created by equivalence
+        post_transform_filters = transform_config.get('post_transform_filters')
+        if post_transform_filters:
+            pre_post_count = df.count()
+            post_config = {**transform_config, 'filters': post_transform_filters}
+            df = self._apply_spark_filters(df, post_config, bronze_info)
+            post_post_count = df.count()
+            logger.info(f"Post-transform filter applied: {pre_post_count} rows before, {post_post_count} rows after")
+        
         # Add Silver metadata columns
         df = df.withColumn("_silver_timestamp", F.current_timestamp())
         df = df.withColumn("_transform_config_id", F.lit(transform_config.get('config_id')))
         
-        # Write to Silver Delta Lake
+        # Write to Silver Delta Lake using versioning service (tracks delta_version)
+        from delta.tables import DeltaTable
+        
         logger.info(f"Writing Silver Delta to: {output_path}")
         
         df.write \
@@ -2295,13 +3197,23 @@ class SilverTransformationService:
             .option("mergeSchema", "true") \
             .save(output_path)
         
+        # Read back delta version from history
+        delta_version = 0
+        try:
+            delta_table = DeltaTable.forPath(spark, output_path)
+            history = delta_table.history(1).collect()
+            if history:
+                delta_version = history[0].asDict().get("version", 0)
+        except Exception as e:
+            logger.warning(f"Could not read Delta version: {e}")
+        
         # Get output row count
         output_df = spark.read.format("delta").load(output_path)
         rows_output = output_df.count()
         
-        logger.info(f"Silver transformation complete: {total_rows} rows processed, {rows_output} rows written")
+        logger.info(f"Silver transformation complete: {total_rows} rows processed, {rows_output} rows written, delta_version={delta_version}")
         
-        return total_rows, rows_output
+        return total_rows, rows_output, delta_version
     
     def _join_dataframes_with_links(
         self,
@@ -2626,30 +3538,29 @@ class SilverTransformationService:
                         'external_col_id': ext_col_id
                     })
         
-        # Apply value mappings first (before unification)
+        # Build mapped expressions for unified columns without mutating source columns.
+        # This preserves original source columns when exclude_unified_source_columns=False.
+        mapped_expr_by_bronze_col = {}  # bronze_col_name -> Spark Column expression
         for external_col_id, mappings in value_mappings_by_column.items():
             ext_col_id = int(external_col_id) if isinstance(external_col_id, str) else external_col_id
-            
+
             bronze_mapping = bronze_column_map.get(ext_col_id)
             if not bronze_mapping:
                 continue
-            
+
             bronze_col_name = bronze_mapping.get('bronze_column_name')
-            if not bronze_col_name or bronze_col_name not in df.columns:
+            if not bronze_col_name or bronze_col_name not in df.columns or not mappings:
                 continue
-            
-            if mappings:
-                # Build CASE expression for value mapping
-                case_expr = F.col(bronze_col_name)
-                for from_val, to_val in mappings.items():
-                    case_expr = F.when(
-                        F.col(bronze_col_name) == from_val,
-                        F.lit(to_val)
-                    ).otherwise(case_expr)
-                
-                # Apply mapping to the column
-                df = df.withColumn(bronze_col_name, case_expr)
-                logger.info(f"Applied Equivalence value mapping to {bronze_col_name} ({len(mappings)} mappings)")
+
+            mapped_expr = F.col(bronze_col_name)
+            for from_val, to_val in mappings.items():
+                mapped_expr = F.when(
+                    F.col(bronze_col_name) == from_val,
+                    F.lit(to_val)
+                ).otherwise(mapped_expr)
+
+            mapped_expr_by_bronze_col[bronze_col_name] = mapped_expr
+            logger.info(f"Prepared Equivalence value mapping for {bronze_col_name} ({len(mappings)} mappings)")
         
         # Check if we should exclude source columns after unification
         exclude_source_columns = transform_config.get('exclude_unified_source_columns', False)
@@ -2660,7 +3571,8 @@ class SilverTransformationService:
             if len(col_infos) > 1:
                 # Multiple columns to unify - use COALESCE
                 bronze_cols = [c['bronze_col'] for c in col_infos]
-                coalesce_expr = F.coalesce(*[F.col(c) for c in bronze_cols])
+                coalesce_inputs = [mapped_expr_by_bronze_col.get(c, F.col(c)) for c in bronze_cols]
+                coalesce_expr = F.coalesce(*coalesce_inputs)
                 df = df.withColumn(unified_name, coalesce_expr)
                 logger.info(f"Unified columns {bronze_cols} into '{unified_name}'")
                 
@@ -2674,7 +3586,8 @@ class SilverTransformationService:
                 # Single column - just alias
                 bronze_col = col_infos[0]['bronze_col']
                 if bronze_col != unified_name:
-                    df = df.withColumn(unified_name, F.col(bronze_col))
+                    unified_expr = mapped_expr_by_bronze_col.get(bronze_col, F.col(bronze_col))
+                    df = df.withColumn(unified_name, unified_expr)
                     logger.info(f"Aliased column {bronze_col} as '{unified_name}'")
                     
                     # Mark source column for potential removal

@@ -1,12 +1,35 @@
 from typing import Dict, Any, List, Optional, Tuple
 import aiotrino
 from .trino_manager import TrinoManager
+from .tunnel_manager import (
+    get_tunnel_manager,
+    has_tunnel_config,
+)
 from ...utils.logger import logger
 import urllib3
 from urllib.parse import urlparse
 from minio import Minio
 import re
 import asyncio
+
+
+
+# Schemas de sistema conhecidos por tipo de banco de dados.
+# Schemas nesta lista serão marcados com is_system_schema=True na extração.
+SYSTEM_SCHEMAS: Dict[str, set] = {
+    "postgresql": {"information_schema", "pg_catalog", "pg_toast"},
+    "postgres":   {"information_schema", "pg_catalog", "pg_toast"},
+    "mysql":      {"information_schema", "mysql", "performance_schema", "sys"},
+    "deltalake":  {"information_schema", "sys"},
+    "delta":      {"information_schema", "sys"},
+    "minio":      {"information_schema", "sys"},
+    "s3":         {"information_schema", "sys"},
+}
+# Prefixos que indicam schemas temporários de sistema (PostgreSQL)
+SYSTEM_SCHEMA_PREFIXES = ("pg_temp_", "pg_toast_temp_")
+
+# Fallback genérico para tipos de conexão não mapeados
+_DEFAULT_SYSTEM_SCHEMAS = {"information_schema", "sys"}
 
 
 class TrinoExtractor:
@@ -114,6 +137,15 @@ class TrinoExtractor:
             secure = secure.lower() == 'true'
             
         region = self.connection_params.get("region", "us-east-1")
+        
+        # Se túnel ativo, substituir endpoint pelo endereço local (mesmo container → 127.0.0.1)
+        if has_tunnel_config(self.connection_params) and self.connection_id is not None:
+            tunnel_manager = get_tunnel_manager()
+            tunnel_port = tunnel_manager.get_tunnel_port(self.connection_id)
+            if tunnel_port:
+                scheme = "https" if str(endpoint or "").startswith("https") else "http"
+                endpoint = f"{scheme}://127.0.0.1:{tunnel_port}"
+                logger.info(f"[TrinoExtractor] Using tunnel endpoint for MinIO discovery: {endpoint}")
         
         logger.info(f"MinIO params - Endpoint: {endpoint}, Secure: {secure}, Region: {region}")
 
@@ -308,16 +340,25 @@ class TrinoExtractor:
             await cur.execute(f"SHOW SCHEMAS FROM \"{self.catalog}\"")
             rows = await cur.fetchall()
             
+            # Determinar quais schemas são de sistema para este tipo de conexão
+            known_system = SYSTEM_SCHEMAS.get(
+                self.connection_type.lower(), _DEFAULT_SYSTEM_SCHEMAS
+            )
+            
             schemas = []
             for row in rows:
                 schema_name = row[0]
-                if schema_name in ('information_schema', 'sys'): 
-                    continue
+                
+                is_system = (
+                    schema_name in known_system
+                    or any(schema_name.startswith(p) for p in SYSTEM_SCHEMA_PREFIXES)
+                )
                     
                 schemas.append({
                     "schema_name": schema_name,
                     "catalog_name": self.catalog,
                     "external_reference": f"{self.catalog}.{schema_name}",
+                    "is_system_schema": is_system,
                     "properties": {}
                 })
             return schemas
@@ -584,6 +625,15 @@ class TrinoExtractor:
         Extract actual data from a table via Trino (fully async with aiotrino).
         """
         try:
+            # Flush metadata cache for Delta connections so Trino sees the
+            # latest Parquet files after external writes (e.g. Airflow DAGs).
+            if self.connection_type.lower() in ("deltalake", "delta", "minio", "s3"):
+                await self.trino_manager.flush_metadata_cache(
+                    catalog_name=self.catalog,
+                    schema_name=schema_name,
+                    table_name=table_name,
+                )
+
             conn = await self._get_connection()
             cur = await conn.cursor()
             

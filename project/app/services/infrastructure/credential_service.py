@@ -43,6 +43,7 @@ from app.core.credential_encryption import (
     CredentialEncryption,
     get_credential_encryption,
     SENSITIVE_FIELDS_BY_CONNECTION_TYPE,
+    TUNNEL_SENSITIVE_FIELDS,
 )
 
 logger = logging.getLogger(__name__)
@@ -150,11 +151,17 @@ class CredentialService:
         
         decrypted_params = self._crypto.decrypt_connection_params(connection_params)
         
-        # Log de auditoria
+        # Log de auditoria (inclui campos do nível raiz e do bloco tunnel)
         decrypted_fields = [
             key for key, value in connection_params.items()
-            if value and isinstance(value, str) and self._crypto.is_encrypted(value)
+            if key != "tunnel" and value and isinstance(value, str) and self._crypto.is_encrypted(value)
         ]
+        tunnel_data = connection_params.get("tunnel")
+        if tunnel_data and isinstance(tunnel_data, dict):
+            decrypted_fields.extend(
+                f"tunnel.{key}" for key, value in tunnel_data.items()
+                if value and isinstance(value, str) and self._crypto.is_encrypted(value)
+            )
         
         if decrypted_fields:
             self._log_access(
@@ -213,6 +220,9 @@ class CredentialService:
         sensitive_fields_lower = [f.lower() for f in sensitive_fields]
         
         for key, value in connection_params.items():
+            if key == "tunnel":
+                continue  # Tratado separadamente abaixo
+            
             key_lower = key.lower()
             
             # Verifica se é campo sensível:
@@ -230,6 +240,26 @@ class CredentialService:
                     safe_params[key] = "[REDACTED]"
             else:
                 safe_params[key] = value
+        
+        # Mascarar campos dentro de "tunnel" (se presente)
+        tunnel_data = connection_params.get("tunnel")
+        if tunnel_data and isinstance(tunnel_data, dict):
+            tunnel_sensitive_lower = [f.lower() for f in TUNNEL_SENSITIVE_FIELDS]
+            safe_tunnel = {}
+            for key, value in tunnel_data.items():
+                key_lower = key.lower()
+                is_sensitive = (
+                    key_lower in tunnel_sensitive_lower or
+                    (isinstance(value, str) and self._crypto.is_encrypted(value))
+                )
+                if is_sensitive and value:
+                    if include_encrypted_indicator and self._crypto.is_encrypted(str(value)):
+                        safe_tunnel[key] = "[ENCRYPTED]"
+                    else:
+                        safe_tunnel[key] = "[REDACTED]"
+                else:
+                    safe_tunnel[key] = value
+            safe_params["tunnel"] = safe_tunnel
         
         return safe_params
     
