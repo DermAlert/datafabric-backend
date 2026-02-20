@@ -2,6 +2,21 @@ from pydantic import BaseModel, Field, validator
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime
 from enum import Enum
+import re
+import unicodedata
+
+
+def _sanitize_ds_name(name: str) -> str:
+    """Sanitize an arbitrary string into a valid Delta Sharing identifier.
+
+    Strips accents, lowercases, replaces non-alphanumeric runs with '_',
+    and trims leading/trailing underscores.
+    """
+    normalized = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('ASCII')
+    sanitized = re.sub(r'[^a-zA-Z0-9]+', '_', normalized.lower())
+    sanitized = re.sub(r'_+', '_', sanitized).strip('_')
+    return sanitized[:255] or 'table'
+
 
 # ===================== Protocol Models =====================
 
@@ -211,10 +226,18 @@ class ShareTableCreate(BaseModel):
 
 class ShareTableUpdate(BaseModel):
     """Update shared table request"""
+    name: Optional[str] = Field(default=None, description="New table name", max_length=255)
     description: Optional[str] = Field(default=None, description="Table description")
     status: Optional[TableShareStatus] = Field(default=None, description="Table status")
     share_mode: Optional[str] = Field(default=None, description="Share mode: full, filtered, aggregated")
     filter_condition: Optional[str] = Field(default=None, description="SQL WHERE clause for filtered sharing")
+    pinned_delta_version: Optional[int] = Field(default=None, description="Pin to a specific Delta Lake version (bronze/silver tables only). Set to null to unpin.")
+
+    @validator('name', pre=True)
+    def validate_name(cls, v):
+        if not v:
+            return None
+        return _sanitize_ds_name(v)
 
     @validator('share_mode')
     def validate_share_mode(cls, v):
@@ -225,7 +248,8 @@ class ShareTableUpdate(BaseModel):
 class ShareTableDetail(BaseModel):
     """Detailed shared table information"""
     id: int = Field(description="Table ID")
-    name: str = Field(description="Table name")
+    name: str = Field(description="Display name (resolved from source config)")
+    protocol_table_name: Optional[str] = Field(default=None, description="Actual table name in the Delta Sharing protocol (used in client code)")
     description: Optional[str] = Field(default=None, description="Table description")
     schema_id: int = Field(description="Schema ID")
     schema_name: str = Field(description="Schema name")
@@ -237,12 +261,15 @@ class ShareTableDetail(BaseModel):
     share_mode: str = Field(description="Share mode")
     filter_condition: Optional[str] = Field(default=None, description="Filter condition")
     current_version: int = Field(description="Current version")
+    pinned_delta_version: Optional[int] = Field(default=None, description="Pinned Delta Lake version for time-travel (null = always latest)")
     table_format: str = Field(description="Table format")
     partition_columns: Optional[List[str]] = Field(default=None, description="Partition columns")
     storage_location: Optional[str] = Field(default=None, description="Storage location")
-    source_type: Optional[str] = Field(default="delta", description="Source type: delta, bronze_virtualized, silver_virtualized")
-    bronze_virtualized_config_id: Optional[int] = Field(default=None, description="Bronze virtualized config ID")
-    silver_virtualized_config_id: Optional[int] = Field(default=None, description="Silver virtualized config ID")
+    source_type: Optional[str] = Field(default="delta", description="Source type: delta, bronze, silver, bronze_virtualized, silver_virtualized")
+    bronze_persistent_config_id: Optional[int] = Field(default=None, description="Bronze Persistent Config ID (source for BRONZE type)")
+    silver_persistent_config_id: Optional[int] = Field(default=None, description="Silver Transform Config ID (source for SILVER type)")
+    bronze_virtualized_config_id: Optional[int] = Field(default=None, description="Bronze Virtualized Config ID (source for BRONZE_VIRTUALIZED type)")
+    silver_virtualized_config_id: Optional[int] = Field(default=None, description="Silver Virtualized Config ID (source for SILVER_VIRTUALIZED type)")
     data_criacao: datetime = Field(description="Creation timestamp")
     data_atualizacao: datetime = Field(description="Last update timestamp")
 
@@ -370,33 +397,43 @@ class AvailableDataset(BaseModel):
 class CreateTableFromBronze(BaseModel):
     """Create Delta Sharing table from Bronze config"""
     bronze_config_id: int = Field(description="Bronze Persistent Config ID")
-    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
-    description: Optional[str] = Field(default=None, description="Table description")
+    name: Optional[str] = Field(default=None, description="Table name for Delta Sharing. Derived from the Bronze config name when omitted.", max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description. Inherited from the Bronze config description when omitted.")
     share_mode: str = Field(default="full", description="Share mode: full, filtered, aggregated")
     filter_condition: Optional[str] = Field(default=None, description="SQL WHERE clause for filtered sharing")
-    path_index: int = Field(default=0, description="Path index for non-federated configs with multiple outputs")
+    path_index: Optional[int] = Field(default=None, description="Path index for a specific output path. When omitted, tables are created for ALL paths.")
+    pinned_delta_version: Optional[int] = Field(default=None, description="Pin to a specific Delta Lake version. Omit to always serve the latest version.")
 
-    @validator('name')
+    @validator('name', pre=True)
     def validate_name(cls, v):
-        import re
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
-            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
-        return v.lower().replace('-', '_')
+        if not v:
+            return None
+        return _sanitize_ds_name(v)
 
 class CreateTableFromSilver(BaseModel):
     """Create Delta Sharing table from Silver config"""
     silver_config_id: int = Field(description="Silver Transform Config ID")
-    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
-    description: Optional[str] = Field(default=None, description="Table description")
+    name: Optional[str] = Field(default=None, description="Table name for Delta Sharing. Derived from the Silver config name when omitted.", max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description. Inherited from the Silver config description when omitted.")
     share_mode: str = Field(default="full", description="Share mode: full, filtered, aggregated")
     filter_condition: Optional[str] = Field(default=None, description="SQL WHERE clause for filtered sharing")
+    pinned_delta_version: Optional[int] = Field(default=None, description="Pin to a specific Delta Lake version. Omit to always serve the latest version.")
 
-    @validator('name')
+    @validator('name', pre=True)
     def validate_name(cls, v):
-        import re
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
-            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
-        return v.lower().replace('-', '_')
+        if not v:
+            return None
+        return _sanitize_ds_name(v)
+
+class PinDeltaVersionRequest(BaseModel):
+    """Request to pin a shared table to a specific Delta Lake version"""
+    delta_version: int = Field(description="Delta Lake version number to pin. Must correspond to an existing execution of the linked Bronze/Silver config.", ge=0)
+
+class UnpinDeltaVersionResponse(BaseModel):
+    """Response after unpinning a Delta Lake version"""
+    message: str = Field(description="Confirmation message")
+    table_id: int = Field(description="Table ID")
+    table_name: str = Field(description="Table name")
 
 class IntegrationTableDetail(BaseModel):
     """Detail of table created from Bronze/Silver integration"""
@@ -425,28 +462,26 @@ class VirtualizedSourceType(str, Enum):
 class CreateTableFromBronzeVirtualized(BaseModel):
     """Create Delta Sharing table from a Bronze Virtualized Config"""
     bronze_virtualized_config_id: int = Field(description="Bronze Virtualized Config ID")
-    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
-    description: Optional[str] = Field(default=None, description="Table description")
+    name: Optional[str] = Field(default=None, description="Table name for Delta Sharing. Derived from the Bronze Virtualized config name when omitted.", max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description. Inherited from the Bronze Virtualized config description when omitted.")
 
-    @validator('name')
+    @validator('name', pre=True)
     def validate_name(cls, v):
-        import re
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
-            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
-        return v.lower().replace('-', '_')
+        if not v:
+            return None
+        return _sanitize_ds_name(v)
 
 class CreateTableFromSilverVirtualized(BaseModel):
     """Create Delta Sharing table from a Silver Virtualized Config"""
     silver_virtualized_config_id: int = Field(description="Silver Virtualized Config ID")
-    name: str = Field(description="Table name for Delta Sharing", min_length=1, max_length=255)
-    description: Optional[str] = Field(default=None, description="Table description")
+    name: Optional[str] = Field(default=None, description="Table name for Delta Sharing. Derived from the Silver Virtualized config name when omitted.", max_length=255)
+    description: Optional[str] = Field(default=None, description="Table description. Inherited from the Silver Virtualized config description when omitted.")
 
-    @validator('name')
+    @validator('name', pre=True)
     def validate_name(cls, v):
-        import re
-        if not re.match(r'^[a-zA-Z0-9_-]+$', v):
-            raise ValueError('Table name must contain only alphanumeric characters, hyphens, and underscores')
-        return v.lower().replace('-', '_')
+        if not v:
+            return None
+        return _sanitize_ds_name(v)
 
 
 # ===================== Data API Models (REST access for virtualized tables) =====================

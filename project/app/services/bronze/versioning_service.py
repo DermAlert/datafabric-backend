@@ -100,6 +100,7 @@ class BronzeVersioningService:
         self,
         config_id: int,
         config_name: str,
+        known_output_paths: dict = None,
         limit: int = 100
     ) -> BronzeVersionHistoryResponse:
         """
@@ -112,6 +113,7 @@ class BronzeVersioningService:
         Args:
             config_id: Config ID
             config_name: Config name
+            known_output_paths: Stable path registry from config (optional)
             limit: Maximum versions to return
         
         Returns:
@@ -120,7 +122,6 @@ class BronzeVersioningService:
         from ...database.models.bronze import BronzeExecutionStatus
         
         try:
-            # Get all successful executions for this config (they have the aggregated metrics)
             executions_result = await self.db.execute(
                 select(BronzeExecution)
                 .where(
@@ -141,30 +142,33 @@ class BronzeVersioningService:
                     versions=[]
                 )
             
-            # Collect all unique output paths
-            all_output_paths = set()
-            for exec in executions:
-                if exec.output_paths:
-                    all_output_paths.update(exec.output_paths)
+            # Use known_output_paths from config when available; fall back to union of execution paths
+            if known_output_paths:
+                all_output_paths = sorted(known_output_paths.values())
+            else:
+                path_set = set()
+                for exc in executions:
+                    if exc.output_paths:
+                        path_set.update(exc.output_paths)
+                all_output_paths = sorted(path_set)
             
             versions = []
-            for exec in executions:
-                # Get size and file metrics from execution_details
-                exec_details = exec.execution_details or {}
+            for exc in executions:
+                exec_details = exc.execution_details or {}
                 
-                # Use execution timestamp and metrics (already aggregated across all paths)
                 version_info = DeltaVersionInfo(
-                    version=exec.delta_version if exec.delta_version is not None else 0,
-                    timestamp=exec.finished_at or exec.started_at,
-                    operation=exec.write_mode_used.upper() if exec.write_mode_used else "WRITE",
-                    execution_id=exec.id,
-                    rows_inserted=exec.rows_inserted,
-                    rows_updated=exec.rows_updated,
-                    rows_deleted=exec.rows_deleted,
-                    total_rows=exec.rows_ingested,
+                    version=exc.version_number if exc.version_number is not None else (exc.delta_version if exc.delta_version is not None else 0),
+                    timestamp=exc.finished_at or exc.started_at,
+                    operation=exc.write_mode_used.upper() if exc.write_mode_used else "WRITE",
+                    execution_id=exc.id,
+                    rows_inserted=exc.rows_inserted,
+                    rows_updated=exc.rows_updated,
+                    rows_deleted=exc.rows_deleted,
+                    total_rows=exc.rows_ingested,
                     num_files=exec_details.get('num_files'),
                     size_bytes=exec_details.get('size_bytes'),
-                    config_snapshot=exec.config_snapshot
+                    config_snapshot=exc.config_snapshot,
+                    path_delta_versions=getattr(exc, 'path_delta_versions', None),
                 )
                 versions.append(version_info)
             
@@ -174,7 +178,7 @@ class BronzeVersioningService:
                 config_id=config_id,
                 config_name=config_name,
                 current_version=current_version,
-                output_paths=sorted(list(all_output_paths)),
+                output_paths=all_output_paths,
                 versions=versions
             )
         

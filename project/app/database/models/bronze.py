@@ -409,8 +409,12 @@ class BronzePersistentConfig(AuditMixin, Base):
     last_execution_rows = Column(Integer, nullable=True)
     last_execution_error = Column(Text, nullable=True)
     
-    # Delta Lake versioning info
-    current_delta_version = Column(Integer, nullable=True)  # Latest Delta version
+    # Delta Lake versioning info (current_delta_version now stores the logical version_number)
+    current_delta_version = Column(Integer, nullable=True)
+    
+    # Stable registry of all output paths ever written: {"connection_name": "s3a://path/"}
+    # Accumulates via union on each execution (never removes entries)
+    known_output_paths = Column(JSON, nullable=True)
     
     is_active = Column(Boolean, default=True)
     
@@ -448,7 +452,14 @@ class BronzeExecution(AuditMixin, Base):
     execution_details = Column(JSON, nullable=True)
     
     # === DELTA LAKE VERSIONING ===
-    # Delta version created by this execution
+    # Logical dataset version for this execution (0, 1, 2, ...)
+    version_number = Column(Integer, nullable=True)
+    
+    # Snapshot of {s3a_path: delta_lake_version} for every path written in this execution.
+    # Only includes paths actually written (no inheritance from previous executions).
+    path_delta_versions = Column(JSON, nullable=True)
+    
+    # Legacy field — now stores version_number for backward compatibility
     delta_version = Column(Integer, nullable=True)
     
     # Write mode used in this execution

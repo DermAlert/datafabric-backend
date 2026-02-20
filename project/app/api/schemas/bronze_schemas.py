@@ -829,6 +829,10 @@ class DeltaVersionInfo(BaseModel):
     
     # Config snapshot at this version (for diff comparison)
     config_snapshot: Optional[Dict[str, Any]] = None
+    
+    # Per-path Delta versions snapshot (Bronze only — null for Silver)
+    # Maps output path → Delta Lake version at this execution
+    path_delta_versions: Optional[Dict[str, int]] = None
 
 
 class BronzeVersionHistoryResponse(BaseModel):

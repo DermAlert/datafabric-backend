@@ -16,6 +16,16 @@ x-airflow-common:
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Scheduler tuning: reduz reprocessamento contínuo de DAGs
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: '30'
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: '300'
+    AIRFLOW__SCHEDULER__PARSING_PROCESSES: '2'
+    AIRFLOW__SCHEDULER__MAX_DAGRUNS_TO_CREATE_PER_LOOP: '5'
+    AIRFLOW__SCHEDULER__MAX_TIS_PER_QUERY: '16'
+    # Triggerer: limita capacidade (padrão é 1000, excessivo em dev)
+    AIRFLOW__TRIGGERER__DEFAULT_CAPACITY: '100'
+    # Reduz verbosidade de log
+    AIRFLOW__LOGGING__LOGGING_LEVEL: 'WARNING'
     AWS_REGION: us-east-1
     AWS_S3_ALLOW_UNSAFE_RENAME: "true"
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-minio deltalake==1.4.2 beautifulsoup4 openpyxl}

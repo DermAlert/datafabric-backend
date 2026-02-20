@@ -2370,8 +2370,8 @@ AS
         
         group_results = []
         total_rows = 0
+        path_delta_versions = {}
         versioning_stats = {
-            'delta_version': None,
             'rows_inserted': None,
             'rows_updated': None,
             'rows_deleted': None,
@@ -2389,11 +2389,10 @@ AS
             for i, group_preview in enumerate(preview.ingestion_groups):
                 group_start = datetime.now()
                 
-                # Determine this group's output path
+                # Stable output path: always use a sub-directory so that
+                # adding/removing tables never changes existing paths.
                 if enable_federated_joins:
                     group_output_path = f"{base_path}/unified/"
-                elif len(preview.ingestion_groups) == 1:
-                    group_output_path = f"{base_path}/"
                 else:
                     group_output_path = f"{base_path}/part_{group_preview.connection_name}/"
                 
@@ -2433,8 +2432,8 @@ AS
                         output_path=group_output_path
                     )
                     
-                    # Update versioning stats (aggregate across all groups)
-                    versioning_stats['delta_version'] = stats.get('delta_version')
+                    # Track per-path Delta version (only paths actually written)
+                    path_delta_versions[group_output_path] = stats.get('delta_version', 0)
                     versioning_stats['rows_inserted'] = (versioning_stats.get('rows_inserted') or 0) + (stats.get('rows_inserted') or 0)
                     versioning_stats['rows_updated'] = (versioning_stats.get('rows_updated') or 0) + (stats.get('rows_updated') or 0)
                     versioning_stats['rows_deleted'] = (versioning_stats.get('rows_deleted') or 0) + (stats.get('rows_deleted') or 0)
@@ -2492,7 +2491,8 @@ AS
             'bronze_paths': [g.output_path for g in group_results if g.status == IngestionStatusEnum.SUCCESS],
             'execution_time_seconds': (datetime.now() - start_time).total_seconds(),
             'message': message,
-            'delta_version': versioning_stats.get('delta_version'),
+            'path_delta_versions': path_delta_versions,
+            'delta_version': None,
             'write_mode_used': 'overwrite',
             'merge_keys_used': None,
             'rows_inserted': versioning_stats.get('rows_inserted'),

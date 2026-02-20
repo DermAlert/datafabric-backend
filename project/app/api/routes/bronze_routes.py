@@ -24,6 +24,7 @@ Key endpoints:
 from fastapi import APIRouter, Body, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 from typing import List, Optional
 from datetime import datetime
 import logging
@@ -1294,13 +1295,33 @@ async def execute_persistent_config(
                 properties=config.properties or {},
             )
             
-            # Update execution record with versioning info
+            # Calculate sequential version_number
+            last_version_result = await db.execute(
+                select(func.max(BronzeExecution.version_number))
+                .where(BronzeExecution.config_id == config.id)
+            )
+            last_version = last_version_result.scalar()
+            new_version = (last_version + 1) if last_version is not None else 0
+            
+            # path_delta_versions: only paths written in THIS execution
+            path_delta_versions = ingestion_result.get('path_delta_versions', {})
+            
+            # Accumulate known_output_paths on the config (union, never removes)
+            existing_paths = dict(config.known_output_paths or {})
+            for group in ingestion_result['groups']:
+                if group.status == IngestionStatusEnum.SUCCESS:
+                    existing_paths[group.connection_name] = group.output_path
+            config.known_output_paths = existing_paths
+            
+            # Update execution record
             execution.status = BronzeExecutionStatus(ingestion_result['status'].value)
             execution.finished_at = datetime.utcnow()
             execution.rows_ingested = ingestion_result['total_rows_ingested']
             execution.output_paths = ingestion_result['bronze_paths']
             execution.group_results = [g.model_dump() for g in ingestion_result['groups']]
-            execution.delta_version = ingestion_result.get('delta_version')
+            execution.version_number = new_version
+            execution.path_delta_versions = path_delta_versions
+            execution.delta_version = new_version
             execution.write_mode_used = ingestion_result.get('write_mode_used')
             execution.merge_keys_used = ingestion_result.get('merge_keys_used')
             execution.rows_inserted = ingestion_result.get('rows_inserted')
@@ -1316,7 +1337,7 @@ async def execute_persistent_config(
             config.last_execution_time = datetime.utcnow()
             config.last_execution_status = BronzeExecutionStatus(ingestion_result['status'].value)
             config.last_execution_rows = ingestion_result['total_rows_ingested']
-            config.current_delta_version = ingestion_result.get('delta_version')
+            config.current_delta_version = new_version
             
             await db.commit()
             
@@ -1330,7 +1351,7 @@ async def execute_persistent_config(
                 bronze_paths=ingestion_result['bronze_paths'],
                 execution_time_seconds=ingestion_result['execution_time_seconds'],
                 message=ingestion_result['message'],
-                delta_version=ingestion_result.get('delta_version'),
+                delta_version=new_version,
                 write_mode_used=ingestion_result.get('write_mode_used'),
                 merge_keys_used=ingestion_result.get('merge_keys_used'),
                 rows_inserted=ingestion_result.get('rows_inserted'),
@@ -1540,11 +1561,11 @@ async def get_version_history(
                 detail=f"Persistent config {config_id} not found"
             )
         
-        # Get version history from execution records (aggregated metrics)
         versioning_service = BronzeVersioningService(db)
         history = await versioning_service.get_version_history(
             config_id=config_id,
             config_name=config.name,
+            known_output_paths=config.known_output_paths,
             limit=limit
         )
         
@@ -1661,48 +1682,78 @@ async def query_bronze_data(
                 detail=f"Persistent config {config_id} not found"
             )
         
-        # Get output path from the latest successful execution
-        # Note: We check for successful executions directly, not config.last_execution_status
-        # because the last execution might have failed but a previous one succeeded
-        # This is the actual path where data was written
-        execution_result = await db.execute(
-            select(BronzeExecution)
-            .where(
-                BronzeExecution.config_id == config_id,
-                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
-            )
-            .order_by(BronzeExecution.started_at.desc())
-            .limit(1)
-        )
-        latest_execution = execution_result.scalar_one_or_none()
-        
-        if not latest_execution or not latest_execution.output_paths:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No successful execution found with output paths. Run execute first."
-            )
-        
-        # Get the output path from execution record
-        output_paths = latest_execution.output_paths
-        if path_index >= len(output_paths):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"path_index {path_index} is out of range. Available paths: {len(output_paths)} (0-{len(output_paths)-1})"
-            )
-        
-        output_path = output_paths[path_index]
-        
-        # Query using Spark
+        # Resolve output path and Delta version for time-travel
         from ...services.infrastructure.spark_manager import SparkManager
         spark_manager = SparkManager()
-        
         versioning_service = BronzeVersioningService(db)
+        
+        delta_version_for_path = None
+        
+        if version is not None:
+            # Time-travel: resolve version_number -> actual Delta version for the requested path
+            target_exec_result = await db.execute(
+                select(BronzeExecution).where(
+                    BronzeExecution.config_id == config_id,
+                    BronzeExecution.version_number == version
+                )
+            )
+            exec_at_version = target_exec_result.scalar_one_or_none()
+            if not exec_at_version:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Version {version} not found for config {config_id}"
+                )
+            
+            version_paths = exec_at_version.path_delta_versions or {}
+            available_paths = sorted(version_paths.keys())
+            
+            if not available_paths:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Version {version} has no output paths"
+                )
+            if path_index >= len(available_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {path_index} is out of range for version {version}. Available paths: {len(available_paths)} (0-{len(available_paths)-1})"
+                )
+            
+            output_path = available_paths[path_index]
+            delta_version_for_path = version_paths[output_path]
+        else:
+            # Latest data: use stable known_output_paths from config
+            if config.known_output_paths:
+                stable_paths = [v for _, v in sorted(config.known_output_paths.items())]
+            else:
+                execution_result = await db.execute(
+                    select(BronzeExecution)
+                    .where(
+                        BronzeExecution.config_id == config_id,
+                        BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+                    )
+                    .order_by(BronzeExecution.started_at.desc())
+                    .limit(1)
+                )
+                latest_execution = execution_result.scalar_one_or_none()
+                if not latest_execution or not latest_execution.output_paths:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="No successful execution found with output paths. Run execute first."
+                    )
+                stable_paths = latest_execution.output_paths
+            
+            if path_index >= len(stable_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {path_index} is out of range. Available paths: {len(stable_paths)} (0-{len(stable_paths)-1})"
+                )
+            output_path = stable_paths[path_index]
         
         with spark_manager.session_scope() as spark:
             columns, data, total_rows = await versioning_service.query_at_version(
                 spark=spark,
                 output_path=output_path,
-                version=version,
+                version=delta_version_for_path,
                 timestamp=as_of_timestamp,
                 limit=limit,
                 offset=offset
@@ -1856,44 +1907,76 @@ async def query_bronze_data_filtered(
                 detail=f"Persistent config {config_id} not found"
             )
         
-        # Get output path from the latest successful execution
-        execution_result = await db.execute(
-            select(BronzeExecution)
-            .where(
-                BronzeExecution.config_id == config_id,
-                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
-            )
-            .order_by(BronzeExecution.started_at.desc())
-            .limit(1)
-        )
-        latest_execution = execution_result.scalar_one_or_none()
-        
-        if not latest_execution or not latest_execution.output_paths:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No successful execution found with output paths. Run execute first."
-            )
-        
-        output_paths = latest_execution.output_paths
-        if body.path_index >= len(output_paths):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"path_index {body.path_index} is out of range. Available paths: {len(output_paths)} (0-{len(output_paths)-1})"
-            )
-        
-        output_path = output_paths[body.path_index]
-        
-        # Query using Spark with filters
+        # Resolve output path and Delta version for time-travel
         from ...services.infrastructure.spark_manager import SparkManager
         spark_manager = SparkManager()
-        
         versioning_service = BronzeVersioningService(db)
+        
+        delta_version_for_path = None
+        
+        if body.version is not None:
+            target_exec_result = await db.execute(
+                select(BronzeExecution).where(
+                    BronzeExecution.config_id == config_id,
+                    BronzeExecution.version_number == body.version
+                )
+            )
+            exec_at_version = target_exec_result.scalar_one_or_none()
+            if not exec_at_version:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Version {body.version} not found for config {config_id}"
+                )
+            
+            version_paths = exec_at_version.path_delta_versions or {}
+            available_paths = sorted(version_paths.keys())
+            
+            if not available_paths:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Version {body.version} has no output paths"
+                )
+            if body.path_index >= len(available_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {body.path_index} is out of range for version {body.version}. Available paths: {len(available_paths)} (0-{len(available_paths)-1})"
+                )
+            
+            output_path = available_paths[body.path_index]
+            delta_version_for_path = version_paths[output_path]
+        else:
+            if config.known_output_paths:
+                stable_paths = [v for _, v in sorted(config.known_output_paths.items())]
+            else:
+                execution_result = await db.execute(
+                    select(BronzeExecution)
+                    .where(
+                        BronzeExecution.config_id == config_id,
+                        BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+                    )
+                    .order_by(BronzeExecution.started_at.desc())
+                    .limit(1)
+                )
+                latest_execution = execution_result.scalar_one_or_none()
+                if not latest_execution or not latest_execution.output_paths:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="No successful execution found with output paths. Run execute first."
+                    )
+                stable_paths = latest_execution.output_paths
+            
+            if body.path_index >= len(stable_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {body.path_index} is out of range. Available paths: {len(stable_paths)} (0-{len(stable_paths)-1})"
+                )
+            output_path = stable_paths[body.path_index]
         
         with spark_manager.session_scope() as spark:
             columns, data, total_rows = await versioning_service.query_at_version(
                 spark=spark,
                 output_path=output_path,
-                version=body.version,
+                version=delta_version_for_path,
                 timestamp=body.as_of_timestamp,
                 limit=body.limit,
                 offset=body.offset,

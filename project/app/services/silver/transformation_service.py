@@ -2381,41 +2381,37 @@ class SilverTransformationService:
             else:
                 output_path = f"s3a://{output_bucket}/{config.id}-{config.name}"
             
-            # Execute transformation with Spark
-            rows_processed, rows_output, post_llm_filters, delta_version = await self._execute_spark_transform(
+            # Build transformed DataFrame (no Delta write yet)
+            rows_processed, df, post_llm_filters = await self._execute_spark_transform(
                 bronze_info=bronze_info,
                 config=config,
                 output_path=output_path
             )
-            
-            # Execute LLM extractions if configured (post-Spark processing)
+
+            if df is None:
+                raise ValueError("No Bronze data available for transformation")
+
+            # Single Delta write — with or without LLM extractions
+            import asyncio as _asyncio
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+
             llm_extraction_results = []
             if config.llm_extractions:
-                llm_extraction_results = await self._execute_llm_extractions(
+                # LLM path: add columns then write once inside _execute_llm_extractions
+                rows_output, delta_version, llm_extraction_results = await self._execute_llm_extractions(
                     config=config,
                     bronze_info=bronze_info,
                     output_path=output_path,
-                    post_llm_filters=post_llm_filters
+                    post_llm_filters=post_llm_filters,
+                    existing_df=df,
                 )
-                # Re-read row count and delta version after LLM columns added
-                import asyncio as _asyncio
-                from concurrent.futures import ThreadPoolExecutor as _TPE
+            else:
+                # No-LLM path: write the DataFrame directly
                 _loop = _asyncio.get_event_loop()
-                def _recount_and_version():
-                    from delta.tables import DeltaTable
-                    spark = self.spark_manager.get_or_create_session()
-                    count = spark.read.format("delta").load(output_path).count()
-                    ver = delta_version
-                    try:
-                        dt = DeltaTable.forPath(spark, output_path)
-                        h = dt.history(1).collect()
-                        if h:
-                            ver = h[0].asDict().get("version", ver)
-                    except Exception:
-                        pass
-                    return count, ver
                 with _TPE(max_workers=1) as _executor:
-                    rows_output, delta_version = await _loop.run_in_executor(_executor, _recount_and_version)
+                    rows_output, delta_version = await _loop.run_in_executor(
+                        _executor, self._write_silver_delta, df, output_path
+                    )
             
             # Update execution record
             execution.status = TransformStatus.SUCCESS
@@ -2493,6 +2489,9 @@ class SilverTransformationService:
                 output_path=output_path,
                 execution_time_seconds=execution_time,
                 message=message,
+                delta_version=delta_version,
+                write_mode_used="overwrite",
+                rows_inserted=rows_output,
                 llm_extraction_results=llm_result_summaries,
                 config_snapshot=config_snapshot,
             )
@@ -2656,13 +2655,14 @@ class SilverTransformationService:
         )
         latest_execution = exec_result.scalar_one_or_none()
         
-        if not latest_execution or not latest_execution.output_paths:
+        has_known_paths = bool(bronze_config.known_output_paths)
+        has_exec_paths = latest_execution and latest_execution.output_paths
+        
+        if not has_known_paths and not has_exec_paths:
             logger.warning(f"No successful execution found for Bronze config {bronze_config_id}")
             return None
 
         # Rebuild Bronze execution plan to recover column mappings and inter-source links.
-        # Silver persistent transformations need these mappings to resolve external_column.id
-        # to the real Bronze column names (including prefixed names when duplicates exist).
         preview = None
         try:
             from ..bronze.ingestion_service import BronzeIngestionService
@@ -2682,25 +2682,28 @@ class SilverTransformationService:
             bronze_service = BronzeIngestionService(self.db)
             preview = await bronze_service.generate_ingestion_plan_simplified(preview_request)
         except Exception as e:
-            # Keep backward-compatible behavior if we cannot rebuild preview.
             logger.warning(
                 f"Could not rebuild Bronze plan for config {bronze_config_id}: {e}. "
                 "Falling back to execution paths without column mappings."
             )
 
-        # Build output-path mapping from execution (preferred source of truth).
-        # group_results keeps group_name/output_path pairs.
-        execution_groups = latest_execution.group_results or []
+        # Build path mapping: prefer known_output_paths (stable), fall back to execution
         group_path_by_name = {}
-        for g in execution_groups:
-            if not isinstance(g, dict):
-                continue
-            group_name = g.get('group_name')
-            output_path = g.get('output_path')
-            if group_name and output_path:
-                group_path_by_name[group_name] = output_path
+        if has_known_paths:
+            # known_output_paths is {connection_name: s3a_path}
+            # group_name in preview typically matches connection_name
+            group_path_by_name = dict(bronze_config.known_output_paths)
+        
+        if latest_execution:
+            for g in (latest_execution.group_results or []):
+                if not isinstance(g, dict):
+                    continue
+                group_name = g.get('group_name') or g.get('connection_name')
+                output_path = g.get('output_path')
+                if group_name and output_path and group_name not in group_path_by_name:
+                    group_path_by_name[group_name] = output_path
 
-        fallback_paths = list(latest_execution.output_paths or [])
+        fallback_paths = list((latest_execution.output_paths if latest_execution else None) or [])
         fallback_idx = 0
 
         tables = []
@@ -2862,41 +2865,36 @@ class SilverTransformationService:
         transform_config['filters'] = pre_filters
         transform_config['post_transform_filters'] = post_transform_filters
         
-        # Execute Spark transformation in thread pool
+        # Execute Spark transformation in thread pool (no write yet)
         loop = asyncio.get_event_loop()
         with ThreadPoolExecutor(max_workers=1) as executor:
-            rows_processed, rows_output, delta_version = await loop.run_in_executor(
+            rows_processed, df = await loop.run_in_executor(
                 executor,
                 self._run_spark_transform,
                 bronze_info,
                 transform_config,
-                output_path
             )
         
-        return rows_processed, rows_output, post_llm_filters, delta_version
+        return rows_processed, df, post_llm_filters
     
     async def _execute_llm_extractions(
         self,
         config: TransformConfigResponse,
         bronze_info: Dict[str, Any],
         output_path: str,
-        post_llm_filters: Optional[Dict] = None
-    ) -> List[Dict[str, Any]]:
+        post_llm_filters: Optional[Dict] = None,
+        existing_df: Optional[Any] = None,
+    ) -> Tuple[int, int, List[Dict[str, Any]]]:
         """
         Execute LLM extractions on the Silver data after Spark transform.
-        
-        This method:
-        1. Reads the Silver Delta table written by Spark
-        2. For each LLM extraction definition:
-           a. Resolves source_column_id to the actual column name in the data
-           b. Collects column values from the DataFrame
-           c. Calls LLMExtractionService to process all values via LLM
-           d. Adds the new column to the DataFrame
-        3. Applies post-LLM filters if any (conditions on LLM-created columns)
-        4. Overwrites the Silver Delta table with the new columns added
-        
+
+        When *existing_df* is provided (the in-memory DataFrame from _run_spark_transform)
+        it is used directly, skipping the Delta read.  After all LLM columns are added
+        the DataFrame is written to Delta **once** — this is the only Delta commit for
+        the entire execution, ensuring consecutive version numbers.
+
         Returns:
-            List of extraction result dicts with stats per column.
+            (rows_output, delta_version, extraction_results)
         """
         from .llm_extraction_service import get_llm_extraction_service
         from concurrent.futures import ThreadPoolExecutor
@@ -2905,24 +2903,24 @@ class SilverTransformationService:
         llm_service = get_llm_extraction_service()
         extractions = config.llm_extractions or []
         
-        if not extractions:
-            return []
-        
         logger.info(f"Starting LLM extractions: {len(extractions)} column(s) to create")
         
         # Resolve source_column_id to actual column names in the data
         bronze_column_map = bronze_info.get('column_mappings', {})
         
-        # Read Silver data in a thread (Spark is blocking)
         loop = asyncio.get_event_loop()
-        
-        def _read_silver_data():
-            spark = self.spark_manager.get_or_create_session()
-            df = spark.read.format("delta").load(output_path)
-            return df
-        
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            df = await loop.run_in_executor(executor, _read_silver_data)
+
+        if existing_df is not None:
+            # Use the in-memory DataFrame — no Delta read needed
+            df = existing_df
+        else:
+            # Fallback: read from Delta (only when called without a pre-built DataFrame)
+            def _read_silver_data():
+                spark = self.spark_manager.get_or_create_session()
+                return spark.read.format("delta").load(output_path)
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                df = await loop.run_in_executor(executor, _read_silver_data)
         
         all_columns = df.columns
         all_results = []
@@ -3070,47 +3068,62 @@ class SilverTransformationService:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 await loop.run_in_executor(executor, _apply_post_llm_filters)
         
-        # Write back the DataFrame with new LLM columns (and post-LLM filters applied)
-        if all_results:
-            def _write_back():
-                logger.info(f"Writing Silver data with {len(all_results)} LLM column(s) to: {output_path}")
-                df.write \
-                    .format("delta") \
-                    .mode("overwrite") \
-                    .option("overwriteSchema", "true") \
-                    .option("mergeSchema", "true") \
-                    .save(output_path)
-            
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                await loop.run_in_executor(executor, _write_back)
-        
-        logger.info(f"LLM extractions complete: {len(all_results)} column(s) processed")
-        return all_results
+        # Single Delta write — with or without LLM results the df must be persisted here
+        def _write_final():
+            logger.info(
+                f"Writing Silver Delta with {len(all_results)} LLM column(s) to: {output_path}"
+            )
+            # Cache before write so count() reads from memory, not a second S3 scan
+            df.cache()
+            rows_written = df.count()
+            df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .option("overwriteSchema", "true") \
+                .option("mergeSchema", "true") \
+                .save(output_path)
+            df.unpersist()
+            delta_ver = self._read_delta_version(output_path)
+            logger.info(f"Silver Delta written (LLM path): {rows_written} rows, delta_version={delta_ver}")
+            return rows_written, delta_ver
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            rows_output, delta_version = await loop.run_in_executor(executor, _write_final)
+
+        logger.info(
+            f"LLM extractions complete: {len(all_results)} column(s) processed, "
+            f"{rows_output} rows, delta_version={delta_version}"
+        )
+        return rows_output, delta_version, all_results
     
     def _run_spark_transform(
         self,
         bronze_info: Dict[str, Any],
         transform_config: Dict[str, Any],
-        output_path: str
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, Any]:
         """
         Run the Spark transformation (blocking, runs in thread pool).
-        
-        This is the core transformation logic using PySpark.
+
+        Returns (total_rows, df) where df is the fully-transformed Spark DataFrame.
+        Does NOT write to Delta — the caller is responsible for the single final write
+        so that each execution produces exactly one Delta commit.
         """
         from pyspark.sql import functions as F
         from pyspark.sql.types import StringType
-        
+
         spark = self.spark_manager.get_or_create_session()
-        
-        # Read all Bronze tables and union them
+
+        # Read all Bronze tables.
+        # We do a single count() per table for logging only. The actual data evaluation
+        # happens later, inside _write_silver_delta, where the final DataFrame is cached
+        # once so that the count() and the Delta write share one S3 scan instead of two.
         dfs = []
         total_rows = 0
-        
+
         for table in bronze_info.get('tables', []):
             table_path = table['output_path']
             logger.info(f"Reading Bronze table from: {table_path}")
-            
+
             try:
                 df = spark.read.format("delta").load(table_path)
                 row_count = df.count()
@@ -3120,100 +3133,94 @@ class SilverTransformationService:
             except Exception as e:
                 logger.error(f"Error reading Bronze table {table_path}: {e}")
                 continue
-        
+
         if not dfs:
             logger.warning("No Bronze tables found to transform")
-            return 0, 0
-        
+            return 0, None
+
         # Combine DataFrames using JOINs (if InterSourceLinks exist) or UNION
         inter_source_links = bronze_info.get('inter_source_links', [])
-        
-        # Debug: Log DataFrame columns
-        for idx, df_item in enumerate(dfs):
-            logger.info(f"DataFrame {idx} columns: {df_item.columns}")
-            logger.info(f"DataFrame {idx} count: {df_item.count()}")
-        
+
         if len(dfs) == 1:
             df = dfs[0]
         elif inter_source_links:
-            # Log the InterSourceLinks for debugging
             for link in inter_source_links:
-                logger.info(f"InterSourceLink: group[{link.get('left_group_index')}].{link.get('left_column_name')} = "
-                           f"group[{link.get('right_group_index')}].{link.get('right_column_name')} "
-                           f"(strategy: {link.get('join_strategy')})")
-            
-            # Use JOINs based on InterSourceLinks
+                logger.info(
+                    f"InterSourceLink: group[{link.get('left_group_index')}]."
+                    f"{link.get('left_column_name')} = "
+                    f"group[{link.get('right_group_index')}]."
+                    f"{link.get('right_column_name')} "
+                    f"(strategy: {link.get('join_strategy')})"
+                )
             df = self._join_dataframes_with_links(dfs, inter_source_links, bronze_info)
             logger.info(f"Joined {len(dfs)} DataFrames using {len(inter_source_links)} InterSourceLinks")
-            logger.info(f"After JOIN row count: {df.count()}")
         else:
-            # Fallback to UNION if no InterSourceLinks defined
-            # This preserves backward compatibility but may not be correct semantically
             logger.warning("No InterSourceLinks found - using UNION (may produce incorrect results)")
             df = dfs[0]
             for other_df in dfs[1:]:
                 df = df.unionByName(other_df, allowMissingColumns=True)
-        
+
         logger.info(f"Total rows to process: {total_rows}")
-        
-        # Apply PRE-FILTERS on original Bronze data (only conditions on unmodified columns)
-        # Pre-filters are classified by _classify_filter_conditions in _execute_spark_transform
-        pre_filter_count = df.count()
+
+        # Apply PRE-FILTERS on original Bronze data
         df = self._apply_spark_filters(df, transform_config, bronze_info)
-        post_filter_count = df.count()
-        logger.info(f"Pre-filter applied: {pre_filter_count} rows before, {post_filter_count} rows after")
-        
-        # Apply column_transformations (same format as Virtualized, uses column_id)
-        # This resolves column_id → bronze_column_name using BronzeColumnMapping
+
+        # Apply column_transformations (resolves column_id → bronze_column_name)
         df = self._apply_column_transformations(df, transform_config, bronze_info)
-        
+
         # Apply column_group_ids from Equivalence module
-        # This handles both column unification and value mappings from Equivalence
         df = self._apply_equivalence_groups(df, transform_config, bronze_info)
-        
+
         # Apply POST-TRANSFORM FILTERS on transformed/unified data
-        # These are conditions on columns modified by transformations or created by equivalence
         post_transform_filters = transform_config.get('post_transform_filters')
         if post_transform_filters:
-            pre_post_count = df.count()
             post_config = {**transform_config, 'filters': post_transform_filters}
             df = self._apply_spark_filters(df, post_config, bronze_info)
-            post_post_count = df.count()
-            logger.info(f"Post-transform filter applied: {pre_post_count} rows before, {post_post_count} rows after")
-        
+
         # Add Silver metadata columns
         df = df.withColumn("_silver_timestamp", F.current_timestamp())
         df = df.withColumn("_transform_config_id", F.lit(transform_config.get('config_id')))
-        
-        # Write to Silver Delta Lake using versioning service (tracks delta_version)
-        from delta.tables import DeltaTable
-        
-        logger.info(f"Writing Silver Delta to: {output_path}")
-        
+
+        logger.info(f"Spark transform pipeline built: {total_rows} source rows (write deferred)")
+        return total_rows, df
+
+    def _write_silver_delta(self, df: Any, output_path: str) -> Tuple[int, int]:
+        """
+        Write *df* to the Silver Delta table at *output_path* (blocking, thread pool).
+
+        Returns (rows_output, delta_version).
+        This is the single Delta write per execution — never called more than once.
+        """
+        # Cache before write so the count() below reads from memory, not S3.
+        df.cache()
+        rows_output = df.count()
+
+        logger.info(f"Writing Silver Delta to: {output_path} ({rows_output} rows)")
         df.write \
             .format("delta") \
             .mode("overwrite") \
             .option("overwriteSchema", "true") \
             .option("mergeSchema", "true") \
             .save(output_path)
-        
-        # Read back delta version from history
-        delta_version = 0
+
+        df.unpersist()
+
+        delta_version = self._read_delta_version(output_path)
+        logger.info(f"Silver Delta written: {rows_output} rows, delta_version={delta_version}")
+        return rows_output, delta_version
+
+    def _read_delta_version(self, output_path: str) -> int:
+        """Return the latest Delta commit version for *output_path* without a full table scan."""
+        from delta.tables import DeltaTable
+        spark = self.spark_manager.get_or_create_session()
         try:
             delta_table = DeltaTable.forPath(spark, output_path)
             history = delta_table.history(1).collect()
             if history:
-                delta_version = history[0].asDict().get("version", 0)
+                return history[0].asDict().get("version", 0)
         except Exception as e:
-            logger.warning(f"Could not read Delta version: {e}")
-        
-        # Get output row count
-        output_df = spark.read.format("delta").load(output_path)
-        rows_output = output_df.count()
-        
-        logger.info(f"Silver transformation complete: {total_rows} rows processed, {rows_output} rows written, delta_version={delta_version}")
-        
-        return total_rows, rows_output, delta_version
+            logger.warning(f"Could not read Delta version for {output_path}: {e}")
+        return 0
     
     def _join_dataframes_with_links(
         self,

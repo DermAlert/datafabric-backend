@@ -22,6 +22,18 @@ from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
 
+# PYSPARK_SUBMIT_ARGS must be set before pyspark is imported so the JVM starts
+# with the correct heap size. Setting spark.driver.memory via SparkSession.builder
+# has no effect on the already-running JVM heap — only this env var does.
+_driver_memory = os.getenv("SPARK_DRIVER_MEMORY", "2g")
+_current_submit_args = os.environ.get("PYSPARK_SUBMIT_ARGS", "")
+if "--driver-memory" not in _current_submit_args:
+    os.environ["PYSPARK_SUBMIT_ARGS"] = (
+        f"--driver-memory {_driver_memory} {_current_submit_args}".strip()
+        if _current_submit_args else
+        f"--driver-memory {_driver_memory} pyspark-shell"
+    )
+
 
 class SparkManager:
     """
@@ -192,18 +204,47 @@ class SparkManager:
         # Delta Lake optimizations
         builder = builder \
             .config("spark.databricks.delta.retentionDurationCheck.enabled", "false") \
-            .config("spark.databricks.delta.properties.defaults.logRetentionDuration", 
+            .config("spark.databricks.delta.properties.defaults.logRetentionDuration",
                     f"{self.delta_log_retention} days") \
-            .config("spark.databricks.delta.properties.defaults.deletedFileRetentionDuration", 
-                    f"{self.delta_log_retention} days")
-        
+            .config("spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
+                    f"{self.delta_log_retention} days") \
+            .config("spark.databricks.delta.optimizeWrite.enabled", "true") \
+            .config("spark.databricks.delta.autoCompact.enabled", "true") \
+            .config("spark.databricks.delta.stats.collect", "true") \
+            .config("spark.databricks.delta.checkpoint.partSize", "5000000")
+
+        # Adaptive Query Execution — auto-tunes shuffle partitions, skew joins, etc.
+        builder = builder \
+            .config("spark.sql.adaptive.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.adaptive.skewJoin.enabled", "true") \
+            .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
+
+        # Read partition sizing
+        builder = builder \
+            .config("spark.sql.files.maxPartitionBytes", "134217728") \
+            .config("spark.sql.files.openCostInBytes", "4194304")
+
+        # S3A / MinIO throughput tuning
+        builder = builder \
+            .config("spark.hadoop.fs.s3a.connection.maximum", "200") \
+            .config("spark.hadoop.fs.s3a.threads.max", "64") \
+            .config("spark.hadoop.fs.s3a.connection.establish.timeout", "5000") \
+            .config("spark.hadoop.fs.s3a.connection.timeout", "200000") \
+            .config("spark.hadoop.fs.s3a.fast.upload", "true") \
+            .config("spark.hadoop.fs.s3a.fast.upload.buffer", "array") \
+            .config("spark.hadoop.fs.s3a.multipart.size", "134217728") \
+            .config("spark.hadoop.fs.s3a.multipart.threshold", "134217728") \
+            .config("spark.hadoop.fs.s3a.block.size", "134217728") \
+            .config("spark.hadoop.fs.s3a.readahead.range", "131072")
+
         # Local mode optimizations
         if self.spark_mode == "local":
             builder = builder \
                 .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "4g")) \
-                .config("spark.sql.shuffle.partitions", 
+                .config("spark.sql.shuffle.partitions",
                         os.getenv("SPARK_SHUFFLE_PARTITIONS", "8")) \
-                .config("spark.default.parallelism", 
+                .config("spark.default.parallelism",
                         os.getenv("SPARK_DEFAULT_PARALLELISM", "8"))
         else:
             # Cluster mode settings
@@ -212,7 +253,7 @@ class SparkManager:
                 .config("spark.executor.cores", os.getenv("SPARK_EXECUTOR_CORES", "2")) \
                 .config("spark.dynamicAllocation.enabled", "true") \
                 .config("spark.dynamicAllocation.minExecutors", "1") \
-                .config("spark.dynamicAllocation.maxExecutors", 
+                .config("spark.dynamicAllocation.maxExecutors",
                         os.getenv("SPARK_MAX_EXECUTORS", "10"))
         
         # Use configure_spark_with_delta_pip for proper Delta Lake setup
@@ -308,42 +349,45 @@ class SparkManager:
         return spark.read.format("delta").load(path)
     
     def write_silver_delta(
-        self, 
-        df, 
-        path: str, 
+        self,
+        df,
+        path: str,
         mode: str = "overwrite",
-        partition_by: Optional[list] = None
+        partition_by: Optional[list] = None,
+        precomputed_row_count: Optional[int] = None,
     ):
         """
         Write a DataFrame to Silver Delta Lake.
-        
+
         Args:
             df: Spark DataFrame to write
             path: S3A path for the output
             mode: Write mode ('overwrite', 'append', 'merge')
             partition_by: Optional list of columns to partition by
-            
+            precomputed_row_count: If provided, skip the post-write count() scan.
+
         Returns:
             int: Number of rows written
         """
         logger.info(f"Writing Silver Delta to: {path}")
-        
+
         writer = df.write.format("delta").mode(mode)
-        
+
         if partition_by:
             writer = writer.partitionBy(*partition_by)
-        
-        # Enable optimizations
+
         writer = writer \
             .option("overwriteSchema", "true") \
             .option("mergeSchema", "true")
-        
+
         writer.save(path)
-        
-        # Get row count
-        row_count = df.count()
+
+        if precomputed_row_count is not None:
+            row_count = precomputed_row_count
+        else:
+            row_count = df.count()
         logger.info(f"Written {row_count} rows to Silver Delta")
-        
+
         return row_count
     
     def list_bronze_tables(self, dataset_folder: str) -> list:

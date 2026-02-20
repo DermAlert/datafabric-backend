@@ -1,3 +1,9 @@
+import os
+import re
+import unicodedata
+import asyncio
+
+import boto3
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, desc
@@ -15,6 +21,7 @@ from ...api.schemas.delta_sharing_schemas import (
     # Bronze/Silver Integration
     AvailableDataset, DatasetSourceType,
     CreateTableFromBronze, CreateTableFromSilver, IntegrationTableDetail,
+    PinDeltaVersionRequest, UnpinDeltaVersionResponse,
     # Virtualized Integration
     CreateTableFromBronzeVirtualized, CreateTableFromSilverVirtualized,
     VirtualizedSourceType
@@ -30,6 +37,103 @@ from ...database.models.delta_sharing import ShareTable, ShareSchema, Share, Tab
 from ...database.models.core import Dataset
 
 router = APIRouter()
+
+
+def _make_s3_client():
+    """Return a boto3 S3 client pointed at the internal MinIO endpoint."""
+    endpoint_url = os.getenv("MINIO_ENDPOINT", "http://minio:9000")
+    if not endpoint_url.startswith(("http://", "https://")):
+        endpoint_url = f"http://{endpoint_url}"
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=os.getenv("MINIO_ACCESS_KEY", "minio"),
+        aws_secret_access_key=os.getenv("MINIO_SECRET_KEY", "minio123"),
+        region_name="us-east-1",
+        use_ssl=False,
+        verify=False,
+    )
+
+
+def _delta_log_version_exists(storage_location: str, version: int) -> bool:
+    """
+    Check whether a specific Delta version commit file exists in MinIO.
+
+    Accepts storage_location in any of these forms:
+        bucket/prefix   (bare path stored in share_tables)
+        s3a://bucket/prefix
+        s3://bucket/prefix
+    """
+    loc = storage_location
+    for scheme in ("s3a://", "s3://", "minio://"):
+        if loc.startswith(scheme):
+            loc = loc[len(scheme):]
+            break
+    loc = loc.strip("/")
+
+    parts = loc.split("/", 1)
+    bucket = parts[0]
+    prefix = parts[1].rstrip("/") if len(parts) > 1 else ""
+
+    log_key = f"{prefix}/_delta_log/{version:020d}.json"
+
+    try:
+        client = _make_s3_client()
+        client.head_object(Bucket=bucket, Key=log_key)
+        return True
+    except Exception:
+        return False
+
+
+async def _assert_delta_version_exists(storage_location: str, version: int) -> None:
+    """
+    Raise HTTP 400 if *version* does not exist in the Delta log.
+    Runs the blocking boto3 call in a thread pool to avoid blocking the event loop.
+    """
+    loop = asyncio.get_event_loop()
+    exists = await loop.run_in_executor(
+        None, _delta_log_version_exists, storage_location, version
+    )
+    if not exists:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Delta version {version} does not exist for this table",
+        )
+
+
+def _sanitize_table_name(name: str) -> str:
+    """Convert an arbitrary config name into a valid Delta Sharing table name.
+
+    Strips accents, lowercases, replaces runs of non-alphanumeric chars with
+    underscores, and trims leading/trailing underscores.
+    """
+    normalized = unicodedata.normalize('NFKD', name).encode('ASCII', 'ignore').decode('ASCII')
+    sanitized = re.sub(r'[^a-zA-Z0-9]+', '_', normalized.lower())
+    sanitized = re.sub(r'_+', '_', sanitized).strip('_')
+    return sanitized[:255] or "table"
+
+
+async def _unique_table_name(db: AsyncSession, schema_id: int, base_name: str, source_type: str) -> str:
+    """Return *base_name* if available, otherwise append a source_type suffix.
+
+    Tries: base_name  →  base_name_silver  →  base_name_silver_2  → …
+    """
+    candidate = base_name
+    suffix = source_type.lower().replace("_", "_")
+    attempt = 0
+    while True:
+        existing = await db.execute(
+            select(ShareTable).where(
+                and_(ShareTable.schema_id == schema_id, ShareTable.name == candidate)
+            )
+        )
+        if not existing.scalar_one_or_none():
+            return candidate
+        attempt += 1
+        if attempt == 1:
+            candidate = f"{base_name}_{suffix}"
+        else:
+            candidate = f"{base_name}_{suffix}_{attempt}"
 
 # ==================== SHARE MANAGEMENT ====================
 
@@ -588,7 +692,7 @@ async def list_available_datasets(
 
 
 @router.post("/shares/{share_id}/schemas/{schema_id}/tables/from-bronze", 
-             response_model=IntegrationTableDetail, 
+             response_model=List[IntegrationTableDetail], 
              status_code=status.HTTP_201_CREATED)
 async def create_table_from_bronze(
     share_id: int,
@@ -597,8 +701,9 @@ async def create_table_from_bronze(
     db: AsyncSession = Depends(get_db),
 ):
     """
-    Create a Delta Sharing table from a Bronze Persistent Config.
-    Automatically links to the Bronze Delta Lake storage location.
+    Create Delta Sharing table(s) from a Bronze Persistent Config.
+    When path_index is omitted, creates one table per output path.
+    When path_index is specified, creates a single table for that path.
     """
     try:
         organization_id = 1  # Hardcoded for now
@@ -633,52 +738,39 @@ async def create_table_from_bronze(
                 detail=f"Bronze config {data.bronze_config_id} not found"
             )
         
-        # Get latest successful execution for storage path
-        exec_query = select(BronzeExecution).where(
-            and_(
-                BronzeExecution.config_id == bronze_config.id,
-                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
-            )
-        ).order_by(desc(BronzeExecution.finished_at)).limit(1)
-        exec_result = await db.execute(exec_query)
-        latest_exec = exec_result.scalar_one_or_none()
+        # Resolve output paths
+        connection_names = []
+        if bronze_config.known_output_paths:
+            sorted_items = sorted(bronze_config.known_output_paths.items())
+            connection_names = [k for k, _ in sorted_items]
+            stable_paths = [v for _, v in sorted_items]
+        else:
+            exec_query = select(BronzeExecution).where(
+                and_(
+                    BronzeExecution.config_id == bronze_config.id,
+                    BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+                )
+            ).order_by(desc(BronzeExecution.finished_at)).limit(1)
+            exec_result = await db.execute(exec_query)
+            latest_exec = exec_result.scalar_one_or_none()
+            
+            if not latest_exec or not latest_exec.output_paths:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Bronze config has no successful executions with output paths"
+                )
+            stable_paths = latest_exec.output_paths
         
-        if not latest_exec or not latest_exec.output_paths:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Bronze config has no successful executions with output paths"
-            )
-        
-        # Handle path_index for non-federated configs
-        if data.path_index >= len(latest_exec.output_paths):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"path_index {data.path_index} is out of range. Available paths: {len(latest_exec.output_paths)}"
-            )
-        
-        output_path = latest_exec.output_paths[data.path_index]
-        
-        # Convert s3a:// to internal path format
-        storage_location = output_path
-        if storage_location.startswith('s3a://'):
-            storage_location = storage_location[6:]
-        elif storage_location.startswith('s3://'):
-            storage_location = storage_location[5:]
-        
-        # Remove trailing slash
-        storage_location = storage_location.rstrip('/')
-        
-        # Check if table name already exists
-        existing = await db.execute(
-            select(ShareTable).where(
-                and_(ShareTable.schema_id == schema_id, ShareTable.name == data.name)
-            )
-        )
-        if existing.scalar_one_or_none():
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Table '{data.name}' already exists in this schema"
-            )
+        # Determine which path indices to create tables for
+        if data.path_index is not None:
+            if data.path_index >= len(stable_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {data.path_index} is out of range. Available paths: {len(stable_paths)}"
+                )
+            indices_to_create = [data.path_index]
+        else:
+            indices_to_create = list(range(len(stable_paths)))
         
         # Create or get legacy dataset entry for FK
         dataset_query = select(Dataset).where(Dataset.name == f"bronze_{bronze_config.id}_{bronze_config.name}")
@@ -688,7 +780,7 @@ async def create_table_from_bronze(
         if not legacy_dataset:
             legacy_dataset = Dataset(
                 name=f"bronze_{bronze_config.id}_{bronze_config.name}",
-                description=f"Auto-created for Bronze Config {bronze_config.id}",
+                description=bronze_config.description,
                 storage_type="delta",
                 refresh_type="manual",
                 status="active"
@@ -696,40 +788,80 @@ async def create_table_from_bronze(
             db.add(legacy_dataset)
             await db.flush()
         
-        # Create the table
-        db_table = ShareTable(
-            schema_id=schema_id,
-            name=data.name,
-            description=data.description or f"Bronze data from {bronze_config.name}",
-            dataset_id=legacy_dataset.id,
-            source_type=ShareTableSourceType.BRONZE,
-            storage_location=storage_location,
-            status=TableShareStatus.ACTIVE,
-            share_mode=data.share_mode,
-            filter_condition=data.filter_condition,
-            current_version=latest_exec.delta_version or 1,
-            table_format="delta"
-        )
+        # Validate pinned_delta_version against the actual Delta log
+        if data.pinned_delta_version is not None and stable_paths:
+            # Use the first path as representative (all paths share the same bucket layout)
+            check_path = stable_paths[data.path_index] if data.path_index is not None and data.path_index < len(stable_paths) else stable_paths[0]
+            await _assert_delta_version_exists(check_path, data.pinned_delta_version)
+
+        base_name = _sanitize_table_name(bronze_config.name)
+        table_description = data.description if data.description is not None else bronze_config.description
+        created_tables = []
         
-        db.add(db_table)
+        for idx in indices_to_create:
+            output_path = stable_paths[idx]
+            
+            storage_location = output_path
+            if storage_location.startswith('s3a://'):
+                storage_location = storage_location[6:]
+            elif storage_location.startswith('s3://'):
+                storage_location = storage_location[5:]
+            storage_location = storage_location.rstrip('/')
+            
+            # Resolve table name
+            if data.name and len(indices_to_create) == 1:
+                table_name = data.name
+            elif len(stable_paths) > 1 and connection_names:
+                suffix = _sanitize_table_name(connection_names[idx])
+                table_name = f"{base_name}_{suffix}"
+            else:
+                table_name = base_name
+            
+            # Ensure unique name within the schema (auto-suffix if needed)
+            table_name = await _unique_table_name(db, schema_id, table_name, "bronze")
+            
+            db_table = ShareTable(
+                schema_id=schema_id,
+                name=table_name,
+                description=table_description,
+                dataset_id=legacy_dataset.id,
+                source_type=ShareTableSourceType.BRONZE,
+                bronze_persistent_config_id=bronze_config.id,
+                storage_location=storage_location,
+                status=TableShareStatus.ACTIVE,
+                share_mode=data.share_mode,
+                filter_condition=data.filter_condition,
+                current_version=bronze_config.current_delta_version or 1,
+                pinned_delta_version=data.pinned_delta_version,
+                table_format="delta"
+            )
+            db.add(db_table)
+            await db.flush()
+            
+            created_tables.append(IntegrationTableDetail(
+                table_id=db_table.id,
+                table_name=db_table.name,
+                share_id=db_share.id,
+                share_name=db_share.name,
+                schema_id=db_schema.id,
+                schema_name=db_schema.name,
+                source_type=DatasetSourceType.BRONZE,
+                source_config_id=bronze_config.id,
+                source_config_name=bronze_config.name,
+                storage_location=storage_location,
+                current_version=db_table.current_version,
+                share_mode=db_table.share_mode,
+                status=db_table.status.value
+            ))
+        
+        if not created_tables:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="All tables for this config already exist in this schema"
+            )
+        
         await db.commit()
-        await db.refresh(db_table)
-        
-        return IntegrationTableDetail(
-            table_id=db_table.id,
-            table_name=db_table.name,
-            share_id=db_share.id,
-            share_name=db_share.name,
-            schema_id=db_schema.id,
-            schema_name=db_schema.name,
-            source_type=DatasetSourceType.BRONZE,
-            source_config_id=bronze_config.id,
-            source_config_name=bronze_config.name,
-            storage_location=storage_location,
-            current_version=db_table.current_version,
-            share_mode=db_table.share_mode,
-            status=db_table.status.value
-        )
+        return created_tables
         
     except HTTPException:
         raise
@@ -814,17 +946,25 @@ async def create_table_from_silver(
         # Remove trailing slash
         storage_location = storage_location.rstrip('/')
         
-        # Check if table name already exists
-        existing = await db.execute(
+        # Prevent sharing the same silver config twice in the same schema
+        dup_check = await db.execute(
             select(ShareTable).where(
-                and_(ShareTable.schema_id == schema_id, ShareTable.name == data.name)
+                and_(
+                    ShareTable.schema_id == schema_id,
+                    ShareTable.silver_persistent_config_id == silver_config.id,
+                )
             )
         )
-        if existing.scalar_one_or_none():
+        if dup_check.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Table '{data.name}' already exists in this schema"
+                detail=f"Silver config '{silver_config.name}' is already shared in this schema"
             )
+
+        # Resolve name and description from the Silver config when not provided
+        base_name = data.name if data.name else _sanitize_table_name(silver_config.name)
+        table_name = await _unique_table_name(db, schema_id, base_name, "silver")
+        table_description = data.description if data.description is not None else silver_config.description
         
         # Create or get legacy dataset entry for FK
         dataset_query = select(Dataset).where(Dataset.name == f"silver_{silver_config.id}_{silver_config.name}")
@@ -834,7 +974,7 @@ async def create_table_from_silver(
         if not legacy_dataset:
             legacy_dataset = Dataset(
                 name=f"silver_{silver_config.id}_{silver_config.name}",
-                description=f"Auto-created for Silver Config {silver_config.id}",
+                description=silver_config.description,
                 storage_type="delta",
                 refresh_type="manual",
                 status="active"
@@ -842,18 +982,24 @@ async def create_table_from_silver(
             db.add(legacy_dataset)
             await db.flush()
         
+        # Validate pinned_delta_version against the actual Delta log
+        if data.pinned_delta_version is not None:
+            await _assert_delta_version_exists(output_path, data.pinned_delta_version)
+
         # Create the table
         db_table = ShareTable(
             schema_id=schema_id,
-            name=data.name,
-            description=data.description or f"Silver data from {silver_config.name}",
+            name=table_name,
+            description=table_description,
             dataset_id=legacy_dataset.id,
             source_type=ShareTableSourceType.SILVER,
+            silver_persistent_config_id=silver_config.id,
             storage_location=storage_location,
             status=TableShareStatus.ACTIVE,
             share_mode=data.share_mode,
             filter_condition=data.filter_condition,
             current_version=latest_exec.delta_version or 1,
+            pinned_delta_version=data.pinned_delta_version,
             table_format="delta"
         )
         
@@ -1044,23 +1190,31 @@ async def create_table_from_bronze_virtualized(
                 detail=f"Bronze Virtualized Config {data.bronze_virtualized_config_id} not found or inactive"
             )
 
-        # Check if table name already exists in this schema
-        existing = await db.execute(
+        # Prevent sharing the same bronze virtualized config twice in the same schema
+        dup_check = await db.execute(
             select(ShareTable).where(
-                and_(ShareTable.schema_id == schema_id, ShareTable.name == data.name)
+                and_(
+                    ShareTable.schema_id == schema_id,
+                    ShareTable.bronze_virtualized_config_id == config.id,
+                )
             )
         )
-        if existing.scalar_one_or_none():
+        if dup_check.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Table '{data.name}' already exists in this schema"
+                detail=f"Bronze Virtualized config '{config.name}' is already shared in this schema"
             )
+
+        # Resolve name and description from the Bronze Virtualized config when not provided
+        base_name = data.name if data.name else _sanitize_table_name(config.name)
+        table_name = await _unique_table_name(db, schema_id, base_name, "bronze_virtualized")
+        table_description = data.description if data.description is not None else getattr(config, 'description', None)
 
         # Create the virtualized share table (no storage_location, no dataset_id needed)
         db_table = ShareTable(
             schema_id=schema_id,
-            name=data.name,
-            description=data.description or f"Virtualized Bronze data from {config.name}",
+            name=table_name,
+            description=table_description,
             dataset_id=None,
             source_type=ShareTableSourceType.BRONZE_VIRTUALIZED,
             bronze_virtualized_config_id=config.id,
@@ -1153,23 +1307,31 @@ async def create_table_from_silver_virtualized(
                 detail=f"Silver Virtualized Config {data.silver_virtualized_config_id} not found or inactive"
             )
 
-        # Check if table name already exists in this schema
-        existing = await db.execute(
+        # Prevent sharing the same silver virtualized config twice in the same schema
+        dup_check = await db.execute(
             select(ShareTable).where(
-                and_(ShareTable.schema_id == schema_id, ShareTable.name == data.name)
+                and_(
+                    ShareTable.schema_id == schema_id,
+                    ShareTable.silver_virtualized_config_id == config.id,
+                )
             )
         )
-        if existing.scalar_one_or_none():
+        if dup_check.scalar_one_or_none():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Table '{data.name}' already exists in this schema"
+                detail=f"Silver Virtualized config '{config.name}' is already shared in this schema"
             )
+
+        # Resolve name and description from the Silver Virtualized config when not provided
+        base_name = data.name if data.name else _sanitize_table_name(config.name)
+        table_name = await _unique_table_name(db, schema_id, base_name, "silver_virtualized")
+        table_description = data.description if data.description is not None else getattr(config, 'description', None)
 
         # Create the virtualized share table
         db_table = ShareTable(
             schema_id=schema_id,
-            name=data.name,
-            description=data.description or f"Virtualized Silver data from {config.name}",
+            name=table_name,
+            description=table_description,
             dataset_id=None,
             source_type=ShareTableSourceType.SILVER_VIRTUALIZED,
             bronze_virtualized_config_id=None,
@@ -1207,4 +1369,123 @@ async def create_table_from_silver_virtualized(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating table from Silver Virtualized: {str(e)}"
+        )
+
+
+# ==================== VERSION PINNING ====================
+
+async def _get_table_for_org(
+    share_id: int, schema_id: int, table_id: int, organization_id: int, db: AsyncSession
+) -> ShareTable:
+    """Shared helper: fetch a ShareTable verifying it belongs to the organization."""
+    query = select(ShareTable).join(
+        ShareSchema, ShareTable.schema_id == ShareSchema.id
+    ).join(
+        Share, ShareSchema.share_id == Share.id
+    ).where(
+        and_(
+            ShareTable.id == table_id,
+            ShareTable.schema_id == schema_id,
+            ShareSchema.share_id == share_id,
+            Share.organization_id == organization_id
+        )
+    )
+    result = await db.execute(query)
+    db_table = result.scalar_one_or_none()
+    if not db_table:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Table not found")
+    return db_table
+
+
+@router.put(
+    "/shares/{share_id}/schemas/{schema_id}/tables/{table_id}/pin-version",
+    response_model=ShareTableDetail,
+)
+async def pin_delta_version(
+    share_id: int,
+    schema_id: int,
+    table_id: int,
+    body: PinDeltaVersionRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Pin a Bronze or Silver shared table to a specific Delta Lake version.
+
+    Consumers will always receive data as it existed at that version (time-travel).
+    Use DELETE on this endpoint to unpin and return to always-latest behaviour.
+    """
+    try:
+        organization_id = 1  # Hardcoded for now
+        db_table = await _get_table_for_org(share_id, schema_id, table_id, organization_id, db)
+
+        if db_table.source_type not in (ShareTableSourceType.BRONZE, ShareTableSourceType.SILVER):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Version pinning is only supported for Bronze and Silver source tables"
+            )
+
+        # Validate requested version against the actual Delta log — execution records
+        # are not a reliable source of truth (they may be NULL for older runs or skip
+        # intermediate versions created by LLM extraction writes).
+        await _assert_delta_version_exists(db_table.storage_location, body.delta_version)
+
+        db_table.pinned_delta_version = body.delta_version
+        await db.commit()
+        await db.refresh(db_table)
+
+        # Build response using table_service helper
+        schema_result = await db.execute(
+            select(ShareSchema, Share).join(Share).where(ShareSchema.id == db_table.schema_id)
+        )
+        row = schema_result.first()
+        db_schema, db_share = row
+
+        from ...services.delta_sharing.table_service import TableService
+        service = TableService(db)
+        return await service._build_table_detail(db_table, db_schema, db_share, None)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error pinning delta version: {str(e)}"
+        )
+
+
+@router.delete(
+    "/shares/{share_id}/schemas/{schema_id}/tables/{table_id}/pin-version",
+    response_model=UnpinDeltaVersionResponse,
+)
+async def unpin_delta_version(
+    share_id: int,
+    schema_id: int,
+    table_id: int,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Unpin a shared table from its fixed Delta Lake version.
+
+    After unpinning, consumers will always receive the latest version of the data.
+    """
+    try:
+        organization_id = 1  # Hardcoded for now
+        db_table = await _get_table_for_org(share_id, schema_id, table_id, organization_id, db)
+
+        db_table.pinned_delta_version = None
+        await db.commit()
+        await db.refresh(db_table)
+
+        return UnpinDeltaVersionResponse(
+            message="Table version unpinned. Consumers will now receive the latest data.",
+            table_id=db_table.id,
+            table_name=db_table.name
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error unpinning delta version: {str(e)}"
         )
