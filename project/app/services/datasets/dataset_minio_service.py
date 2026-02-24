@@ -99,28 +99,31 @@ class DatasetMinioService:
             bucket_name = ''.join(c for c in bucket_name if c.isalnum() or c == '-')
             # Ensure it doesn't start or end with a hyphen
             bucket_name = bucket_name.strip('-')
-            
-            # Check if bucket already exists
-            if self.minio_client.bucket_exists(bucket_name):
+
+            client = self.minio_client
+
+            # Check if bucket already exists (non-blocking)
+            exists = await asyncio.to_thread(client.bucket_exists, bucket_name)
+            if exists:
                 logger.info(f"Bucket {bucket_name} already exists")
                 return bucket_name
-            
-            # Create bucket
-            self.minio_client.make_bucket(bucket_name)
+
+            # Create bucket (non-blocking)
+            await asyncio.to_thread(client.make_bucket, bucket_name)
             logger.info(f"Created bucket: {bucket_name}")
-            
+
             # Create folder structure
             await self._create_bucket_structure(bucket_name)
-            
+
             return bucket_name
-            
+
         except S3Error as e:
             logger.error(f"Failed to create bucket for dataset {dataset_id}: {e}")
             raise
         except Exception as e:
             logger.error(f"Unexpected error creating bucket for dataset {dataset_id}: {e}")
             raise
-    
+
     async def _create_bucket_structure(self, bucket_name: str):
         """Create folder structure in the bucket"""
         try:
@@ -131,24 +134,24 @@ class DatasetMinioService:
                 "schemas/",
                 "manifests/"
             ]
-            
-            for folder in folders:
-                # Create an empty object to represent the folder
+
+            client = self.minio_client
+
+            async def _put_folder(folder: str):
                 empty_stream = BytesIO(b"")
-                try:
-                    self.minio_client.put_object(
-                        bucket_name,
-                        folder + ".keep",
-                        data=empty_stream,
-                        length=0
-                    )
-                    logger.debug(f"Created folder: {folder}")
-                except Exception as e:
-                    logger.error(f"Failed to create folder {folder}: {e}")
-                    raise
-            
+                await asyncio.to_thread(
+                    client.put_object,
+                    bucket_name,
+                    folder + ".keep",
+                    empty_stream,
+                    0,
+                )
+                logger.debug(f"Created folder: {folder}")
+
+            # Create all folder markers concurrently
+            await asyncio.gather(*[_put_folder(f) for f in folders])
             logger.info(f"Created folder structure in bucket {bucket_name}")
-            
+
         except Exception as e:
             logger.error(f"Failed to create folder structure in bucket {bucket_name}: {e}")
             raise
@@ -814,32 +817,29 @@ class DatasetMinioService:
                 "bucket_name": bucket_name,
                 "export_status": "completed"
             }
-            
+
             manifest_json = json.dumps(manifest, indent=2, default=str)
-            
-            # Upload manifest file
             manifest_bytes = manifest_json.encode('utf-8')
-            manifest_stream = BytesIO(manifest_bytes)
-            
-            try:
-                self.minio_client.put_object(
+
+            client = self.minio_client
+
+            def _upload():
+                stream = BytesIO(manifest_bytes)
+                client.put_object(
                     bucket_name,
                     f"manifests/dataset_{dataset_id}_manifest.json",
-                    data=manifest_stream,
+                    data=stream,
                     length=len(manifest_bytes),
-                    content_type='application/json'
+                    content_type='application/json',
                 )
-                logger.info(f"Created manifest file for dataset {dataset_id}")
-            except Exception as e:
-                logger.error(f"Failed to upload manifest file: {e}")
-                logger.error(f"Manifest stream type: {type(manifest_stream)}")
-                logger.error(f"Manifest bytes length: {len(manifest_bytes)}")
-                raise
-                
+
+            await asyncio.to_thread(_upload)
+            logger.info(f"Created manifest file for dataset {dataset_id}")
+
         except Exception as e:
             logger.error(f"Failed to create manifest file for dataset {dataset_id}: {e}")
             raise
-    
+
     async def _create_data_manifest_file(self, bucket_name: str, dataset_id: int, data_info: Dict[str, Any]):
         """Create a manifest file for the real data export"""
         try:
@@ -854,74 +854,78 @@ class DatasetMinioService:
                 "bucket_name": bucket_name,
                 "export_status": "completed"
             }
-            
+
             manifest_json = json.dumps(manifest, indent=2, default=str)
-            
-            # Upload data manifest file
             manifest_bytes = manifest_json.encode('utf-8')
-            manifest_stream = BytesIO(manifest_bytes)
-            
-            try:
-                self.minio_client.put_object(
+
+            client = self.minio_client
+
+            def _upload():
+                stream = BytesIO(manifest_bytes)
+                client.put_object(
                     bucket_name,
                     f"manifests/dataset_{dataset_id}_data_manifest.json",
-                    data=manifest_stream,
+                    data=stream,
                     length=len(manifest_bytes),
-                    content_type='application/json'
+                    content_type='application/json',
                 )
-                logger.info(f"Created data manifest file for dataset {dataset_id}")
-            except Exception as e:
-                logger.error(f"Failed to upload data manifest file: {e}")
-                raise
-                
+
+            await asyncio.to_thread(_upload)
+            logger.info(f"Created data manifest file for dataset {dataset_id}")
+
         except Exception as e:
             logger.error(f"Failed to create data manifest file for dataset {dataset_id}: {e}")
             raise
-    
+
     async def validate_export(self, bucket_name: str, dataset_id: int) -> Dict[str, Any]:
         """Validate the exported dataset"""
         try:
-            validation_result = {
+            validation_result: Dict[str, Any] = {
                 "valid": True,
                 "errors": [],
                 "warnings": [],
                 "details": {}
             }
-            
-            # Check if bucket exists
-            if not self.minio_client.bucket_exists(bucket_name):
+
+            client = self.minio_client
+
+            # Check if bucket exists (non-blocking)
+            bucket_ok = await asyncio.to_thread(client.bucket_exists, bucket_name)
+            if not bucket_ok:
                 validation_result["valid"] = False
                 validation_result["errors"].append(f"Bucket {bucket_name} does not exist")
                 return validation_result
-            
-            # Check Delta table
+
+            # Check Delta table (Spark — already blocking inside run_in_executor upstream)
             delta_path = f"s3a://{bucket_name}/metadata/dataset_metadata"
             try:
                 df = self.spark.read.format("delta").load(delta_path)
                 record_count = df.count()
                 validation_result["details"]["record_count"] = record_count
-                
-                # Check record types
                 record_types = df.select("record_type").distinct().collect()
                 validation_result["details"]["record_types"] = [row.record_type for row in record_types]
-                
                 if record_count == 0:
                     validation_result["warnings"].append("Delta table is empty")
-                
             except Exception as e:
                 validation_result["valid"] = False
                 validation_result["errors"].append(f"Failed to read Delta table: {str(e)}")
-            
-            # Check manifest file
+
+            # Check manifest file (non-blocking)
             try:
-                manifest_object = self.minio_client.get_object(bucket_name, f"manifests/dataset_{dataset_id}_manifest.json")
-                manifest_data = json.loads(manifest_object.read().decode('utf-8'))
+                def _read_manifest():
+                    obj = client.get_object(
+                        bucket_name,
+                        f"manifests/dataset_{dataset_id}_manifest.json",
+                    )
+                    return json.loads(obj.read().decode('utf-8'))
+
+                manifest_data = await asyncio.to_thread(_read_manifest)
                 validation_result["details"]["manifest"] = manifest_data
             except Exception as e:
                 validation_result["warnings"].append(f"Failed to read manifest file: {str(e)}")
-            
+
             return validation_result
-            
+
         except Exception as e:
             logger.error(f"Failed to validate export for dataset {dataset_id}: {e}")
             return {
@@ -930,41 +934,43 @@ class DatasetMinioService:
                 "warnings": [],
                 "details": {}
             }
-    
+
     async def list_dataset_files(self, bucket_name: str) -> List[Dict[str, Any]]:
-        """List all files in the dataset bucket"""
+        """List all files in the dataset bucket (non-blocking)."""
         try:
-            files = []
-            objects = self.minio_client.list_objects(bucket_name, recursive=True)
-            
-            for obj in objects:
-                files.append({
-                    "name": obj.object_name,
-                    "size": obj.size,
-                    "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
-                    "etag": obj.etag
-                })
-            
-            return files
-            
+            client = self.minio_client
+
+            def _list():
+                return [
+                    {
+                        "name": obj.object_name,
+                        "size": obj.size,
+                        "last_modified": obj.last_modified.isoformat() if obj.last_modified else None,
+                        "etag": obj.etag,
+                    }
+                    for obj in client.list_objects(bucket_name, recursive=True)
+                ]
+
+            return await asyncio.to_thread(_list)
+
         except Exception as e:
             logger.error(f"Failed to list files in bucket {bucket_name}: {e}")
             raise
-    
+
     async def delete_dataset_bucket(self, bucket_name: str) -> bool:
-        """Delete the entire dataset bucket"""
+        """Delete the entire dataset bucket (non-blocking)."""
         try:
-            # First, delete all objects in the bucket
-            objects = self.minio_client.list_objects(bucket_name, recursive=True)
-            for obj in objects:
-                self.minio_client.remove_object(bucket_name, obj.object_name)
-            
-            # Then delete the bucket
-            self.minio_client.remove_bucket(bucket_name)
-            
+            client = self.minio_client
+
+            def _delete_all():
+                for obj in client.list_objects(bucket_name, recursive=True):
+                    client.remove_object(bucket_name, obj.object_name)
+                client.remove_bucket(bucket_name)
+
+            await asyncio.to_thread(_delete_all)
             logger.info(f"Deleted bucket {bucket_name} and all its contents")
             return True
-            
+
         except Exception as e:
             logger.error(f"Failed to delete bucket {bucket_name}: {e}")
             return False

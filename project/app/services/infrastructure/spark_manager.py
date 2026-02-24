@@ -17,10 +17,16 @@ Note: Spark is used for Silver layer because:
 
 import os
 import logging
+import threading
 from typing import Optional, Dict, Any
 from contextlib import contextmanager
 
 logger = logging.getLogger(__name__)
+
+# Global reference counter so that Bronze and Silver jobs can share the single
+# SparkSession without one stopping the JVM while the other is still running.
+_spark_ref_count: int = 0
+_spark_ref_lock: threading.Lock = threading.Lock()
 
 # PYSPARK_SUBMIT_ARGS must be set before pyspark is imported so the JVM starts
 # with the correct heap size. Setting spark.driver.memory via SparkSession.builder
@@ -148,22 +154,35 @@ class SparkManager:
         """
         if self._spark_session is not None:
             try:
-                # Check if session is still active by doing a simple operation
-                # This catches both stopped sessions and lost py4j connections
-                _ = self._spark_session.sparkContext.getConf().get("spark.app.name")
-                if not self._spark_session.sparkContext._jsc.sc().isStopped():
-                    return self._spark_session
+                sc = self._spark_session.sparkContext
+                _ = sc.getConf().get("spark.app.name")
+                if not sc._jsc.sc().isStopped():
+                    # Verify the cached session uses the correct master.
+                    # If it doesn't (e.g., a legacy local session left over from
+                    # delta.py module-level init), stop it and recreate.
+                    current_master = sc.getConf().get("spark.master", "")
+                    if current_master != self.spark_master:
+                        logger.warning(
+                            f"Cached SparkSession uses master={current_master!r}, "
+                            f"expected {self.spark_master!r}. Recreating session."
+                        )
+                        try:
+                            self._spark_session.stop()
+                        except Exception:
+                            pass
+                        self._spark_session = None
+                        SparkManager._spark_session = None
+                        self._force_cleanup_spark_state()
+                    else:
+                        return self._spark_session
             except Exception as e:
-                # Session is dead or connection lost, create new one
                 logger.warning(f"Existing SparkSession is dead ({type(e).__name__}), creating new one")
                 try:
                     self._spark_session.stop()
-                except:
+                except Exception:
                     pass
                 self._spark_session = None
-                SparkManager._spark_session = None  # Clear class-level reference too
-                # Force cleanup of all PySpark/Py4j internal state to avoid
-                # connecting to a dead JVM gateway (causes [Errno 111] Connection refused)
+                SparkManager._spark_session = None
                 self._force_cleanup_spark_state()
         
         from pyspark.sql import SparkSession
@@ -202,25 +221,83 @@ class SparkManager:
             .config("spark.hadoop.fs.s3a.connection.ssl.enabled", "false")
         
         # Delta Lake optimizations
+        # optimizeWrite: Delta rewrites shuffle output into ~128 MB files automatically,
+        #   eliminating the small-files problem without manual coalesce calls.
+        # autoCompact: after each commit, Delta checks if there are too many small files
+        #   in the affected partition and merges them (bin-packing).
+        # retentionDurationCheck: MUST be true in production — prevents VACUUM from
+        #   deleting files that could still be read by concurrent transactions.
+        #   Disabling it (false) would allow accidental data loss on short VACUUM runs.
         builder = builder \
-            .config("spark.databricks.delta.retentionDurationCheck.enabled", "false") \
+            .config("spark.databricks.delta.retentionDurationCheck.enabled", "true") \
             .config("spark.databricks.delta.properties.defaults.logRetentionDuration",
                     f"{self.delta_log_retention} days") \
             .config("spark.databricks.delta.properties.defaults.deletedFileRetentionDuration",
                     f"{self.delta_log_retention} days") \
             .config("spark.databricks.delta.optimizeWrite.enabled", "true") \
             .config("spark.databricks.delta.autoCompact.enabled", "true") \
+            .config("spark.databricks.delta.autoCompact.minNumFiles", "5") \
             .config("spark.databricks.delta.stats.collect", "true") \
             .config("spark.databricks.delta.checkpoint.partSize", "5000000")
 
+        # FAIR scheduler — allows multiple concurrent Spark jobs to share resources
+        # instead of queuing (FIFO default). Critical for concurrent Silver executions
+        # where multiple API requests submit jobs to the same SparkContext.
+        #
+        # SPARK_TMP_DIR overrides /tmp for environments with read-only root filesystems
+        # (hardened Docker containers, certain Kubernetes pod security policies).
+        # Falls back to Python's tempfile.gettempdir() which is always writable.
+        import tempfile as _tempfile
+        _tmp_base = os.getenv("SPARK_TMP_DIR", _tempfile.gettempdir())
+        _fairscheduler_path = os.path.join(_tmp_base, "fairscheduler.xml")
+
+        try:
+            with open(_fairscheduler_path, "w") as f:
+                f.write("""<?xml version="1.0"?>
+<allocations>
+  <pool name="default">
+    <schedulingMode>FAIR</schedulingMode>
+    <weight>1</weight>
+    <minShare>2</minShare>
+  </pool>
+</allocations>""")
+            builder = builder \
+                .config("spark.scheduler.mode", "FAIR") \
+                .config("spark.scheduler.allocation.file", _fairscheduler_path)
+        except Exception as e:
+            logger.warning(
+                f"Failed to write fairscheduler.xml to {_fairscheduler_path}: {e}. "
+                "Spark will use default FIFO scheduling."
+            )
+
         # Adaptive Query Execution — auto-tunes shuffle partitions, skew joins, etc.
+        # advisoryPartitionSizeInBytes = 128 MB: AQE coalesces post-shuffle partitions
+        #   to target this size, matching Delta's targetFileSize 1-to-1.
+        # parallelismFirst=false: AQE coalesces purely by data size, not by available
+        #   parallelism. This is critical so that small datasets (e.g. 500 rows) get
+        #   coalesced all the way down to 1 partition instead of keeping 200 empty ones.
+        #   Without this, SPARK_SHUFFLE_PARTITIONS=200 creates 200 near-empty shuffle
+        #   files for small data, dominating execution time.
         builder = builder \
             .config("spark.sql.adaptive.enabled", "true") \
             .config("spark.sql.adaptive.coalescePartitions.enabled", "true") \
+            .config("spark.sql.adaptive.coalescePartitions.minPartitionSize", "1b") \
+            .config("spark.sql.adaptive.coalescePartitions.parallelismFirst", "false") \
+            .config("spark.sql.adaptive.advisoryPartitionSizeInBytes", "134217728") \
             .config("spark.sql.adaptive.skewJoin.enabled", "true") \
-            .config("spark.sql.adaptive.localShuffleReader.enabled", "true")
+            .config("spark.sql.adaptive.skewJoin.skewedPartitionThresholdInBytes", "134217728") \
+            .config("spark.sql.adaptive.skewJoin.skewedPartitionFactor", "5") \
+            .config("spark.sql.adaptive.localShuffleReader.enabled", "true") \
+            .config("spark.cleaner.referenceTracking.blocking", "false")
 
-        # Read partition sizing
+        # Network timeout configurations to prevent Py4J ConnectionRefusedError
+        builder = builder \
+            .config("spark.network.timeout", "600s") \
+            .config("spark.executor.heartbeatInterval", "120s") \
+            .config("spark.core.connection.ack.wait.timeout", "600s") \
+            .config("spark.rpc.askTimeout", "600s")
+
+        # Read partition sizing — 128 MB per read partition (ideal Parquet/Delta chunk)
         builder = builder \
             .config("spark.sql.files.maxPartitionBytes", "134217728") \
             .config("spark.sql.files.openCostInBytes", "4194304")
@@ -238,43 +315,191 @@ class SparkManager:
             .config("spark.hadoop.fs.s3a.block.size", "134217728") \
             .config("spark.hadoop.fs.s3a.readahead.range", "131072")
 
-        # Local mode optimizations
+        # Memory and Resource tuning
+        # spark.memory.fraction=0.75: 75 % of JVM heap for Spark execution+storage.
+        # spark.memory.storageFraction=0.3: only 30 % of that goes to the storage
+        #   cache, giving 70 % to execution (shuffle, sort, aggregations) — reduces
+        #   the chance of spill and makes room for the off-heap buffer.
+        # Off-heap memory (512 MB) is used for internal Tungsten buffers, reducing GC
+        #   pressure during heavy sorts/aggregations.
+        # Spill-to-disk tuning:
+        #   spark.shuffle.file.buffer: larger write-side buffer (1 MB vs default 32 KB)
+        #     reduces the number of disk I/O ops when spilling.
+        #   spark.reducer.maxSizeInFlight: more in-flight shuffle blocks (96 MB vs 48 MB),
+        #     fewer network round trips.
+        #   spark.shuffle.sort.bypassMergeThreshold: use the bypass path for low-cardinality
+        #     shuffles (avoids an extra sort pass).
+        #   spark.local.dir: dedicated temp directory for spill files.
         if self.spark_mode == "local":
             builder = builder \
-                .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "4g")) \
+                .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "3g")) \
+                .config("spark.driver.maxResultSize", "2g") \
                 .config("spark.sql.shuffle.partitions",
-                        os.getenv("SPARK_SHUFFLE_PARTITIONS", "8")) \
+                        os.getenv("SPARK_SHUFFLE_PARTITIONS", "200")) \
                 .config("spark.default.parallelism",
-                        os.getenv("SPARK_DEFAULT_PARALLELISM", "8"))
+                        os.getenv("SPARK_DEFAULT_PARALLELISM", "16")) \
+                .config("spark.memory.fraction", "0.75") \
+                .config("spark.memory.storageFraction", "0.3") \
+                .config("spark.memory.offHeap.enabled", "true") \
+                .config("spark.memory.offHeap.size", "512m") \
+                .config("spark.shuffle.file.buffer", "1m") \
+                .config("spark.reducer.maxSizeInFlight", "96m") \
+                .config("spark.shuffle.sort.bypassMergeThreshold", "200") \
+                .config("spark.local.dir", os.path.join(_tmp_base, "spark-spill")) \
+                .config("spark.driver.bindAddress", "127.0.0.1") \
+                .config("spark.driver.host", "127.0.0.1") \
+                .config("spark.executor.extraJavaOptions",
+                        "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35") \
+                .config("spark.driver.extraJavaOptions",
+                        "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35")
         else:
-            # Cluster mode settings
+            # Standalone / cluster mode settings.
+            #
+            # spark.driver.host MUST be the hostname reachable by Spark workers.
+            # In Docker, this is the service name ("dermalert-backend").
+            # Without this, executors try to connect to 127.0.0.1 and time out,
+            # causing Spark to silently fall back to running everything locally.
+            #
+            # SPARK_DRIVER_HOST env var overrides — useful when running outside
+            # Docker (e.g. on K8s with a different hostname convention).
+            _driver_host = os.getenv("SPARK_DRIVER_HOST", "dermalert-backend")
             builder = builder \
+                .config("spark.driver.host", _driver_host) \
+                .config("spark.driver.bindAddress", "0.0.0.0") \
+                .config("spark.driver.memory", os.getenv("SPARK_DRIVER_MEMORY", "3g")) \
+                .config("spark.driver.maxResultSize", "2g") \
                 .config("spark.executor.memory", os.getenv("SPARK_EXECUTOR_MEMORY", "4g")) \
                 .config("spark.executor.cores", os.getenv("SPARK_EXECUTOR_CORES", "2")) \
+                .config("spark.sql.shuffle.partitions",
+                        os.getenv("SPARK_SHUFFLE_PARTITIONS", "200")) \
                 .config("spark.dynamicAllocation.enabled", "true") \
                 .config("spark.dynamicAllocation.minExecutors", "1") \
                 .config("spark.dynamicAllocation.maxExecutors",
-                        os.getenv("SPARK_MAX_EXECUTORS", "10"))
+                        os.getenv("SPARK_MAX_EXECUTORS", "10")) \
+                .config("spark.dynamicAllocation.shuffleTracking.enabled", "true") \
+                .config("spark.executor.extraJavaOptions",
+                        "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35") \
+                .config("spark.driver.extraJavaOptions",
+                        "-XX:+UseG1GC -XX:InitiatingHeapOccupancyPercent=35")
         
-        # Use configure_spark_with_delta_pip for proper Delta Lake setup
-        # Include hadoop-aws for S3A filesystem support (required for MinIO/S3 writes)
-        extra_packages = [
-            "org.apache.hadoop:hadoop-aws:3.4.0",
-        ]
-        self._spark_session = configure_spark_with_delta_pip(
-            builder, extra_packages=extra_packages
-        ).getOrCreate()
-        
-        # Set log level
-        self._spark_session.sparkContext.setLogLevel(
-            os.getenv("SPARK_LOG_LEVEL", "WARN")
+        # Delta Lake + hadoop-aws + Trino JDBC packages.
+        # configure_spark_with_delta_pip is designed for local mode only.
+        # For Spark Standalone / cluster, we set spark.jars.packages directly
+        # so the driver downloads JARs and distributes them to executors.
+        #
+        # trino-jdbc: allows Spark to read from Trino directly via JDBC, bypassing
+        # Python memory entirely. Data flows JVM→JVM: Trino JDBC driver → Spark DataFrame
+        # → Delta write. This eliminates the Python fetchall() memory bottleneck.
+        # Version must match the running Trino server (io.trino:trino-jdbc:{server_version}).
+        _delta_version      = "4.0.0"
+        _hadoop_version     = "3.4.0"
+        _scala_version      = "2.13"
+        _trino_jdbc_version = os.getenv("TRINO_JDBC_VERSION", "479")
+        _packages = (
+            f"io.delta:delta-spark_{_scala_version}:{_delta_version},"
+            f"org.apache.hadoop:hadoop-aws:{_hadoop_version},"
+            f"io.trino:trino-jdbc:{_trino_jdbc_version}"
         )
-        
-        logger.info("SparkSession created successfully")
-        return self._spark_session
+
+        if self.spark_mode == "local":
+            extra_packages = [
+                f"org.apache.hadoop:hadoop-aws:{_hadoop_version}",
+                f"io.trino:trino-jdbc:{_trino_jdbc_version}",
+            ]
+            # configure_spark_with_delta_pip works only in local mode
+            # (it calls builder.getOrCreate internally with Delta Lake configuration)
+        else:
+            # Cluster / standalone mode: inject packages directly into the builder
+            # so they are distributed to executors automatically.
+            builder = builder \
+                .config("spark.jars.packages", _packages) \
+                .config("spark.jars.ivy", "/tmp/.ivy2") \
+                .config("spark.driver.port", os.getenv("SPARK_DRIVER_PORT", "7078")) \
+                .config("spark.blockManager.port", os.getenv("SPARK_BLOCKMANAGER_PORT", "7079"))
+            extra_packages = []
+
+        # Ensure the spill directory exists before Spark starts writing to it.
+        import pathlib
+        _spill_dir = os.path.join(_tmp_base, "spark-spill")
+        try:
+            pathlib.Path(_spill_dir).mkdir(parents=True, exist_ok=True)
+        except Exception as _mkdir_err:
+            logger.warning(
+                f"Could not create spill directory {_spill_dir}: {_mkdir_err}. "
+                "Spark will use its default temp location."
+            )
+
+        try:
+            if self.spark_mode == "local":
+                self._spark_session = configure_spark_with_delta_pip(
+                    builder, extra_packages=extra_packages
+                ).getOrCreate()
+            else:
+                self._spark_session = builder.getOrCreate()
+
+            # Set log level
+            self._spark_session.sparkContext.setLogLevel(
+                os.getenv("SPARK_LOG_LEVEL", "WARN")
+            )
+
+            logger.info("SparkSession created successfully")
+            return self._spark_session
+        except Exception as e:
+            logger.error(f"Failed to create SparkSession: {e}")
+            self._force_cleanup_spark_state()
+            raise
     
-    def stop_session(self):
-        """Stop the current SparkSession and clean up JVM resources."""
+    # ------------------------------------------------------------------
+    # Reference counting — prevent JVM from being torn down while a
+    # concurrent Bronze or Silver job is still using the session.
+    # ------------------------------------------------------------------
+
+    def acquire(self) -> None:
+        """Increment the active-job reference count."""
+        global _spark_ref_count
+        with _spark_ref_lock:
+            _spark_ref_count += 1
+            logger.debug(f"SparkManager.acquire() → ref_count={_spark_ref_count}")
+
+    def release(self) -> None:
+        """
+        Decrement the active-job reference count.
+
+        The session is NOT stopped automatically on release — callers that
+        want to stop the session after all jobs finish should call
+        stop_session() explicitly.  Here we just log the transition so it
+        is easy to detect leaks in tests/logs.
+        """
+        global _spark_ref_count
+        with _spark_ref_lock:
+            _spark_ref_count = max(0, _spark_ref_count - 1)
+            logger.debug(f"SparkManager.release() → ref_count={_spark_ref_count}")
+
+    @property
+    def active_jobs(self) -> int:
+        """Return the number of jobs currently holding a reference."""
+        return _spark_ref_count
+
+    def stop_session(self) -> bool:
+        """
+        Stop the current SparkSession and clean up JVM resources.
+
+        Safe to call at any time: if active jobs are still holding references
+        (ref_count > 0), the stop is refused and False is returned so callers
+        can decide whether to retry or log a warning.
+
+        Returns:
+            True  — session was stopped successfully.
+            False — refused because active jobs are still running.
+        """
+        with _spark_ref_lock:
+            if _spark_ref_count > 0:
+                logger.warning(
+                    f"stop_session() refused: {_spark_ref_count} active job(s) "
+                    "still hold a reference. Call release() for each job first."
+                )
+                return False
+
         if self._spark_session is not None:
             try:
                 self._spark_session.stop()
@@ -284,24 +509,31 @@ class SparkManager:
             finally:
                 self._spark_session = None
                 SparkManager._spark_session = None
-                # Clean up PySpark internal state to prevent zombie JVM accumulation
                 self._force_cleanup_spark_state()
-    
+        return True
+
     @contextmanager
     def session_scope(self):
         """
         Context manager for SparkSession.
-        
+
+        Automatically increments the reference counter on entry and decrements
+        it on exit (even on exception), keeping stop_session() safe to call
+        from any concurrent thread without risk of killing an in-flight job.
+
         Usage:
             with spark_manager.session_scope() as spark:
                 df = spark.read.format("delta").load(path)
         """
         spark = self.get_or_create_session()
+        self.acquire()
         try:
             yield spark
         except Exception as e:
             logger.error(f"Error in Spark session: {e}")
             raise
+        finally:
+            self.release()
     
     def get_bronze_path(self, dataset_folder: str, part_name: Optional[str] = None) -> str:
         """
@@ -403,8 +635,14 @@ class SparkManager:
         spark = self.get_or_create_session()
         
         try:
+            # Uses the Hadoop FileSystem API via Py4J (Java bridge) to list S3A
+            # paths directly — avoids a Python boto3 round trip and reuses the
+            # already-configured S3A credentials from the SparkSession.
+            # Trade-off: tightly coupled to Hadoop internal APIs; if Spark upgrades
+            # change the package layout, this path can break. The except block below
+            # provides a safe fallback so the system degrades gracefully.
             from py4j.java_gateway import java_import
-            
+
             # Use Hadoop FileSystem to list directories
             hadoop_conf = spark._jsc.hadoopConfiguration()
             

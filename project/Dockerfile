@@ -28,8 +28,11 @@ ENV PATH="/root/.local/bin:$PATH"
 # copy the poetry configuration files
 COPY ./pyproject.toml ./poetry.lock* /usr/src/app/
 
-# install python dependencies (including dev dependencies)
-RUN poetry install --no-root  # This installs both regular and dev dependencies
+# install python dependencies
+# poetry lock --no-update regenerates the lock when pyproject.toml diverged
+# without upgrading existing packages — safe for CI/CD.
+RUN poetry lock --no-update 2>/dev/null || poetry lock
+RUN poetry install --no-root
 
 # add app
 COPY . .

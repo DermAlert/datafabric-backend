@@ -712,7 +712,7 @@ class BronzePersistentConfigResponse(BaseModel):
     description: Optional[str]
     tables: List[Dict[str, Any]]
     relationship_ids: Optional[List[int]]
-    enable_federated_joins: bool
+    enable_federated_joins: Optional[bool] = False
     output_format: str
     
     # Versioning fields

@@ -62,6 +62,7 @@ from ...api.schemas.bronze_schemas import (
     BronzeVirtualizedGroupResult,
 )
 from ..infrastructure.trino_manager import TrinoManager
+from ...utils.path_sanitizer import sanitize_s3_path_component
 from minio import Minio
 
 logger = logging.getLogger(__name__)
@@ -221,9 +222,11 @@ class BronzeIngestionService:
 
     def _get_dataset_folder_name(self, dataset_name: str, dataset_id: Optional[int] = None) -> str:
         """
-        Generate dataset folder name in format: {id}-{name}
+        Generate dataset folder name in format: {id}-{safe_name}
         
         If dataset_id is not available (during preview), uses placeholder format.
+        The name component is sanitized to be safe for S3 paths (no spaces or
+        special characters).
         
         Args:
             dataset_name: Name of the dataset
@@ -232,11 +235,12 @@ class BronzeIngestionService:
         Returns:
             Folder name (e.g., "15-melanoma_study" or "{id}-melanoma_study")
         """
+        safe_name = sanitize_s3_path_component(dataset_name)
         if dataset_id is not None:
-            return f"{dataset_id}-{dataset_name}"
+            return f"{dataset_id}-{safe_name}"
         else:
             # During preview, ID is not available yet - use placeholder
-            return f"{{id}}-{dataset_name}"
+            return f"{{id}}-{safe_name}"
     
     async def generate_ingestion_plan(
         self, 
@@ -380,10 +384,13 @@ class BronzeIngestionService:
                     if len(sub_tables) == 1:
                         # Single table - use table name
                         table_info = table_metadata[sub_tables[0]]
-                        group_suffix = f"{conn_name}_{table_info['table_name']}"
+                        safe_conn = sanitize_s3_path_component(conn_name)
+                        safe_table = sanitize_s3_path_component(table_info['table_name'])
+                        group_suffix = f"{safe_conn}_{safe_table}"
                     else:
                         # Multiple tables with relationship
-                        group_suffix = f"{conn_name}_joined_{sub_group_idx}"
+                        safe_conn = sanitize_s3_path_component(conn_name)
+                        group_suffix = f"{safe_conn}_joined_{sub_group_idx}"
                     
                     # Generate dataset folder name (preview mode - no ID yet)
                     dataset_folder = self._get_dataset_folder_name(dataset_data.name)
@@ -1150,8 +1157,11 @@ class BronzeIngestionService:
             logger.info(f"Unified JOIN column '{col_name}' with COALESCE from {len(col_expressions)} sources")
         
         # Add metadata columns
+        # CAST(CURRENT_TIMESTAMP AS TIMESTAMP) strips the time zone component so
+        # Spark JDBC can map it to TimestampType. Without the cast, Trino returns
+        # "timestamp(3) with time zone" which Spark 4.0 JDBC does not recognise.
         select_columns.append(f"'{table_metadata[primary_table_id]['table_name']}' AS _source_table")
-        select_columns.append("CURRENT_TIMESTAMP AS _ingestion_timestamp")
+        select_columns.append("CAST(CURRENT_TIMESTAMP AS TIMESTAMP) AS _ingestion_timestamp")
         
         # Build FROM clause
         primary_table = table_metadata[primary_table_id]
@@ -1356,7 +1366,7 @@ FROM {from_clause}
         
         # Add metadata columns
         select_columns.append("'federated' AS _source_table")
-        select_columns.append("CURRENT_TIMESTAMP AS _ingestion_timestamp")
+        select_columns.append("CAST(CURRENT_TIMESTAMP AS TIMESTAMP) AS _ingestion_timestamp")
         
         # Build FROM clause with FULL CATALOG PATH
         primary_table = table_metadata[primary_table_id]
@@ -2346,7 +2356,8 @@ AS
         if output_path_prefix:
             base_path = f"s3a://{bucket}/{output_path_prefix}"
         else:
-            base_path = f"s3a://{bucket}/{config_id}-{config_name}"
+            safe_config_name = sanitize_s3_path_component(config_name)
+            base_path = f"s3a://{bucket}/{config_id}-{safe_config_name}"
         
         # Generate SQL for data extraction
         dataset_data = DatasetBronzeCreateRequest(
@@ -2379,10 +2390,11 @@ AS
             'num_files': None,
         }
         
-        # Initialize Spark
+        # Initialize Spark — acquire ref so concurrent Silver jobs are not evicted
         spark_manager = SparkManager()
         versioning_service = BronzeVersioningService(self.db)
-        
+        spark_manager.acquire()
+
         try:
             spark = spark_manager.get_or_create_session()
             
@@ -2394,44 +2406,74 @@ AS
                 if enable_federated_joins:
                     group_output_path = f"{base_path}/unified/"
                 else:
-                    group_output_path = f"{base_path}/part_{group_preview.connection_name}/"
+                    safe_conn_name = sanitize_s3_path_component(group_preview.connection_name)
+                    group_output_path = f"{base_path}/part_{safe_conn_name}/"
                 
                 try:
-                    # Execute the SELECT SQL via Trino (using aiotrino) to get data
                     select_sql = group_preview.estimated_sql
-                    logger.info(f"Executing Trino query for group {group_preview.group_name}:\n{select_sql}")
-                    
-                    # Fetch data via Trino using existing async method
-                    data, columns = await self._execute_virtualized_query(select_sql)
-                    
-                    rows_in_batch = len(data)
-                    logger.info(f"Fetched {rows_in_batch} rows from Trino for group {group_preview.group_name}")
-                    
-                    if rows_in_batch == 0:
-                        logger.warning(f"No data returned from Trino for group {group_preview.group_name}")
-                        group_results.append(IngestionGroupResult(
-                            group_name=group_preview.group_name,
-                            connection_name=group_preview.connection_name,
-                            status=IngestionStatusEnum.SUCCESS,
-                            output_path=group_output_path,
-                            rows_ingested=0,
-                            execution_time_seconds=(datetime.now() - group_start).total_seconds()
-                        ))
-                        continue
-                    
-                    # Convert Python data to Spark DataFrame
-                    # Infer schema from first row
-                    df = spark.createDataFrame(data)
-                    
-                    logger.info(f"Created Spark DataFrame with {df.count()} rows and schema: {df.schema}")
-                    
+                    logger.info(
+                        f"Reading from Trino via JDBC for group "
+                        f"{group_preview.group_name}:\n{select_sql}"
+                    )
+
+                    # ── Spark JDBC read ──────────────────────────────────────────
+                    # Data flows JVM→JVM: Trino JDBC driver → Spark DataFrame →
+                    # Delta write, without ever materialising rows in Python memory.
+                    # This eliminates the fetchall() RAM bottleneck and lets Spark
+                    # handle type mapping directly from Trino's ResultSet metadata.
+                    #
+                    # The read is blocking (JVM), so it runs in a thread to avoid
+                    # stalling the asyncio event loop.
+                    import asyncio as _asyncio
+                    from concurrent.futures import ThreadPoolExecutor as _TPE
+
+                    _trino_host = self.trino.host
+                    _trino_port = self.trino.port
+                    _trino_user = self.trino.user
+                    _jdbc_url   = f"jdbc:trino://{_trino_host}:{_trino_port}"
+                    _sql        = select_sql  # fully-qualified: "catalog"."schema"."table"
+
+                    def _jdbc_read():
+                        return (
+                            spark.read
+                            .format("jdbc")
+                            # Trino JDBC driver — bundled in io.trino:trino-jdbc
+                            .option("driver", "io.trino.jdbc.TrinoDriver")
+                            .option("url", _jdbc_url)
+                            .option("user", _trino_user)
+                            # 'query' option: Spark wraps this as a subquery for
+                            # schema inference and then reads all rows in one pass.
+                            # No numPartitions needed — for Bronze ingestion a single
+                            # partition is fine; parallelism comes from concurrent jobs.
+                            .option("query", _sql)
+                            # fetchsize: rows fetched per network round-trip.
+                            # 10k rows × ~1KB/row ≈ 10 MB per batch → good balance
+                            # between latency and throughput for typical schemas.
+                            .option("fetchsize", "10000")
+                            .load()
+                        )
+
+                    _loop = _asyncio.get_event_loop()
+                    with _TPE(max_workers=1) as _exec:
+                        df = await _loop.run_in_executor(_exec, _jdbc_read)
+
+                    logger.info(
+                        f"Loaded Spark DataFrame via Trino JDBC with schema: {df.schema}"
+                    )
+
                     # Write to Delta Lake (always overwrite)
                     stats = await versioning_service.execute_overwrite(
                         spark=spark,
                         source_df=df,
                         output_path=group_output_path
                     )
-                    
+
+                    rows_written = stats.get('total_rows', 0)
+                    logger.info(
+                        f"Wrote {rows_written} rows for group "
+                        f"{group_preview.group_name} → {group_output_path}"
+                    )
+
                     # Track per-path Delta version (only paths actually written)
                     path_delta_versions[group_output_path] = stats.get('delta_version', 0)
                     versioning_stats['rows_inserted'] = (versioning_stats.get('rows_inserted') or 0) + (stats.get('rows_inserted') or 0)
@@ -2439,17 +2481,17 @@ AS
                     versioning_stats['rows_deleted'] = (versioning_stats.get('rows_deleted') or 0) + (stats.get('rows_deleted') or 0)
                     versioning_stats['size_bytes'] = (versioning_stats.get('size_bytes') or 0) + (stats.get('size_bytes') or 0)
                     versioning_stats['num_files'] = (versioning_stats.get('num_files') or 0) + (stats.get('num_files') or 0)
-                    
+
                     group_results.append(IngestionGroupResult(
                         group_name=group_preview.group_name,
                         connection_name=group_preview.connection_name,
                         status=IngestionStatusEnum.SUCCESS,
                         output_path=group_output_path,
-                        rows_ingested=stats.get('total_rows', rows_in_batch),
+                        rows_ingested=rows_written,
                         execution_time_seconds=(datetime.now() - group_start).total_seconds()
                     ))
-                    
-                    total_rows += stats.get('total_rows', rows_in_batch)
+
+                    total_rows += rows_written
                     
                 except Exception as e:
                     logger.error(f"Failed to execute group {group_preview.group_name}: {str(e)}")
@@ -2464,13 +2506,13 @@ AS
                     ))
             
         finally:
-            # Stop the Spark session to prevent zombie JVM processes
-            # Each execution creates its own session to avoid stale Py4j connections
+            # Release the reference count. The session is stopped only when
+            # no other concurrent job (e.g. a Silver execution) is still active.
             try:
-                spark_manager.stop_session()
-                logger.info("SparkSession stopped after bronze ingestion")
+                spark_manager.release()
+                logger.info("SparkSession released after bronze ingestion")
             except Exception as cleanup_error:
-                logger.warning(f"Error stopping SparkSession after ingestion: {cleanup_error}")
+                logger.warning(f"Error releasing SparkSession after ingestion: {cleanup_error}")
         
         # Determine overall status
         success_count = sum(1 for g in group_results if g.status == IngestionStatusEnum.SUCCESS)

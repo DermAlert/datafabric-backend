@@ -739,44 +739,54 @@ class DeltaSharingProtocolService:
                 )
 
             # Build FileActions with presigned URLs
-            for file_path in active_files:
-                # Extract MinIO key from the s3a:// path
-                if f"s3a://{bucket_name}/" in file_path:
-                    key = file_path.replace(f"s3a://{bucket_name}/", "")
-                elif file_path.startswith(prefix):
-                    key = file_path
-                else:
-                    key = f"{prefix}/{file_path}"
+            # generate_presigned_url and head_object are blocking network calls —
+            # run the entire loop in a thread to avoid blocking the event loop.
+            import asyncio as _asyncio
+            _eff_ver_for_files = effective_version
+            _table_ver = table.current_version
+            _rewrite = self._rewrite_presigned_url
+            _client = self.minio_client
 
-                key = unquote(key)
+            def _build_file_actions():
+                result = []
+                for file_path in active_files:
+                    if f"s3a://{bucket_name}/" in file_path:
+                        key = file_path.replace(f"s3a://{bucket_name}/", "")
+                    elif file_path.startswith(prefix):
+                        key = file_path
+                    else:
+                        key = f"{prefix}/{file_path}"
 
-                try:
-                    presigned_url = self.minio_client.generate_presigned_url(
-                        'get_object',
-                        Params={'Bucket': bucket_name, 'Key': key},
-                        ExpiresIn=3600
-                    )
-                    presigned_url = self._rewrite_presigned_url(presigned_url)
-
-                    file_size = 0
+                    key = unquote(key)
                     try:
-                        head = self.minio_client.head_object(Bucket=bucket_name, Key=key)
-                        file_size = head.get('ContentLength', 0)
-                    except Exception:
-                        pass
+                        presigned_url = _client.generate_presigned_url(
+                            'get_object',
+                            Params={'Bucket': bucket_name, 'Key': key},
+                            ExpiresIn=3600,
+                        )
+                        presigned_url = _rewrite(presigned_url)
 
-                    files.append(FileAction(
-                        url=presigned_url,
-                        id=key.split('/')[-1],
-                        partitionValues={},
-                        size=file_size,
-                        stats=None,
-                        version=effective_version if effective_version is not None else table.current_version,
-                        timestamp=int(datetime.now().timestamp() * 1000)
-                    ))
-                except Exception as e:
-                    logger.warning(f"Could not generate presigned URL for {key}: {e}")
-                    continue
+                        file_size = 0
+                        try:
+                            head = _client.head_object(Bucket=bucket_name, Key=key)
+                            file_size = head.get('ContentLength', 0)
+                        except Exception:
+                            pass
+
+                        result.append(FileAction(
+                            url=presigned_url,
+                            id=key.split('/')[-1],
+                            partitionValues={},
+                            size=file_size,
+                            stats=None,
+                            version=_eff_ver_for_files if _eff_ver_for_files is not None else _table_ver,
+                            timestamp=int(datetime.now().timestamp() * 1000),
+                        ))
+                    except Exception as e:
+                        logger.warning(f"Could not generate presigned URL for {key}: {e}")
+                return result
+
+            files = await _asyncio.to_thread(_build_file_actions)
 
         except Exception as e:
             from fastapi import HTTPException as _HTTPException
@@ -790,70 +800,60 @@ class DeltaSharingProtocolService:
     
     async def _get_table_files_fallback(self, table: ShareTable, query_request: QueryTableRequest) -> List[FileAction]:
         """Fallback method to get table files using MinIO listing (may have duplicates)"""
-        files = []
-        
-        if table.storage_location:
+        if not table.storage_location:
+            logger.info(f"Found 0 files for table {table.id} using fallback method")
+            return []
+
+        # list_objects_v2 and generate_presigned_url are blocking — offload to thread pool.
+        import asyncio as _asyncio
+
+        _client = self.minio_client
+        _rewrite = self._rewrite_presigned_url
+        _table_ver = table.current_version
+        _table_id = table.id
+
+        def _list_and_build():
+            result = []
             try:
-                # List objects in the storage location - Look for parquet files
                 bucket_name, prefix = self._parse_storage_location(table.storage_location)
-                
-                response = self.minio_client.list_objects_v2(
-                    Bucket=bucket_name,
-                    Prefix=prefix
-                )
-                
-                # Keep track of parquet files we've seen
-                parquet_files = set()
-                
+                response = _client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+                parquet_files: set = set()
+
                 for obj in response.get('Contents', []):
                     key = obj['Key']
-                    
-                    # Look for parquet files (MinIO stores them as directories)
                     if 'part-' in key and '.snappy.parquet' in key:
-                        # Extract the parquet file path
-                        if key.endswith('/xl.meta'):
-                            parquet_path = key.replace('/xl.meta', '')
-                        else:
-                            parquet_path = key
-                            
-                        # Avoid duplicates
-                        if parquet_path in parquet_files:
+                        parquet_path = key.replace('/xl.meta', '') if key.endswith('/xl.meta') else key
+                        if parquet_path in parquet_files or '_delta_log' in parquet_path:
                             continue
                         parquet_files.add(parquet_path)
-                        
-                        # Skip delta log files
-                        if '_delta_log' in parquet_path:
-                            continue
-                        
-                        # Generate presigned URL for the actual parquet file
                         try:
-                            presigned_url = self.minio_client.generate_presigned_url(
+                            presigned_url = _client.generate_presigned_url(
                                 'get_object',
                                 Params={'Bucket': bucket_name, 'Key': parquet_path},
-                                ExpiresIn=3600  # 1 hour
+                                ExpiresIn=3600,
                             )
-                            presigned_url = self._rewrite_presigned_url(presigned_url)
-                            
-                            # Create file action
-                            file_action = FileAction(
+                            presigned_url = _rewrite(presigned_url)
+                            result.append(FileAction(
                                 url=presigned_url,
-                                id=parquet_path.split('/')[-1],  # Use filename as ID
-                                partitionValues={},  # Would be parsed from path in production
+                                id=parquet_path.split('/')[-1],
+                                partitionValues={},
                                 size=obj.get('Size', 0),
-                                stats=None,  # Would include min/max/null stats in production
-                                version=table.current_version,
-                                timestamp=int(obj.get('LastModified', obj.get('last_modified', datetime.now())).timestamp() * 1000)
-                            )
-                            files.append(file_action)
+                                stats=None,
+                                version=_table_ver,
+                                timestamp=int(
+                                    obj.get('LastModified', obj.get('last_modified', datetime.now()))
+                                    .timestamp() * 1000
+                                ),
+                            ))
                         except Exception as e:
                             logger.warning(f"Could not generate presigned URL for {parquet_path}: {e}")
-                            continue
-                        
             except ClientError as e:
-                logger.error(f"Error accessing storage for table {table.id}: {e}")
+                logger.error(f"Error accessing storage for table {_table_id}: {e}")
             except Exception as e:
-                logger.error(f"Unexpected error accessing storage for table {table.id}: {e}")
-        
+                logger.error(f"Unexpected error accessing storage for table {_table_id}: {e}")
+            return result
+
+        files = await _asyncio.to_thread(_list_and_build)
         logger.info(f"Found {len(files)} files for table {table.id} using fallback method")
         return files
     
@@ -912,63 +912,51 @@ class DeltaSharingProtocolService:
             return None
         
     async def _read_delta_schema(self, storage_location: str) -> Optional[str]:
-        """Read schema from Delta Lake transaction log"""
-        try:
-            bucket_name, prefix = self._parse_storage_location(storage_location)
-            
-            # Look for Delta log files
-            response = self.minio_client.list_objects_v2(
-                Bucket=bucket_name,
-                Prefix=f"{prefix}/_delta_log"
-            )
-            
-            # Find Delta log JSON files (look for the directory structure in MinIO)
-            json_files = []
-            for obj in response.get('Contents', []):
-                if '.json' in obj['Key'] and not obj['Key'].endswith('/xl.meta'):
-                    json_files.append(obj['Key'])
-                elif '.json/xl.meta' in obj['Key']:
-                    # Extract the json file path (remove /xl.meta)
-                    json_file = obj['Key'].replace('/xl.meta', '')
-                    json_files.append(json_file)
-            
-            if json_files:
-                # Sort to get the first file which should have metadata
+        """Read schema from Delta Lake transaction log (non-blocking)."""
+        # list_objects_v2 and get_object are blocking network calls — run in thread pool.
+        import asyncio as _asyncio
+        import json as _json
+
+        _client = self.minio_client
+
+        def _sync_read() -> Optional[str]:
+            try:
+                bucket_name, prefix = self._parse_storage_location(storage_location)
+                response = _client.list_objects_v2(
+                    Bucket=bucket_name,
+                    Prefix=f"{prefix}/_delta_log",
+                )
+                json_files = []
+                for obj in response.get('Contents', []):
+                    key = obj['Key']
+                    if '.json' in key and not key.endswith('/xl.meta'):
+                        json_files.append(key)
+                    elif '.json/xl.meta' in key:
+                        json_files.append(key.replace('/xl.meta', ''))
+
+                if not json_files:
+                    return None
+
                 json_files.sort()
-                metadata_file = json_files[0]  # Start with the first file which should have metadata
-                
-                # Try to read the metadata file
                 try:
-                    obj_response = self.minio_client.get_object(
-                        Bucket=bucket_name,
-                        Key=metadata_file
-                    )
+                    obj_response = _client.get_object(Bucket=bucket_name, Key=json_files[0])
                     content = obj_response['Body'].read().decode('utf-8')
-                    
-                    # Parse Delta log entries (NDJSON format - one JSON per line)
-                    import json as json_module
-                    lines = content.strip().split('\n')
-                    
-                    for line in lines:
+                    for line in content.strip().split('\n'):
                         if line.strip():
                             try:
-                                log_entry = json_module.loads(line)
-                                
-                                # Look for metaData entry
-                                if 'metaData' in log_entry:
-                                    schema_string = log_entry['metaData'].get('schemaString')
-                                    if schema_string:
-                                        return schema_string
-                            except json_module.JSONDecodeError:
+                                entry = _json.loads(line)
+                                schema_string = entry.get('metaData', {}).get('schemaString')
+                                if schema_string:
+                                    return schema_string
+                            except _json.JSONDecodeError:
                                 continue
-                        
                 except Exception as e:
-                    logger.warning(f"Could not read Delta log file {metadata_file}: {e}")
-                    
-        except Exception as e:
-            logger.warning(f"Could not read Delta schema from {storage_location}: {e}")
-            
-        return None
+                    logger.warning(f"Could not read Delta log file {json_files[0]}: {e}")
+            except Exception as e:
+                logger.warning(f"Could not read Delta schema from {storage_location}: {e}")
+            return None
+
+        return await _asyncio.to_thread(_sync_read)
         
         fields = []
         for field in arrow_schema:

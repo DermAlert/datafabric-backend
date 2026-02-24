@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
 import logging
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...core.auth import get_current_user
 from ..schemas.relationship_schemas import (
     TableRelationshipCreate,
@@ -83,12 +83,14 @@ async def discover_relationships(
         try:
             trino_client = await get_trino_client()
         except Exception as e:
+            reraise_db_timeout(e)
             logger.warning(f"Could not get Trino client for FK extraction: {e}")
         
         return await service.discover_relationships(request, trino_client=trino_client)
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to discover relationships: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -103,7 +105,7 @@ async def discover_relationships(
 async def list_suggestions(
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100),
-    status: Optional[SuggestionStatusEnum] = Query(None, description="Filter by status (pending, accepted, rejected). If not provided, returns all."),
+    status_filter: Optional[SuggestionStatusEnum] = Query(None, alias="status", description="Filter by status (pending, accepted, rejected). If not provided, returns all."),
     connection_id: Optional[int] = None,
     table_id: Optional[int] = None,
     min_confidence: Optional[float] = Query(None, ge=0.0, le=1.0),
@@ -124,7 +126,7 @@ async def list_suggestions(
         suggestions, total = await service.list_suggestions(
             connection_id=connection_id,
             table_id=table_id,
-            status_filter=status,
+            status_filter=status_filter,
             min_confidence=min_confidence,
             page=page,
             size=size
@@ -140,6 +142,7 @@ async def list_suggestions(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to list suggestions: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -189,6 +192,7 @@ async def list_pending_suggestions(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to list suggestions: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -234,6 +238,7 @@ async def accept_suggestion(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to accept suggestion: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -259,6 +264,7 @@ async def reject_suggestion(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to reject suggestion: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -288,6 +294,7 @@ async def reset_suggestion(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to reset suggestion: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -332,6 +339,7 @@ async def bulk_accept_suggestions(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to bulk accept suggestions: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -379,6 +387,7 @@ async def get_relationship_graph(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get relationship graph: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -407,12 +416,13 @@ async def get_relationships_for_table(
             table_id=table_id,
             is_active=None if include_inactive else True,
             page=1,
-            size=1000  # Get all
+            size=500,
         )
         return relationships
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get relationships for table: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -448,6 +458,7 @@ async def get_relationships_for_connection(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get relationships for connection: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -485,6 +496,7 @@ async def create_relationship(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to create relationship: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -530,6 +542,7 @@ async def search_relationships(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to search relationships: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -550,6 +563,7 @@ async def get_relationship(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get relationship: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -580,6 +594,7 @@ async def update_relationship(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to update relationship: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -600,6 +615,7 @@ async def delete_relationship(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to delete relationship: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -46,55 +46,59 @@ class BronzeVersioningService:
     ) -> Dict[str, Any]:
         """
         Execute OVERWRITE operation.
-        
-        This replaces all data but Delta Lake still maintains version history
-        for time travel.
-        
-        Args:
-            spark: SparkSession
-            source_df: DataFrame to write
-            output_path: S3A path for Delta table
-            
-        Returns:
-            Dict with delta_version, rows_inserted, total_rows, size_bytes, num_files
+
+        All blocking Spark I/O is offloaded to a thread so the asyncio event
+        loop stays responsive to other requests while this writes to Delta.
         """
-        from delta.tables import DeltaTable
-        
-        logger.info(f"Executing OVERWRITE at {output_path}")
-        
-        source_df.write \
-            .format("delta") \
-            .mode("overwrite") \
-            .option("overwriteSchema", "true") \
-            .option("mergeSchema", "true") \
-            .save(output_path)
-        
-        # Get version info and metrics from Delta history
-        delta_table = DeltaTable.forPath(spark, output_path)
-        history = delta_table.history(1).collect()
-        
-        version = 0
-        size_bytes = None
-        num_files = None
-        
-        if history:
-            row_dict = history[0].asDict()
-            version = row_dict["version"]
-            metrics = row_dict.get("operationMetrics", {}) or {}
-            size_bytes = int(metrics.get("numOutputBytes", 0)) or None
-            num_files = int(metrics.get("numFiles", 0)) or int(metrics.get("numAddedFiles", 0)) or None
-        
-        row_count = source_df.count()
-        
-        return {
-            'delta_version': version,
-            'rows_inserted': row_count,
-            'rows_updated': 0,
-            'rows_deleted': 0,
-            'total_rows': row_count,
-            'size_bytes': size_bytes,
-            'num_files': num_files
-        }
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _sync_write() -> Dict:
+            from delta.tables import DeltaTable
+
+            logger.info(f"Executing OVERWRITE at {output_path}")
+
+            source_df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .option("overwriteSchema", "true") \
+                .option("mergeSchema", "true") \
+                .save(output_path)
+
+            # Version info
+            delta_table = DeltaTable.forPath(spark, output_path)
+            history = delta_table.history(1).collect()
+
+            version = 0
+            size_bytes = None
+            num_files = None
+
+            if history:
+                row_dict = history[0].asDict()
+                version = row_dict["version"]
+                metrics = row_dict.get("operationMetrics", {}) or {}
+                size_bytes = int(metrics.get("numOutputBytes", 0)) or None
+                num_files = (
+                    int(metrics.get("numFiles", 0))
+                    or int(metrics.get("numAddedFiles", 0))
+                    or None
+                )
+
+            row_count = source_df.count()
+
+            return {
+                "delta_version": version,
+                "rows_inserted": row_count,
+                "rows_updated": 0,
+                "rows_deleted": 0,
+                "total_rows": row_count,
+                "size_bytes": size_bytes,
+                "num_files": num_files,
+            }
+
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return await loop.run_in_executor(executor, _sync_write)
     
     async def get_version_history(
         self,

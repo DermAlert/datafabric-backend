@@ -13,7 +13,7 @@ Key concepts:
 from sqlalchemy import Column, Integer, String, ForeignKey, JSON, Boolean, Text, Enum as SQLEnum
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
-from sqlalchemy import UniqueConstraint, TIMESTAMP
+from sqlalchemy import UniqueConstraint, TIMESTAMP, Index
 from ..session import Base
 from ..base import AuditMixin
 import enum
@@ -430,7 +430,13 @@ class BronzeExecution(AuditMixin, Base):
     status, timing, versioning info, and any errors.
     """
     __tablename__ = "bronze_executions"
-    __table_args__ = {'schema': 'datasets'}
+    __table_args__ = (
+        # Composite index for the most common query pattern:
+        # "latest execution for config X with status Y"
+        Index('ix_bronze_exec_config_status', 'config_id', 'status'),
+        Index('ix_bronze_exec_config_finished', 'config_id', 'finished_at'),
+        {'schema': 'datasets'},
+    )
 
     id = Column(Integer, primary_key=True)
     config_id = Column(Integer, ForeignKey('datasets.bronze_persistent_configs.id', ondelete='CASCADE'), nullable=False)

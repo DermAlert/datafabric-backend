@@ -21,7 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import logging
 
-from app.database.session import get_db
+from app.database.session import get_db, reraise_db_timeout
 from app.api.schemas.storage_browser_schemas import (
     BucketsResponse, StorageBrowseResponse, StorageObjectDetail, DownloadUrlResponse,
 )

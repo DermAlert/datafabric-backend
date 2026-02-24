@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
-from app.database.session import get_db
+from app.database.session import get_db, reraise_db_timeout
 from app.api.schemas.connection_type import (
     ConnectionTypeCreate, ConnectionTypeUpdate, ConnectionTypeResponse, SearchConnectionType
 )

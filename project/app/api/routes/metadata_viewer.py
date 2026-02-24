@@ -5,7 +5,7 @@ from sqlalchemy import update
 from typing import List, Optional, Dict, Any
 from datetime import datetime
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...database.models import core
 from ...database.models import metadata
 from ...core.auth import get_current_user
@@ -76,6 +76,7 @@ async def list_catalogs(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve catalogs: {str(e)}"
@@ -131,6 +132,7 @@ async def list_schemas(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve schemas: {str(e)}"
@@ -186,6 +188,7 @@ async def list_tables(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve tables: {str(e)}"
@@ -257,6 +260,7 @@ async def list_columns(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve columns: {str(e)}"
@@ -355,6 +359,7 @@ async def get_table_details(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to retrieve table details: {str(e)}"
@@ -555,6 +560,7 @@ async def get_table_sample(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar sample da tabela: {str(e)}"
@@ -782,6 +788,7 @@ async def get_distinct_values_for_column(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar valores distintos: {str(e)}"
@@ -874,6 +881,7 @@ async def bulk_update_catalogs_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -948,6 +956,7 @@ async def bulk_update_schemas_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1007,6 +1016,7 @@ async def bulk_update_tables_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1056,6 +1066,7 @@ async def bulk_update_columns_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1145,6 +1156,7 @@ async def update_catalog_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1217,6 +1229,7 @@ async def update_schema_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1274,6 +1287,7 @@ async def update_table_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1321,6 +1335,7 @@ async def update_column_fl_ativo(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1387,6 +1402,7 @@ async def extract_constraints(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to extract constraints: {str(e)}"
@@ -1422,6 +1438,7 @@ async def get_table_cardinality_info(
         return TableCardinalityInfo(**result)
         
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get cardinality info: {str(e)}"
@@ -1472,6 +1489,7 @@ async def infer_join_cardinality(
         )
         
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to infer cardinality: {str(e)}"

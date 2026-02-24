@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, ForeignKey, JSON, TIMESTAMP, UniqueConstraint, Boolean, Numeric, Enum
+from sqlalchemy import Column, Integer, String, ForeignKey, JSON, TIMESTAMP, UniqueConstraint, Boolean, Numeric, Enum, Index
 from sqlalchemy.sql import func
 from ..session import Base
 from ..base import AuditMixin
@@ -7,6 +7,8 @@ class ExternalTables (AuditMixin, Base):
     __tablename__ = "external_tables"
     __table_args__ = (
         UniqueConstraint('schema_id', 'table_name'),
+        # connection_id is the most common filter: "all tables for connection X"
+        Index('ix_ext_tables_connection_id', 'connection_id'),
         {'schema': 'metadata'}
     )
     id = Column(Integer, primary_key=True)
@@ -23,7 +25,10 @@ class ExternalTables (AuditMixin, Base):
 
 class ExternalCatalogs(AuditMixin, Base):
     __tablename__ = "external_catalogs"
-    __table_args__ = {'schema': 'metadata'}
+    __table_args__ = (
+        Index('ix_ext_catalogs_connection_id', 'connection_id'),
+        {'schema': 'metadata'},
+    )
     id = Column(Integer, primary_key=True)  # substitui catalog_id UUID
     connection_id = Column(Integer, ForeignKey('core.data_connections.id', ondelete='CASCADE'), nullable=False)
     catalog_name = Column(String(255), nullable=True)
@@ -35,6 +40,8 @@ class ExternalSchema(AuditMixin, Base):
     __tablename__ = "external_schemas"
     __table_args__ = (
         UniqueConstraint('connection_id', 'schema_name'),
+        # connection_id filter is used in every metadata browsing query
+        Index('ix_ext_schemas_connection_id', 'connection_id'),
         {'schema': 'metadata'}
     )
 
@@ -50,6 +57,8 @@ class ExternalColumn(AuditMixin, Base):
     __tablename__ = "external_columns"
     __table_args__ = (
         UniqueConstraint('table_id', 'column_name'),
+        # table_id is the primary filter for "all columns of table X"
+        Index('ix_ext_columns_table_id', 'table_id'),
         {'schema': 'metadata'}
     )
 

@@ -6,10 +6,10 @@ import asyncio
 import boto3
 from fastapi import APIRouter, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, desc
+from sqlalchemy import select, and_, desc, func
 from typing import List, Optional
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...core.auth import get_current_user
 from ...api.schemas.delta_sharing_schemas import (
     ShareCreate, ShareUpdate, ShareDetail,
@@ -152,6 +152,7 @@ async def create_share(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating share: {str(e)}"
@@ -171,6 +172,7 @@ async def get_share(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving share: {str(e)}"
@@ -191,6 +193,7 @@ async def update_share(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating share: {str(e)}"
@@ -210,6 +213,7 @@ async def delete_share(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting share: {str(e)}"
@@ -229,6 +233,7 @@ async def search_shares(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching shares: {str(e)}"
@@ -251,6 +256,7 @@ async def create_schema(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating schema: {str(e)}"
@@ -271,6 +277,7 @@ async def get_schema(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving schema: {str(e)}"
@@ -292,6 +299,7 @@ async def update_schema(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating schema: {str(e)}"
@@ -312,6 +320,7 @@ async def delete_schema(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting schema: {str(e)}"
@@ -332,6 +341,7 @@ async def search_schemas(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching schemas: {str(e)}"
@@ -355,6 +365,7 @@ async def create_table(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating table: {str(e)}"
@@ -376,6 +387,7 @@ async def get_table(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving table: {str(e)}"
@@ -398,6 +410,7 @@ async def update_table(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating table: {str(e)}"
@@ -419,6 +432,7 @@ async def delete_table(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting table: {str(e)}"
@@ -440,6 +454,7 @@ async def search_tables(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching tables: {str(e)}"
@@ -461,6 +476,7 @@ async def create_recipient(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating recipient: {str(e)}"
@@ -479,6 +495,7 @@ async def get_recipient(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving recipient: {str(e)}"
@@ -498,6 +515,7 @@ async def update_recipient(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating recipient: {str(e)}"
@@ -516,6 +534,7 @@ async def delete_recipient(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting recipient: {str(e)}"
@@ -534,6 +553,7 @@ async def search_recipients(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching recipients: {str(e)}"
@@ -553,6 +573,7 @@ async def regenerate_recipient_token(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error regenerating token: {str(e)}"
@@ -573,6 +594,7 @@ async def assign_shares_to_recipient(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error assigning shares: {str(e)}"
@@ -597,6 +619,7 @@ async def assign_recipients_to_share(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error assigning recipients: {str(e)}"
@@ -616,30 +639,42 @@ async def list_available_datasets(
     """
     try:
         datasets = []
-        
-        # Get Bronze configs with successful executions
+
+        # ── Bronze configs ─────────────────────────────────────────────────────
+        # Single query: configs + latest successful execution via LATERAL/subquery.
+        # Uses a correlated subquery ranked by finished_at DESC so we avoid N+1.
         if source_type is None or source_type == DatasetSourceType.BRONZE:
-            bronze_query = select(BronzePersistentConfig).where(
-                BronzePersistentConfig.last_execution_status == BronzeExecutionStatus.SUCCESS
+            # Subquery: pick the row with max finished_at per config_id
+            bronze_exec_sq = (
+                select(
+                    BronzeExecution.config_id,
+                    func.max(BronzeExecution.finished_at).label('max_finished_at'),
+                )
+                .where(BronzeExecution.status == BronzeExecutionStatus.SUCCESS)
+                .group_by(BronzeExecution.config_id)
+                .subquery()
+            )
+            bronze_query = (
+                select(BronzePersistentConfig, BronzeExecution)
+                .where(BronzePersistentConfig.last_execution_status == BronzeExecutionStatus.SUCCESS)
+                .outerjoin(
+                    bronze_exec_sq,
+                    bronze_exec_sq.c.config_id == BronzePersistentConfig.id,
+                )
+                .outerjoin(
+                    BronzeExecution,
+                    and_(
+                        BronzeExecution.config_id == BronzePersistentConfig.id,
+                        BronzeExecution.finished_at == bronze_exec_sq.c.max_finished_at,
+                        BronzeExecution.status == BronzeExecutionStatus.SUCCESS,
+                    ),
+                )
             )
             bronze_result = await db.execute(bronze_query)
-            bronze_configs = bronze_result.scalars().all()
-            
-            for config in bronze_configs:
-                # Get latest successful execution for output_path
-                exec_query = select(BronzeExecution).where(
-                    and_(
-                        BronzeExecution.config_id == config.id,
-                        BronzeExecution.status == BronzeExecutionStatus.SUCCESS
-                    )
-                ).order_by(desc(BronzeExecution.finished_at)).limit(1)
-                exec_result = await db.execute(exec_query)
-                latest_exec = exec_result.scalar_one_or_none()
-                
+            for config, latest_exec in bronze_result.fetchall():
                 output_path = None
                 if latest_exec and latest_exec.output_paths:
-                    output_path = latest_exec.output_paths[0] if latest_exec.output_paths else None
-                
+                    output_path = latest_exec.output_paths[0]
                 datasets.append(AvailableDataset(
                     config_id=config.id,
                     name=config.name,
@@ -649,28 +684,38 @@ async def list_available_datasets(
                     current_version=latest_exec.delta_version if latest_exec else None,
                     last_execution_status=config.last_execution_status,
                     last_execution_at=latest_exec.finished_at if latest_exec else None,
-                    total_rows=latest_exec.rows_ingested if latest_exec else None
+                    total_rows=latest_exec.rows_ingested if latest_exec else None,
                 ))
-        
-        # Get Silver configs with successful executions
+
+        # ── Silver configs ─────────────────────────────────────────────────────
         if source_type is None or source_type == DatasetSourceType.SILVER:
-            silver_query = select(TransformConfig).where(
-                TransformConfig.last_execution_status == TransformStatus.SUCCESS
+            silver_exec_sq = (
+                select(
+                    TransformExecution.config_id,
+                    func.max(TransformExecution.finished_at).label('max_finished_at'),
+                )
+                .where(TransformExecution.status == TransformStatus.SUCCESS)
+                .group_by(TransformExecution.config_id)
+                .subquery()
+            )
+            silver_query = (
+                select(TransformConfig, TransformExecution)
+                .where(TransformConfig.last_execution_status == TransformStatus.SUCCESS)
+                .outerjoin(
+                    silver_exec_sq,
+                    silver_exec_sq.c.config_id == TransformConfig.id,
+                )
+                .outerjoin(
+                    TransformExecution,
+                    and_(
+                        TransformExecution.config_id == TransformConfig.id,
+                        TransformExecution.finished_at == silver_exec_sq.c.max_finished_at,
+                        TransformExecution.status == TransformStatus.SUCCESS,
+                    ),
+                )
             )
             silver_result = await db.execute(silver_query)
-            silver_configs = silver_result.scalars().all()
-            
-            for config in silver_configs:
-                # Get latest successful execution
-                exec_query = select(TransformExecution).where(
-                    and_(
-                        TransformExecution.config_id == config.id,
-                        TransformExecution.status == TransformStatus.SUCCESS
-                    )
-                ).order_by(desc(TransformExecution.finished_at)).limit(1)
-                exec_result = await db.execute(exec_query)
-                latest_exec = exec_result.scalar_one_or_none()
-                
+            for config, latest_exec in silver_result.fetchall():
                 datasets.append(AvailableDataset(
                     config_id=config.id,
                     name=config.name,
@@ -680,11 +725,12 @@ async def list_available_datasets(
                     current_version=latest_exec.delta_version if latest_exec else None,
                     last_execution_status=config.last_execution_status,
                     last_execution_at=latest_exec.finished_at if latest_exec else None,
-                    total_rows=latest_exec.rows_output if latest_exec else None
+                    total_rows=latest_exec.rows_output if latest_exec else None,
                 ))
         
         return datasets
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error listing available datasets: {str(e)}"
@@ -866,6 +912,7 @@ async def create_table_from_bronze(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating table from Bronze: {str(e)}"
@@ -1005,7 +1052,6 @@ async def create_table_from_silver(
         
         db.add(db_table)
         await db.commit()
-        await db.refresh(db_table)
         
         return IntegrationTableDetail(
             table_id=db_table.id,
@@ -1026,6 +1072,7 @@ async def create_table_from_silver(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating table from Silver: {str(e)}"
@@ -1080,6 +1127,7 @@ async def get_bronze_dataset_info(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error getting Bronze config info: {str(e)}"
@@ -1130,6 +1178,7 @@ async def get_silver_dataset_info(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error getting Silver config info: {str(e)}"
@@ -1228,7 +1277,6 @@ async def create_table_from_bronze_virtualized(
 
         db.add(db_table)
         await db.commit()
-        await db.refresh(db_table)
 
         return IntegrationTableDetail(
             table_id=db_table.id,
@@ -1249,6 +1297,7 @@ async def create_table_from_bronze_virtualized(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating table from Bronze Virtualized: {str(e)}"
@@ -1345,7 +1394,6 @@ async def create_table_from_silver_virtualized(
 
         db.add(db_table)
         await db.commit()
-        await db.refresh(db_table)
 
         return IntegrationTableDetail(
             table_id=db_table.id,
@@ -1366,6 +1414,7 @@ async def create_table_from_silver_virtualized(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error creating table from Silver Virtualized: {str(e)}"
@@ -1431,7 +1480,6 @@ async def pin_delta_version(
 
         db_table.pinned_delta_version = body.delta_version
         await db.commit()
-        await db.refresh(db_table)
 
         # Build response using table_service helper
         schema_result = await db.execute(
@@ -1447,6 +1495,7 @@ async def pin_delta_version(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error pinning delta version: {str(e)}"
@@ -1474,7 +1523,6 @@ async def unpin_delta_version(
 
         db_table.pinned_delta_version = None
         await db.commit()
-        await db.refresh(db_table)
 
         return UnpinDeltaVersionResponse(
             message="Table version unpinned. Consumers will now receive the latest data.",
@@ -1485,6 +1533,7 @@ async def unpin_delta_version(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error unpinning delta version: {str(e)}"

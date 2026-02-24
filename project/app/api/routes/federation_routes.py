@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 import logging
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...core.auth import get_current_user
 from ..schemas.federation_schemas import (
     FederationCreate,
@@ -64,6 +64,7 @@ async def list_federations(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to list federations: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -91,6 +92,7 @@ async def create_federation(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to create federation: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -118,6 +120,7 @@ async def get_federation(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get federation: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -141,6 +144,7 @@ async def update_federation(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to update federation: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -166,6 +170,7 @@ async def delete_federation(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to delete federation: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -196,6 +201,7 @@ async def add_connections(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to add connections: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -222,6 +228,7 @@ async def remove_connection(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to remove connection: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -253,6 +260,7 @@ async def add_tables(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to add tables: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -280,6 +288,7 @@ async def remove_table(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to remove table: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

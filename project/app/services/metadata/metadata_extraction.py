@@ -5,7 +5,7 @@ from sqlalchemy.exc import IntegrityError
 from typing import Dict, Any, List, Optional
 from datetime import datetime
 
-from ...database.session import get_db
+from ...database.session import db_session
 from ...database.models import core
 from ...database.models import metadata
 from ...utils.logger import logger
@@ -194,265 +194,267 @@ async def _get_or_create_table(
 async def extract_metadata(connection_id: int) -> bool:
     """
     Extract metadata from a data connection and store it in the database.
-    Handles race conditions gracefully for concurrent syncs.
-    Tracks progress in sync_progress and sync_progress_details fields.
+
+    Uses the 3-phase connection pattern to avoid holding a DB connection
+    during the long Trino extraction (which can take 30–300 s):
+
+      Phase 1 — read config + mark RUNNING  (DB connection held briefly)
+      Phase 2 — Trino extraction            (NO DB connection held)
+      Phase 3 — batch-store results         (DB connection held briefly)
     """
+    # ── Phase 1: read connection config, mark as running ─────────────────────
+    connection_name = None
+    connection_type_name = None
+    connection_params_encrypted = None
+    content_type = None
+
     try:
-        # Create a new session
-        async for db in get_db():
-            try:
-                # Get connection details
-                result = await db.execute(
-                    select(core.DataConnection, core.ConnectionType).join(
-                        core.ConnectionType, 
-                        core.DataConnection.connection_type_id == core.ConnectionType.id
-                    ).where(
-                        core.DataConnection.id == connection_id
-                    )
-                )
+        async with db_session() as db:
+            result = await db.execute(
+                select(core.DataConnection, core.ConnectionType).join(
+                    core.ConnectionType,
+                    core.DataConnection.connection_type_id == core.ConnectionType.id
+                ).where(core.DataConnection.id == connection_id)
+            )
+            record = result.first()
 
-                record = result.first()
-                
-                if not record:
-                    logger.error(f"No connection found with ID {connection_id}")
-                    return False
-                    
-                connection = record[0]  # DataConnection
-                connection_type = record[1]  # ConnectionType
-                
-                # Validate that connection is not of type IMAGE
-                if connection.content_type == 'image':
-                    logger.error(f"Cannot extract metadata from connection {connection_id} of type 'image'")
-                    connection.sync_status = "failed"
-                    connection.status = "error"
-                    connection.sync_progress = 0
-                    connection.sync_progress_details = {"phase": "error", "message": "Cannot sync image connections"}
-                    await db.commit()
-                    return False
-                
-                # Update connection status - starting
-                connection.sync_status = "running"
+            if not record:
+                logger.error(f"No connection found with ID {connection_id}")
+                return False
+
+            connection = record[0]
+            connection_type = record[1]
+
+            if connection.content_type == 'image':
+                logger.error(f"Cannot extract metadata from image connection {connection_id}")
+                connection.sync_status = "failed"
+                connection.status = "error"
                 connection.sync_progress = 0
-                await _update_progress(db, connection, 0, "setup", "Initializing metadata extraction...")
-                
-                logger.info(f"Starting metadata extraction for connection {connection.name} ({connection_type.name})")
-                
-                # Use TrinoExtractor for all supported types
-                try:
-                    # Progress: 0-5% - Setup
-                    await _update_progress(db, connection, 2, "setup", "Creating Trino extractor...")
-                    
-                    # SEGURANÇA: Descriptografar credenciais antes de usar
-                    credential_service = get_credential_service()
-                    decrypted_params = credential_service.decrypt_for_use(
-                        connection.connection_params,
-                        connection_id=connection.id,
-                        purpose="metadata_extraction"
-                    )
-                    
-                    extractor = TrinoExtractor(
-                        connection_params=decrypted_params,
-                        connection_type=connection_type.name,
-                        connection_name=connection.name,
-                        connection_id=connection.id  # Pass ID for unique catalog name
-                    )
-                    
-                    await _update_progress(db, connection, 4, "setup", "Ensuring Trino catalog exists...")
-                    
-                    # Ensure catalog exists (async to not block event loop)
-                    await extractor.ensure_connection()
-                    
-                    await _update_progress(db, connection, 5, "setup", "Setup complete")
-                    
-                    # Progress: 5-15% - Extract Catalogs
-                    await _update_progress(db, connection, 6, "catalogs", "Extracting catalogs...")
-                    
-                    catalogs = await extractor.extract_catalogs()
-                    
-                    # Map catalog_name -> catalog_id
-                    catalog_map = {}
-                    total_catalogs = len(catalogs)
+                connection.sync_progress_details = {
+                    "phase": "error",
+                    "message": "Cannot sync image connections"
+                }
+                # db_session commits on exit
+                return False
 
-                    for i, cat_info in enumerate(catalogs):
-                        progress = 6 + int((i + 1) / max(total_catalogs, 1) * 9)  # 6-15%
-                        await _update_progress(
-                            db, connection, progress, "catalogs",
-                            f"Processing catalog: {cat_info['catalog_name']}",
-                            current_item=cat_info['catalog_name'],
-                            items_done=i + 1,
-                            total_items=total_catalogs
-                        )
-                        cat_id = await _get_or_create_catalog(db, connection.id, cat_info)
-                        catalog_map[cat_info["catalog_name"]] = cat_id
-                    
-                    # Progress: 15-50% - Extract all metadata in parallel using Trino
-                    await _update_progress(db, connection, 15, "extracting", "Extracting metadata in parallel...")
-                    
-                    # Use parallel extraction for better performance
-                    full_metadata = await extractor.extract_full_metadata()
-                    
-                    schemas = full_metadata["schemas"]
-                    schema_tables = full_metadata["tables"]
-                    all_columns = full_metadata["columns"]
-                    
-                    total_schemas = len(schemas)
-                    total_tables = sum(len(tables) for tables in schema_tables.values())
-                    logger.info(f"Extracted {total_schemas} schemas, {total_tables} tables in parallel")
-                    
-                    await _update_progress(db, connection, 50, "storing", "Storing metadata in database...")
-                    
-                    # Now store everything in the database
-                    tables_processed = 0
-                    
-                    for schema_idx, schema_info in enumerate(schemas):
-                        schema_name = schema_info["schema_name"]
-                        catalog_name = schema_info.get("catalog_name")
-                        catalog_id = catalog_map.get(catalog_name)
-                        
-                        # Progress: 50-70% for schemas and tables
-                        schema_progress = 50 + int((schema_idx + 1) / max(total_schemas, 1) * 20)
-                        await _update_progress(
-                            db, connection, schema_progress, "storing",
-                            f"Storing schema: {schema_name}",
-                            current_item=schema_name,
-                            items_done=schema_idx + 1,
-                            total_items=total_schemas
-                        )
-                        
-                        # Get or create schema (handles race conditions)
-                        schema_obj = await _get_or_create_schema(
-                            db, connection.id, catalog_id, schema_info
-                        )
-                        
-                        # Get tables for this schema from pre-extracted data
-                        tables = schema_tables.get(schema_name, [])
-                        
-                        for table_info in tables:
-                            tables_processed += 1
-                            table_name = table_info["table_name"]
-                            
-                            # Get or create table (handles race conditions)
-                            table_obj = await _get_or_create_table(
-                                db, schema_obj.id, connection.id, table_info
-                            )
-                            
-                            # Get columns from pre-extracted data
-                            columns = all_columns.get((schema_name, table_name), [])
-                            
-                            # Get existing columns for this table
-                            stmt_cols = select(metadata.ExternalColumn).where(
-                                metadata.ExternalColumn.table_id == table_obj.id
-                            )
-                            existing_cols = (await db.execute(stmt_cols)).scalars().all()
-                            existing_col_map = {c.column_name: c for c in existing_cols}
-                            
-                            for col_info in columns:
-                                col_name = col_info["column_name"]
-                                
-                                if col_name in existing_col_map:
-                                    # Update existing column
-                                    col_obj = existing_col_map[col_name]
-                                    col_obj.data_type = col_info["data_type"]
-                                    col_obj.is_nullable = col_info["is_nullable"]
-                                    col_obj.column_position = col_info.get("column_position", col_obj.column_position)
-                                    col_obj.external_reference = col_info.get("external_reference")
-                                    col_obj.sample_values = col_info.get("sample_values", [])
-                                    col_obj.max_length = col_info.get("max_length")
-                                    col_obj.numeric_precision = col_info.get("numeric_precision")
-                                    col_obj.numeric_scale = col_info.get("numeric_scale")
-                                    col_obj.is_primary_key = col_info.get("is_primary_key", False)
-                                    col_obj.is_unique = col_info.get("is_unique", False)
-                                    col_obj.is_indexed = col_info.get("is_indexed", False)
-                                    col_obj.default_value = col_info.get("default_value")
-                                    col_obj.description = col_info.get("description")
-                                    col_obj.statistics = col_info.get("statistics", {})
-                                    col_obj.properties = col_info.get("properties", {})
-                                else:
-                                    # Create new column
-                                    try:
-                                        col_obj = metadata.ExternalColumn(
-                                            table_id=table_obj.id,
-                                            column_name=col_name,
-                                            external_reference=col_info.get("external_reference"),
-                                            data_type=col_info["data_type"],
-                                            is_nullable=col_info["is_nullable"],
-                                            column_position=col_info["column_position"],
-                                            max_length=col_info.get("max_length"),
-                                            numeric_precision=col_info.get("numeric_precision"),
-                                            numeric_scale=col_info.get("numeric_scale"),
-                                            is_primary_key=col_info.get("is_primary_key", False),
-                                            is_unique=col_info.get("is_unique", False),
-                                            is_indexed=col_info.get("is_indexed", False),
-                                            default_value=col_info.get("default_value"),
-                                            description=col_info.get("description"),
-                                            statistics=col_info.get("statistics", {}),
-                                            sample_values=col_info.get("sample_values", []),
-                                            properties=col_info.get("properties", {})
-                                        )
-                                        db.add(col_obj)
-                                    except IntegrityError:
-                                        # Column already exists (race condition), skip
-                                        await db.rollback()
-                                        logger.debug(f"Column {col_name} already exists, skipping")
-                            
-                            # Progress: 70-99% for columns storage
-                            col_progress = 70 + int(tables_processed / max(total_tables, 1) * 29)
-                            col_progress = min(col_progress, 99)
-                            await _update_progress(
-                                db, connection, col_progress, "storing",
-                                f"Stored columns for: {schema_name}.{table_name}",
-                                current_item=f"{schema_name}.{table_name}",
-                                items_done=tables_processed,
-                                total_items=total_tables
-                            )
-                            
-                    # Complete!
-                    connection.sync_status = "success"
-                    connection.sync_progress = 100
-                    connection.sync_progress_details = {
-                        "phase": "complete",
-                        "message": "Metadata extraction completed successfully",
-                        "schemas_processed": total_schemas,
-                        "tables_processed": tables_processed,
-                        "completed_at": datetime.now().isoformat()
+            # Capture everything needed for Phase 2 as plain Python values
+            connection_name = connection.name
+            connection_type_name = connection_type.name
+            connection_params_encrypted = connection.connection_params
+            content_type = connection.content_type
+
+            connection.sync_status = "running"
+            connection.sync_progress = 5
+            connection.sync_progress_details = {
+                "phase": "setup",
+                "message": "Initializing metadata extraction...",
+                "updated_at": datetime.now().isoformat()
+            }
+            # db_session() commits and releases connection on exit
+    except Exception as e:
+        logger.error(f"Fatal error in extract_metadata (phase 1): {e}")
+        return False
+
+    # ── Phase 2: Trino extraction — NO DB connection held ────────────────────
+    extractor = None
+    catalogs = []
+    full_metadata: dict = {"schemas": [], "tables": {}, "columns": {}}
+
+    try:
+        credential_service = get_credential_service()
+        decrypted_params = credential_service.decrypt_for_use(
+            connection_params_encrypted,
+            connection_id=connection_id,
+            purpose="metadata_extraction"
+        )
+
+        extractor = TrinoExtractor(
+            connection_params=decrypted_params,
+            connection_type=connection_type_name,
+            connection_name=connection_name,
+            connection_id=connection_id
+        )
+
+        await extractor.ensure_connection()
+        catalogs = await extractor.extract_catalogs()
+        full_metadata = await extractor.extract_full_metadata()
+
+        logger.info(
+            f"Trino extraction done for {connection_name}: "
+            f"{len(full_metadata['schemas'])} schemas, "
+            f"{sum(len(t) for t in full_metadata['tables'].values())} tables"
+        )
+
+    except Exception as ext_error:
+        logger.error(f"Error during Trino extraction for {connection_name}: {ext_error}")
+        # Phase 3-error: mark failed
+        try:
+            async with db_session() as db:
+                res = await db.execute(
+                    select(core.DataConnection).where(core.DataConnection.id == connection_id)
+                )
+                conn_obj = res.scalar_one_or_none()
+                if conn_obj:
+                    conn_obj.sync_status = "failed"
+                    conn_obj.status = "error"
+                    conn_obj.sync_progress_details = {
+                        "phase": "error",
+                        "message": f"Extraction failed: {ext_error}",
+                        "failed_at": datetime.now().isoformat()
                     }
-                    connection.last_sync_time = datetime.now()
-                    connection.status = "active"
-                    await db.commit()
-                    logger.info(f"Metadata extraction completed successfully for {connection.name}")
-                    return True
-                    
-                except Exception as ext_error:
-                    logger.error(f"Error during extraction logic: {str(ext_error)}")
-                    try:
-                        await db.rollback()
-                    except:
-                        pass
-                    # Try to update connection status in a fresh transaction
-                    try:
-                        connection.sync_status = "failed"
-                        connection.status = "error"
+        except Exception:
+            pass
+        return False
+    finally:
+        if extractor:
+            await extractor.close()
+
+    # ── Phase 3: batch-store results ─────────────────────────────────────────
+    schemas = full_metadata["schemas"]
+    schema_tables = full_metadata["tables"]
+    all_columns = full_metadata["columns"]
+    total_schemas = len(schemas)
+    total_tables = sum(len(t) for t in schema_tables.values())
+
+    try:
+        async with db_session() as db:
+            # Re-fetch the connection object for mutation
+            res = await db.execute(
+                select(core.DataConnection).where(core.DataConnection.id == connection_id)
+            )
+            connection = res.scalar_one_or_none()
+            if not connection:
+                return False
+
+            # Store catalogs
+            catalog_map: dict[str, int] = {}
+            for cat_info in catalogs:
+                cat_id = await _get_or_create_catalog(db, connection_id, cat_info)
+                catalog_map[cat_info["catalog_name"]] = cat_id
+            await db.flush()
+
+            # Store schemas, tables and columns in one transaction
+            tables_processed = 0
+            PROGRESS_BATCH = 10  # update progress every N tables (reduces commits)
+
+            for schema_idx, schema_info in enumerate(schemas):
+                schema_name = schema_info["schema_name"]
+                catalog_id = catalog_map.get(schema_info.get("catalog_name"))
+
+                schema_obj = await _get_or_create_schema(
+                    db, connection_id, catalog_id, schema_info
+                )
+                await db.flush()
+
+                for table_info in schema_tables.get(schema_name, []):
+                    tables_processed += 1
+                    table_name = table_info["table_name"]
+
+                    table_obj = await _get_or_create_table(
+                        db, schema_obj.id, connection_id, table_info
+                    )
+                    await db.flush()
+
+                    columns = all_columns.get((schema_name, table_name), [])
+                    stmt_cols = select(metadata.ExternalColumn).where(
+                        metadata.ExternalColumn.table_id == table_obj.id
+                    )
+                    existing_col_map = {
+                        c.column_name: c
+                        for c in (await db.execute(stmt_cols)).scalars().all()
+                    }
+
+                    for col_info in columns:
+                        col_name = col_info["column_name"]
+                        if col_name in existing_col_map:
+                            col_obj = existing_col_map[col_name]
+                            col_obj.data_type = col_info["data_type"]
+                            col_obj.is_nullable = col_info["is_nullable"]
+                            col_obj.column_position = col_info.get("column_position", col_obj.column_position)
+                            col_obj.external_reference = col_info.get("external_reference")
+                            col_obj.sample_values = col_info.get("sample_values", [])
+                            col_obj.max_length = col_info.get("max_length")
+                            col_obj.numeric_precision = col_info.get("numeric_precision")
+                            col_obj.numeric_scale = col_info.get("numeric_scale")
+                            col_obj.is_primary_key = col_info.get("is_primary_key", False)
+                            col_obj.is_unique = col_info.get("is_unique", False)
+                            col_obj.is_indexed = col_info.get("is_indexed", False)
+                            col_obj.default_value = col_info.get("default_value")
+                            col_obj.description = col_info.get("description")
+                            col_obj.statistics = col_info.get("statistics", {})
+                            col_obj.properties = col_info.get("properties", {})
+                        else:
+                            try:
+                                db.add(metadata.ExternalColumn(
+                                    table_id=table_obj.id,
+                                    column_name=col_name,
+                                    external_reference=col_info.get("external_reference"),
+                                    data_type=col_info["data_type"],
+                                    is_nullable=col_info["is_nullable"],
+                                    column_position=col_info["column_position"],
+                                    max_length=col_info.get("max_length"),
+                                    numeric_precision=col_info.get("numeric_precision"),
+                                    numeric_scale=col_info.get("numeric_scale"),
+                                    is_primary_key=col_info.get("is_primary_key", False),
+                                    is_unique=col_info.get("is_unique", False),
+                                    is_indexed=col_info.get("is_indexed", False),
+                                    default_value=col_info.get("default_value"),
+                                    description=col_info.get("description"),
+                                    statistics=col_info.get("statistics", {}),
+                                    sample_values=col_info.get("sample_values", []),
+                                    properties=col_info.get("properties", {})
+                                ))
+                            except IntegrityError:
+                                await db.rollback()
+                                logger.debug(f"Column {col_name} already exists, skipping")
+
+                    # Batch progress update: commit every PROGRESS_BATCH tables
+                    # instead of once per table, reducing DB round-trips by 10×
+                    if tables_processed % PROGRESS_BATCH == 0:
+                        progress = 50 + int(tables_processed / max(total_tables, 1) * 49)
+                        connection.sync_progress = min(progress, 99)
                         connection.sync_progress_details = {
-                            "phase": "error",
-                            "message": f"Extraction failed: {str(ext_error)}",
-                            "failed_at": datetime.now().isoformat()
+                            "phase": "storing",
+                            "message": f"Stored {tables_processed}/{total_tables} tables",
+                            "items_done": tables_processed,
+                            "total_items": total_tables,
+                            "updated_at": datetime.now().isoformat()
                         }
                         await db.commit()
-                    except:
-                        pass
-                    return False
-                finally:
-                    if 'extractor' in locals():
-                        await extractor.close()
 
-            except Exception as e:
-                logger.error(f"Database error during metadata extraction: {str(e)}")
-                try:
-                    await db.rollback()
-                except:
-                    pass
-                return False
-                
+            # Final commit with success status
+            connection.sync_status = "success"
+            connection.sync_progress = 100
+            connection.sync_progress_details = {
+                "phase": "complete",
+                "message": "Metadata extraction completed successfully",
+                "schemas_processed": total_schemas,
+                "tables_processed": tables_processed,
+                "completed_at": datetime.now().isoformat()
+            }
+            connection.last_sync_time = datetime.now()
+            connection.status = "active"
+            # db_session() commits on exit
+
+        logger.info(f"Metadata extraction completed for {connection_name}")
+        return True
+
     except Exception as e:
-        logger.error(f"Fatal error in extract_metadata: {str(e)}")
+        logger.error(f"Fatal error in extract_metadata (phase 3): {e}")
+        try:
+            async with db_session() as db:
+                res = await db.execute(
+                    select(core.DataConnection).where(core.DataConnection.id == connection_id)
+                )
+                conn_obj = res.scalar_one_or_none()
+                if conn_obj:
+                    conn_obj.sync_status = "failed"
+                    conn_obj.status = "error"
+                    conn_obj.sync_progress_details = {
+                        "phase": "error",
+                        "message": f"Store failed: {e}",
+                        "failed_at": datetime.now().isoformat()
+                    }
+        except Exception:
+            pass
         return False
