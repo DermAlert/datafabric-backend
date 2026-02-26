@@ -12,6 +12,7 @@ Configuration via environment variables:
     LLM_MODEL: Model name (default: gpt-4o-mini)
     LLM_MAX_CONCURRENT: Max concurrent LLM calls (default: 10)
     LLM_MAX_RETRIES: Max retries per row on transient errors (default: 5)
+    LLM_REQUEST_TIMEOUT: HTTP read timeout in seconds per LLM call (default: 120)
 """
 
 import os
@@ -21,6 +22,7 @@ import logging
 from typing import Any, Optional
 from enum import Enum
 
+import httpx
 from pydantic import BaseModel, Field, create_model
 from pydantic_ai import Agent
 from pydantic_ai.models.openai import OpenAIChatModel
@@ -71,6 +73,11 @@ class LLMExtractionService:
         self.model_name = os.getenv("LLM_MODEL", "gpt-4o-mini")
         self.max_concurrent = int(os.getenv("LLM_MAX_CONCURRENT", "10"))
         self.max_retries = int(os.getenv("LLM_MAX_RETRIES", "5"))
+        # Maximum seconds to wait for a single LLM HTTP response.
+        # Without this, a hung API connection (accepts TCP but stops sending data)
+        # will block the asyncio task indefinitely, eventually filling all
+        # semaphore slots and freezing the entire Silver job for hours.
+        self.request_timeout = float(os.getenv("LLM_REQUEST_TIMEOUT", "120"))
 
         if not self.api_key:
             logger.warning(
@@ -89,11 +96,20 @@ class LLMExtractionService:
                     "LLM_API_KEY environment variable is not set. "
                     "Configure it in your .env file to use LLM extraction features."
                 )
+            http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(
+                    connect=10.0,
+                    read=self.request_timeout,
+                    write=10.0,
+                    pool=10.0,
+                )
+            )
             self._model = OpenAIChatModel(
                 self.model_name,
                 provider=OpenAIProvider(
                     base_url=self.base_url,
                     api_key=self.api_key,
+                    http_client=http_client,
                 ),
             )
         return self._model
@@ -181,10 +197,15 @@ class LLMExtractionService:
             instructions=system_prompt,
         )
 
+        # asyncio-level guard: if the httpx timeout somehow doesn't fire
+        # (e.g. the library swallows it), this ensures the coroutine is
+        # cancelled after request_timeout + a 10s grace period.
+        _task_deadline = self.request_timeout + 10.0
+
         last_error = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                result = await agent.run(text)
+                result = await asyncio.wait_for(agent.run(text), timeout=_task_deadline)
                 value = result.output.result
 
                 # Convert enum to its string value

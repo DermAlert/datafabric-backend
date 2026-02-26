@@ -51,7 +51,9 @@ RUN pip install --no-cache-dir \
     boto3 \
     pyarrow \
     unicodedata2 \
-    pandas
+    pandas \
+    azure-storage-blob \
+    google-cloud-storage
 
 WORKDIR ${SPARK_HOME}
 

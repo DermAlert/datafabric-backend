@@ -108,41 +108,62 @@ class BronzeIngestionService:
             logger.warning(f"Could not ensure bronze bucket exists: {e}")
     
     async def _ensure_bronze_schema_async(self):
-        """Create the bronze schema in Trino if it doesn't exist (async)"""
+        """Create the bronze catalog and schema in Trino if they don't exist (async).
+
+        Because Trino uses ``catalog.store=memory``, catalogs are lost on every
+        restart.  This method auto-creates the Bronze Delta catalog via
+        ``TrinoManager.ensure_internal_delta_catalog_async`` before checking the
+        schema, so callers never need to pre-provision the catalog manually.
+        """
         try:
             conn = await self.trino.get_connection()
             cur = await conn.cursor()
-            
-            # First check if bronze catalog exists
+
+            # Check if bronze catalog exists; create it on-the-fly if not.
+            # Trino uses catalog.store=memory, so catalogs are lost on restart.
             await cur.execute(f"SHOW CATALOGS LIKE '{self.bronze_catalog}'")
             catalogs = await cur.fetchall()
-            
+
             if not catalogs:
-                logger.error(f"Bronze catalog '{self.bronze_catalog}' does not exist in Trino! "
-                            f"Make sure bronze.properties is configured in trino/catalog/")
+                logger.info(
+                    f"Bronze catalog '{self.bronze_catalog}' not found — creating dynamically."
+                )
                 await conn.close()
-                return
-            
+                created = await self.trino.ensure_internal_delta_catalog_async(
+                    self.bronze_catalog
+                )
+                if not created:
+                    logger.error(
+                        f"Could not create Bronze catalog '{self.bronze_catalog}'. "
+                        f"Bronze ingestion via Trino will fail."
+                    )
+                    return
+                # Re-open connection on the newly created catalog
+                conn = await self.trino.get_connection()
+                cur = await conn.cursor()
+
             # Check if schema exists
-            await cur.execute(f"SHOW SCHEMAS FROM {self.bronze_catalog} LIKE '{self.bronze_schema}'")
+            await cur.execute(
+                f"SHOW SCHEMAS FROM {self.bronze_catalog} LIKE '{self.bronze_schema}'"
+            )
             schemas = await cur.fetchall()
-            
+
             if not schemas:
-                # Create schema with location pointing to bronze bucket
-                create_schema_sql = f"""
-                    CREATE SCHEMA IF NOT EXISTS {self.bronze_catalog}.{self.bronze_schema}
-                    WITH (location = 's3a://{self.bronze_bucket}/')
-                """
-                logger.info(f"Creating bronze schema with SQL: {create_schema_sql}")
+                create_schema_sql = (
+                    f"CREATE SCHEMA IF NOT EXISTS "
+                    f"{self.bronze_catalog}.{self.bronze_schema} "
+                    f"WITH (location = 's3a://{self.bronze_bucket}/')"
+                )
+                logger.info(f"Creating Bronze schema: {self.bronze_catalog}.{self.bronze_schema}")
                 await cur.execute(create_schema_sql)
-                await cur.fetchall()  # Consume result
-                logger.info(f"Created bronze schema: {self.bronze_catalog}.{self.bronze_schema}")
+                await cur.fetchall()
+                logger.info(f"Created Bronze schema: {self.bronze_catalog}.{self.bronze_schema}")
             else:
                 logger.debug(f"Bronze schema already exists: {self.bronze_catalog}.{self.bronze_schema}")
-            
+
             await conn.close()
         except Exception as e:
-            logger.error(f"Failed to ensure bronze schema exists: {e}")
+            logger.error(f"Failed to ensure Bronze schema exists: {e}")
     
     def _ensure_bronze_schema(self):
         """Sync wrapper for _ensure_bronze_schema_async (called at init)"""
@@ -2311,6 +2332,224 @@ AS
             logger.error(f"Virtualized query failed: {str(e)}")
             raise
     
+    async def _get_image_columns(self, table_ids: List[int]) -> List[Dict[str, Any]]:
+        """Finds image columns for the given table IDs."""
+        if not table_ids:
+            return []
+        
+        query = select(
+            ExternalColumn.column_name,
+            ExternalColumn.image_connection_id
+        ).where(
+            and_(
+                ExternalColumn.table_id.in_(table_ids),
+                ExternalColumn.is_image_path == True,
+                ExternalColumn.image_connection_id.isnot(None)
+            )
+        )
+        result = await self.db.execute(query)
+        rows = result.fetchall()
+        return [{"column_name": r.column_name, "image_connection_id": r.image_connection_id} for r in rows]
+
+    async def _distributed_spark_image_copy(
+        self,
+        spark,
+        df,
+        column_name: str,
+        connection_id: int,
+        dataset_folder: str,
+        bronze_bucket: str
+    ) -> int:
+        """
+        Extracts unique image paths from a column and uses Spark workers to stream the copy.
+        Optimized for production using MapPartitions for distributed batch processing.
+        """
+        from pyspark.sql.functions import col
+        import os
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+        
+        # Get connection credentials dynamically from DB
+        from app.services.infrastructure.credential_service import get_credential_service
+        credential_service = get_credential_service()
+        
+        conn_query = select(DataConnection, ConnectionType.name.label('type_name')).join(
+            ConnectionType, DataConnection.connection_type_id == ConnectionType.id
+        ).where(DataConnection.id == connection_id)
+        
+        result = await self.db.execute(conn_query)
+        conn_data = result.first()
+        if not conn_data:
+            logger.error(f"Image connection {connection_id} not found")
+            return 0
+            
+        connection, conn_type = conn_data
+        
+        params = credential_service.decrypt_for_use(
+            connection.connection_params,
+            connection_id=connection_id,
+            purpose="spark_image_copy"
+        )
+        
+        # Bronze MinIO credentials
+        bronze_endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+        bronze_access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
+        bronze_secret_key = os.getenv("MINIO_SECRET_KEY", "minio123")
+        bronze_secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
+        
+        # Extract unique paths (skip nulls)
+        # Using coalesce/repartition ensures we distribute the workload appropriately
+        paths_df = df.select(col(column_name)).distinct().dropna()
+        
+        # Pass primitives to workers, not complex objects
+        worker_params = {
+            'conn_type': conn_type,
+            'source_params': params,
+            'bronze_endpoint': bronze_endpoint,
+            'bronze_access_key': bronze_access_key,
+            'bronze_secret_key': bronze_secret_key,
+            'bronze_secure': bronze_secure,
+            'bronze_bucket': bronze_bucket,
+            'dataset_folder': dataset_folder,
+            'column_name': column_name
+        }
+        
+        # This function runs on the Spark Workers!
+        def copy_partition(iterator):
+            import os
+            import tempfile
+            
+            w_params = worker_params
+            
+            import boto3
+            from botocore.config import Config
+            
+            # Destination client
+            dest_endpoint = f"{'https' if w_params['bronze_secure'] else 'http'}://{w_params['bronze_endpoint']}"
+            dest_client = boto3.client(
+                's3',
+                endpoint_url=dest_endpoint,
+                aws_access_key_id=w_params['bronze_access_key'],
+                aws_secret_access_key=w_params['bronze_secret_key'],
+                config=Config(signature_version='s3v4')
+            )
+            
+            # Source client setup
+            source_client = None
+            c_type = w_params['conn_type'].lower()
+            s_params = w_params['source_params']
+            
+            if 's3' in c_type or 'minio' in c_type or 'delta' in c_type:
+                s_endpoint = s_params.get('endpoint')
+                if s_endpoint and not s_endpoint.startswith('http'):
+                    s_secure = s_params.get('secure', False)
+                    s_endpoint = f"{'https' if s_secure else 'http'}://{s_endpoint}"
+                
+                source_client = boto3.client(
+                    's3',
+                    endpoint_url=s_endpoint,
+                    aws_access_key_id=s_params.get('access_key'),
+                    aws_secret_access_key=s_params.get('secret_key'),
+                    region_name=s_params.get('region', 'us-east-1'),
+                    config=Config(signature_version='s3v4')
+                )
+            elif 'azure' in c_type:
+                try:
+                    from azure.storage.blob import BlobServiceClient
+                    conn_str = s_params.get('connection_string')
+                    if conn_str:
+                        source_client = BlobServiceClient.from_connection_string(conn_str)
+                    else:
+                        acc_url = s_params.get('account_url')
+                        acc_key = s_params.get('account_key')
+                        source_client = BlobServiceClient(account_url=acc_url, credential=acc_key)
+                except ImportError:
+                    print("ERROR: azure-storage-blob is required on Spark workers for Azure connections")
+                    return [0]
+            elif 'gcs' in c_type or 'google' in c_type:
+                try:
+                    from google.cloud import storage
+                    credentials_json = s_params.get('credentials_json')
+                    if credentials_json:
+                        import json
+                        from google.oauth2 import service_account
+                        creds = service_account.Credentials.from_service_account_info(json.loads(credentials_json))
+                        source_client = storage.Client(credentials=creds)
+                    else:
+                        source_client = storage.Client()
+                except ImportError:
+                    print("ERROR: google-cloud-storage is required on Spark workers for GCS connections")
+                    return [0]
+                    
+            if not source_client:
+                print(f"Unsupported connection type: {c_type}")
+                return [0]
+                
+            copied_count = 0
+            
+            for row in iterator:
+                image_path = row[w_params['column_name']]
+                if not image_path:
+                    continue
+                
+                s_bucket = s_params.get('bucket_name') or s_params.get('container_name')
+                s_key = str(image_path)
+                
+                if s_key.startswith('s3://') or s_key.startswith('gs://'):
+                    parts = s_key.split('//')[1].split('/', 1)
+                    s_bucket = parts[0]
+                    s_key = parts[1] if len(parts) > 1 else ""
+                else:
+                    s_key = s_key.strip('/')
+                    
+                if not s_bucket or not s_key:
+                    continue
+                    
+                filename = os.path.basename(s_key)
+                dest_key = f"{w_params['dataset_folder']}/images/{filename}"
+                
+                try:
+                    if 's3' in c_type or 'minio' in c_type or 'delta' in c_type:
+                        # Stream object efficiently via boto3
+                        response = source_client.get_object(Bucket=s_bucket, Key=s_key)
+                        dest_client.upload_fileobj(response['Body'], w_params['bronze_bucket'], dest_key)
+                    
+                    elif 'azure' in c_type:
+                        blob_client = source_client.get_blob_client(container=s_bucket, blob=s_key)
+                        with tempfile.SpooledTemporaryFile(max_size=10*1024*1024) as tmp:
+                            blob_client.download_blob().readinto(tmp)
+                            tmp.seek(0)
+                            dest_client.upload_fileobj(tmp, w_params['bronze_bucket'], dest_key)
+                            
+                    elif 'gcs' in c_type or 'google' in c_type:
+                        bucket = source_client.bucket(s_bucket)
+                        blob = bucket.blob(s_key)
+                        with tempfile.SpooledTemporaryFile(max_size=10*1024*1024) as tmp:
+                            blob.download_to_file(tmp)
+                            tmp.seek(0)
+                            dest_client.upload_fileobj(tmp, w_params['bronze_bucket'], dest_key)
+                            
+                    copied_count += 1
+                except Exception as e:
+                    print(f"Error copying image {image_path}: {e}")
+            
+            yield copied_count
+
+        try:
+            loop = asyncio.get_event_loop()
+            def run_spark_job():
+                # Trigger the map partitions and collect sum of copied images
+                counts = paths_df.rdd.mapPartitions(copy_partition).collect()
+                return sum(counts)
+                
+            with ThreadPoolExecutor(max_workers=1) as exec:
+                total_copied = await loop.run_in_executor(exec, run_spark_job)
+                
+            return total_copied
+        except Exception as e:
+            logger.error(f"Spark distributed image copy failed: {e}")
+            return 0
+
     async def execute_persistent_config_with_versioning(
         self,
         config_id: int,
@@ -2461,6 +2700,44 @@ AS
                         f"Loaded Spark DataFrame via Trino JDBC with schema: {df.schema}"
                     )
 
+                    # --- ADD BRONZE IMAGE PATH COLUMNS ---
+                    dataset_folder = f"{config_id}-{safe_config_name}"
+                    
+                    table_ids = []
+                    for t in group_preview.tables:
+                        if hasattr(t, 'table_id') and t.table_id:
+                            table_ids.append(t.table_id)
+                        elif isinstance(t, dict) and 'table_id' in t:
+                            table_ids.append(t['table_id'])
+                            
+                    image_columns = await self._get_image_columns(table_ids) if table_ids else []
+                    
+                    if image_columns:
+                        try:
+                            from pyspark.sql.functions import col, concat, lit, substring_index, when
+                            for img_col in image_columns:
+                                col_name = img_col['column_name']
+                                df_cols_lower = [c.lower() for c in df.columns]
+                                if col_name.lower() in df_cols_lower:
+                                    actual_col_name = next(c for c in df.columns if c.lower() == col_name.lower())
+                                    new_col_name = f"_{actual_col_name}_bronze_path"
+                                    logger.info(f"Adding new Bronze path column '{new_col_name}' for '{actual_col_name}'")
+                                    df = df.withColumn(
+                                        new_col_name,
+                                        when(
+                                            col(actual_col_name).isNotNull() & (col(actual_col_name) != ""),
+                                            concat(
+                                                lit(f"s3a://{bucket}/{dataset_folder}/images/"),
+                                                substring_index(col(actual_col_name), '/', -1)
+                                            )
+                                        ).otherwise(lit(None))
+                                    )
+                                else:
+                                    logger.warning(f"Image column {col_name} not found in df.columns: {df.columns}")
+                        except Exception as e:
+                            logger.error(f"Error appending Bronze image paths to DataFrame: {e}")
+                    # -------------------------------------
+
                     # Write to Delta Lake (always overwrite)
                     stats = await versioning_service.execute_overwrite(
                         spark=spark,
@@ -2473,6 +2750,28 @@ AS
                         f"Wrote {rows_written} rows for group "
                         f"{group_preview.group_name} → {group_output_path}"
                     )
+
+                    # --- DISTRIBUTED IMAGE COPY VIA SPARK ---
+                    try:
+                        if image_columns:
+                            logger.info(f"Found {len(image_columns)} image column(s) to copy via Spark workers")
+                            for img_col in image_columns:
+                                col_name = img_col['column_name']
+                                if col_name in df.columns:
+                                    copied = await self._distributed_spark_image_copy(
+                                        spark=spark,
+                                        df=df,
+                                        column_name=col_name,
+                                        connection_id=img_col['image_connection_id'],
+                                        dataset_folder=dataset_folder,
+                                        bronze_bucket=bucket
+                                    )
+                                    logger.info(f"Copied {copied} images for column {col_name}")
+                    except Exception as img_err:
+                        logger.warning(f"Failed to copy images using Spark: {img_err}")
+                        import traceback
+                        logger.warning(traceback.format_exc())
+                    # ----------------------------------------
 
                     # Track per-path Delta version (only paths actually written)
                     path_delta_versions[group_output_path] = stats.get('delta_version', 0)

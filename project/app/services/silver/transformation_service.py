@@ -98,10 +98,8 @@ class SilverTransformationService:
     async def _ensure_silver_bucket(self, bucket_name: str = None):
         """Create the Silver bucket if it doesn't exist asynchronously using aioboto3."""
         bucket = bucket_name or self.silver_bucket
-        import aioboto3
-        import os
-        
         try:
+            import aioboto3
             endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
             if not endpoint.startswith("http"):
                 secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
@@ -1582,75 +1580,81 @@ class SilverTransformationService:
             col_expr = f'{alias}."{col_info["column_name"]}"'
             output_name = col_info['column_name']
             
-            # Apply transformations (from config) - supports multiple transforms per column
-            if col_id in transformations:
-                for t in transformations[col_id]:
+            # Save the raw column expression before any transformation so that
+            # value mappings can be applied to the original Bronze values.
+            col_expr_raw = col_expr
+
+            # Helper: apply all configured transformations to any SQL expression.
+            def _apply_trans(expr: str, cid=col_id) -> str:
+                if cid not in transformations:
+                    return expr
+                for t in transformations[cid]:
                     trans_type = t.get('type', '')
-                    
-                    # Rule-based transformations (template)
                     if trans_type == 'template' and t.get('rule_id'):
-                        col_expr = apply_normalization_rule(col_expr, t['rule_id'])
+                        expr = apply_normalization_rule(expr, t['rule_id'])
                     elif t.get('rule_id'):
-                        # Fallback: if rule_id provided, use it
-                        col_expr = apply_normalization_rule(col_expr, t['rule_id'])
-                    
-                    # SQL text transformations
+                        expr = apply_normalization_rule(expr, t['rule_id'])
                     elif trans_type == 'lowercase':
-                        col_expr = f"LOWER({col_expr})"
+                        expr = f"LOWER({expr})"
                     elif trans_type == 'uppercase':
-                        col_expr = f"UPPER({col_expr})"
+                        expr = f"UPPER({expr})"
                     elif trans_type == 'trim':
-                        col_expr = f"TRIM({col_expr})"
+                        expr = f"TRIM({expr})"
                     elif trans_type == 'normalize_spaces':
-                        # Replace multiple spaces with single space, then trim
-                        col_expr = f"TRIM(regexp_replace({col_expr}, '\\s+', ' '))"
+                        expr = f"TRIM(regexp_replace({expr}, '\\s+', ' '))"
                     elif trans_type == 'remove_accents':
-                        # Trino translate() for common accents
-                        col_expr = f"translate({col_expr}, 'áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')"
-            
+                        expr = f"translate({expr}, 'áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')"
+                return expr
+
+            # col_expr for source-column output: transformations on the raw value
+            # (mapping intentionally not applied here — mapping is only for the unified output)
+            col_expr = _apply_trans(col_expr_raw)
+
             # Check if this column should be unified
             # Priority: 1) Equivalence groups (explicit), 2) JOIN columns (automatic)
             if col_id in unified_columns:
                 # Explicit unification from Equivalence module
                 unified_name = unified_columns[col_id]
-                
+
                 # Track that this column is a source of unification
                 unified_source_column_names.add(output_name)
-                
-                # Apply value mapping before unification (from Equivalence)
-                col_expr_with_mapping = build_col_expr_with_mapping(col_expr, col_id)
-                
+
+                # Equivalence mapping on the RAW value, then transformations on top.
+                # This guarantees 'CARDIOLOGIA' → 'Cardiologia' is evaluated before
+                # any casing/normalisation rule changes the source value.
+                col_expr_with_mapping = _apply_trans(build_col_expr_with_mapping(col_expr_raw, col_id))
+
                 if unified_name not in columns_for_unification:
                     columns_for_unification[unified_name] = []
                 columns_for_unification[unified_name].append(col_expr_with_mapping)
-                
+
                 # If NOT excluding source columns, also add the original column
                 if not exclude_source_columns:
                     # Keep source columns untouched; apply Equivalence mapping only to unified output
                     select_columns.append(f'{col_expr} AS "{output_name}"')
                     output_columns.append(output_name)
-                    
+
             elif col_id in join_column_unification:
                 # Automatic unification for JOIN columns
                 unified_name = join_column_unification[col_id]
-                
+
                 # Track that this column is a source of unification
                 unified_source_column_names.add(output_name)
-                
-                # Apply value mapping if any
-                col_expr_with_mapping = build_col_expr_with_mapping(col_expr, col_id)
-                
+
+                # Same order: mapping on raw, then transforms
+                col_expr_with_mapping = _apply_trans(build_col_expr_with_mapping(col_expr_raw, col_id))
+
                 if unified_name not in columns_for_unification:
                     columns_for_unification[unified_name] = []
                 columns_for_unification[unified_name].append(col_expr_with_mapping)
-                
+
                 # JOIN columns are always unified (no separate column for each source)
                 # This is the expected behavior - we don't want t0.isic_id, t1.isic_id separately
-                
+
             else:
-                # Regular column (not unified)
-                col_expr = build_col_expr_with_mapping(col_expr, col_id)
-                
+                # Regular column (not unified): mapping on raw, then transforms
+                col_expr = _apply_trans(build_col_expr_with_mapping(col_expr_raw, col_id))
+
                 select_columns.append(f'{col_expr} AS "{output_name}"')
                 output_columns.append(output_name)
         
@@ -3275,11 +3279,13 @@ class SilverTransformationService:
         # Apply PRE-FILTERS on original Bronze data
         df = self._apply_spark_filters(df, transform_config, bronze_info)
 
-        # Apply column_transformations (resolves column_id → bronze_column_name)
-        df = self._apply_column_transformations(df, transform_config, bronze_info)
-
-        # Apply column_group_ids from Equivalence module
+        # Apply Equivalence FIRST on original Bronze data so value mappings
+        # match raw source values (e.g. 'CARDIOLOGIA' → 'Cardiologia') before
+        # any casing/normalization transformation mutates those values.
         df = self._apply_equivalence_groups(df, transform_config, bronze_info)
+
+        # Apply column_transformations after equivalence
+        df = self._apply_column_transformations(df, transform_config, bronze_info)
 
         # Apply POST-TRANSFORM FILTERS on transformed/unified data
         post_transform_filters = transform_config.get('post_transform_filters')
@@ -3788,6 +3794,26 @@ class SilverTransformationService:
                         if bronze_col != unified_name:  # Don't drop if same name
                             columns_to_drop.add(bronze_col)
                             
+                # --- Unify _bronze_path dynamically if they exist ---
+                bronze_path_cols = [f"_{c}_bronze_path" for c in bronze_cols if f"_{c}_bronze_path" in df.columns]
+                if len(bronze_path_cols) > 1:
+                    unified_path_name = f"_{unified_name}_bronze_path"
+                    coalesce_inputs_paths = [F.col(c) for c in bronze_path_cols]
+                    df = df.withColumn(unified_path_name, F.coalesce(*coalesce_inputs_paths))
+                    logger.info(f"Unified image path columns {bronze_path_cols} into '{unified_path_name}'")
+                    if exclude_source_columns:
+                        for path_col in bronze_path_cols:
+                            if path_col != unified_path_name:
+                                columns_to_drop.add(path_col)
+                elif len(bronze_path_cols) == 1:
+                    path_col = bronze_path_cols[0]
+                    unified_path_name = f"_{unified_name}_bronze_path"
+                    if path_col != unified_path_name:
+                        df = df.withColumn(unified_path_name, F.col(path_col))
+                        logger.info(f"Aliased image path column {path_col} as '{unified_path_name}'")
+                        if exclude_source_columns:
+                            columns_to_drop.add(path_col)
+                            
             elif len(col_infos) == 1:
                 # Single column - just alias
                 bronze_col = col_infos[0]['bronze_col']
@@ -3799,6 +3825,15 @@ class SilverTransformationService:
                     # Mark source column for potential removal
                     if exclude_source_columns:
                         columns_to_drop.add(bronze_col)
+
+                # --- Alias _bronze_path dynamically if they exist ---
+                bronze_path_col = f"_{bronze_col}_bronze_path"
+                unified_path_name = f"_{unified_name}_bronze_path"
+                if bronze_path_col in df.columns and bronze_path_col != unified_path_name:
+                    df = df.withColumn(unified_path_name, F.col(bronze_path_col))
+                    logger.info(f"Aliased image path column {bronze_path_col} as '{unified_path_name}'")
+                    if exclude_source_columns:
+                        columns_to_drop.add(bronze_path_col)
         
         # Drop source columns if configured
         if exclude_source_columns and columns_to_drop:
@@ -4130,41 +4165,62 @@ class SilverTransformationService:
             return False
     
     async def _ensure_silver_schema_async(self):
-        """Create the silver schema in Trino if it doesn't exist."""
+        """Create the silver catalog and schema in Trino if they don't exist.
+
+        Because Trino uses ``catalog.store=memory``, catalogs are lost on every
+        restart.  This method auto-creates the Silver Delta catalog via
+        ``TrinoManager.ensure_internal_delta_catalog_async`` before checking the
+        schema, so callers never need to pre-provision the catalog manually.
+        """
         try:
             conn = await self.trino.get_connection()
             cur = await conn.cursor()
-            
-            # Check if silver catalog exists
+
+            # Check if silver catalog exists; create it on-the-fly if not.
+            # Trino uses catalog.store=memory, so catalogs are lost on restart.
             await cur.execute(f"SHOW CATALOGS LIKE '{self.silver_catalog}'")
             catalogs = await cur.fetchall()
-            
+
             if not catalogs:
-                logger.warning(
-                    f"Silver catalog '{self.silver_catalog}' does not exist in Trino. "
-                    f"Make sure silver.properties is configured in trino/catalog/"
+                logger.info(
+                    f"Silver catalog '{self.silver_catalog}' not found — creating dynamically."
                 )
                 await conn.close()
-                return
-            
+                created = await self.trino.ensure_internal_delta_catalog_async(
+                    self.silver_catalog
+                )
+                if not created:
+                    logger.error(
+                        f"Could not create Silver catalog '{self.silver_catalog}'. "
+                        f"Silver table will not be registered in Trino."
+                    )
+                    return
+                # Re-open connection on the newly created catalog
+                conn = await self.trino.get_connection()
+                cur = await conn.cursor()
+
             # Check if schema exists
-            await cur.execute(f"SHOW SCHEMAS FROM {self.silver_catalog} LIKE '{self.silver_schema}'")
+            await cur.execute(
+                f"SHOW SCHEMAS FROM {self.silver_catalog} LIKE '{self.silver_schema}'"
+            )
             schemas = await cur.fetchall()
-            
+
             if not schemas:
-                # Create schema with location pointing to silver bucket
-                create_schema_sql = f"""
-                    CREATE SCHEMA IF NOT EXISTS {self.silver_catalog}.{self.silver_schema}
-                    WITH (location = 's3a://{self.silver_bucket}/')
-                """
-                logger.info(f"Creating silver schema with SQL: {create_schema_sql}")
+                create_schema_sql = (
+                    f"CREATE SCHEMA IF NOT EXISTS "
+                    f"{self.silver_catalog}.{self.silver_schema} "
+                    f"WITH (location = 's3a://{self.silver_bucket}/')"
+                )
+                logger.info(f"Creating Silver schema: {self.silver_catalog}.{self.silver_schema}")
                 await cur.execute(create_schema_sql)
                 await cur.fetchall()
-                logger.info(f"Created silver schema: {self.silver_catalog}.{self.silver_schema}")
-            
+                logger.info(f"Created Silver schema: {self.silver_catalog}.{self.silver_schema}")
+            else:
+                logger.debug(f"Silver schema already exists: {self.silver_catalog}.{self.silver_schema}")
+
             await conn.close()
         except Exception as e:
-            logger.error(f"Failed to ensure silver schema exists: {e}")
+            logger.error(f"Failed to ensure Silver schema exists: {e}")
     
     async def get_silver_table_info(self, config_id: int) -> Optional[Dict[str, Any]]:
         """

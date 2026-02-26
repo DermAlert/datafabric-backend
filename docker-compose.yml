@@ -60,6 +60,9 @@ services:
       - .env
     volumes:
       - ./project:/usr/src/app
+      # Persist Ivy/Maven JAR cache so Spark dependencies (delta-spark,
+      # hadoop-aws, trino-jdbc) are not re-downloaded on every container restart.
+      - spark_ivy_cache:/tmp/.ivy2
     ports:
       - 8004:8000
       # Spark driver RPC + BlockManager ports — executors connect back to these.
@@ -286,6 +289,11 @@ services:
       AWS_ACCESS_KEY_ID: minio
       AWS_SECRET_ACCESS_KEY: minio123
       AWS_REGION: us-east-1
+      # Enable FileSystem recovery so Master state survives restarts
+      # Without this, backend's SparkSession waits forever for the old Master
+      SPARK_MASTER_OPTS: "-Dspark.deploy.recoveryMode=FILESYSTEM -Dspark.deploy.recoveryDirectory=/opt/spark/recovery"
+    volumes:
+      - spark_master_recovery:/opt/spark/recovery
     ports:
       - "7077:7077"
       - "8082:8082"
@@ -324,6 +332,23 @@ services:
     networks:
       - shared-network
     restart: unless-stopped
+    # Detect the "TCP survives master restart" scenario: the Master loses all
+    # in-memory state after a restart, but the Worker's existing TCP connection
+    # keeps heartbeats flowing — the Master just ignores them because the Worker
+    # ID is completely unknown to the new process. Without this healthcheck the
+    # Worker sits unregistered indefinitely, making all Spark jobs stall.
+    #
+    # The check queries the Master REST API and verifies that THIS worker
+    # (matched by container hostname) appears with state ALIVE. If not, the
+    # container is marked unhealthy → Docker restarts it → clean registration.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python3 -c \"import urllib.request as u,json,sys,socket,os; ip=socket.gethostbyname(socket.gethostname()); data=json.loads(u.urlopen('http://spark-master:8082/json/',timeout=5).read()); sys.exit(0) if any(w.get('state')=='ALIVE' and ip in w.get('id','') for w in data.get('workers',[])) else os.system('kill 1')\""
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 60s
 
   airflow-webserver:
     <<: *airflow-common
@@ -488,6 +513,8 @@ volumes:
   airflow_pgdata:
   backend_pgdata:
   metastore_pgdata:
+  spark_ivy_cache:
+  spark_master_recovery:
 
 networks:
   shared-network:

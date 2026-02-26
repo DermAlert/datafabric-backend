@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 # SparkSession without one stopping the JVM while the other is still running.
 _spark_ref_count: int = 0
 _spark_ref_lock: threading.Lock = threading.Lock()
+_spark_creation_lock: threading.Lock = threading.Lock()
+_spark_creation_lock: threading.Lock = threading.Lock()
 
 # PYSPARK_SUBMIT_ARGS must be set before pyspark is imported so the JVM starts
 # with the correct heap size. Setting spark.driver.memory via SparkSession.builder
@@ -148,10 +150,17 @@ class SparkManager:
     def get_or_create_session(self):
         """
         Get or create a SparkSession configured for Delta Lake.
+        Thread-safe wrapper to prevent concurrent initialization (e.g. during warm-up).
         
         Returns:
             SparkSession: A configured SparkSession instance
         """
+        global _spark_creation_lock
+        with _spark_creation_lock:
+            return self._do_get_or_create_session()
+
+    def _do_get_or_create_session(self):
+        """Internal implementation for get_or_create_session."""
         if self._spark_session is not None:
             try:
                 sc = self._spark_session.sparkContext
