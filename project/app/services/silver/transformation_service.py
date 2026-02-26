@@ -93,31 +93,41 @@ class SilverTransformationService:
         if self.normalizer:
             self.normalizer.load_default_rules()
         
-        # Ensure Silver bucket exists
-        self._ensure_silver_bucket()
+        # Note: bucket creation is deferred to execution time to avoid blocking __init__
     
-    def _ensure_silver_bucket(self):
-        """Create the Silver bucket if it doesn't exist."""
-        from minio import Minio
-        
+    async def _ensure_silver_bucket(self, bucket_name: str = None):
+        """Create the Silver bucket if it doesn't exist asynchronously using aioboto3."""
+        bucket = bucket_name or self.silver_bucket
         try:
+            import aioboto3
             endpoint = os.getenv("MINIO_ENDPOINT", "minio:9000")
+            if not endpoint.startswith("http"):
+                secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
+                protocol = "https" if secure else "http"
+                endpoint = f"{protocol}://{endpoint}"
+                
             access_key = os.getenv("MINIO_ACCESS_KEY", "minio")
             secret_key = os.getenv("MINIO_SECRET_KEY", "minio123")
-            secure = os.getenv("MINIO_SECURE", "false").lower() == "true"
             
-            client = Minio(
-                endpoint=endpoint,
-                access_key=access_key,
-                secret_key=secret_key,
-                secure=secure
-            )
-            
-            if not client.bucket_exists(self.silver_bucket):
-                client.make_bucket(self.silver_bucket)
-                logger.info(f"Created Silver bucket: {self.silver_bucket}")
-            else:
-                logger.debug(f"Silver bucket already exists: {self.silver_bucket}")
+            session = aioboto3.Session()
+            async with session.client(
+                's3',
+                endpoint_url=endpoint,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
+                region_name="us-east-1"
+            ) as client:
+                try:
+                    await client.head_bucket(Bucket=bucket)
+                    logger.debug(f"Silver bucket already exists: {bucket}")
+                except Exception as e:
+                    # If bucket doesn't exist, head_bucket throws 404 ClientError
+                    error_code = getattr(e, "response", {}).get("Error", {}).get("Code", "")
+                    if error_code == "404" or "Not Found" in str(e):
+                        await client.create_bucket(Bucket=bucket)
+                        logger.info(f"Created Silver bucket: {bucket}")
+                    else:
+                        raise e
         except Exception as e:
             logger.warning(f"Could not ensure Silver bucket exists: {e}")
     
@@ -1570,75 +1580,81 @@ class SilverTransformationService:
             col_expr = f'{alias}."{col_info["column_name"]}"'
             output_name = col_info['column_name']
             
-            # Apply transformations (from config) - supports multiple transforms per column
-            if col_id in transformations:
-                for t in transformations[col_id]:
+            # Save the raw column expression before any transformation so that
+            # value mappings can be applied to the original Bronze values.
+            col_expr_raw = col_expr
+
+            # Helper: apply all configured transformations to any SQL expression.
+            def _apply_trans(expr: str, cid=col_id) -> str:
+                if cid not in transformations:
+                    return expr
+                for t in transformations[cid]:
                     trans_type = t.get('type', '')
-                    
-                    # Rule-based transformations (template)
                     if trans_type == 'template' and t.get('rule_id'):
-                        col_expr = apply_normalization_rule(col_expr, t['rule_id'])
+                        expr = apply_normalization_rule(expr, t['rule_id'])
                     elif t.get('rule_id'):
-                        # Fallback: if rule_id provided, use it
-                        col_expr = apply_normalization_rule(col_expr, t['rule_id'])
-                    
-                    # SQL text transformations
+                        expr = apply_normalization_rule(expr, t['rule_id'])
                     elif trans_type == 'lowercase':
-                        col_expr = f"LOWER({col_expr})"
+                        expr = f"LOWER({expr})"
                     elif trans_type == 'uppercase':
-                        col_expr = f"UPPER({col_expr})"
+                        expr = f"UPPER({expr})"
                     elif trans_type == 'trim':
-                        col_expr = f"TRIM({col_expr})"
+                        expr = f"TRIM({expr})"
                     elif trans_type == 'normalize_spaces':
-                        # Replace multiple spaces with single space, then trim
-                        col_expr = f"TRIM(regexp_replace({col_expr}, '\\s+', ' '))"
+                        expr = f"TRIM(regexp_replace({expr}, '\\s+', ' '))"
                     elif trans_type == 'remove_accents':
-                        # Trino translate() for common accents
-                        col_expr = f"translate({col_expr}, 'áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')"
-            
+                        expr = f"translate({expr}, 'áàâãäéèêëíìîïóòôõöúùûüçñÁÀÂÃÄÉÈÊËÍÌÎÏÓÒÔÕÖÚÙÛÜÇÑ', 'aaaaaeeeeiiiiooooouuuucnAAAAAEEEEIIIIOOOOOUUUUCN')"
+                return expr
+
+            # col_expr for source-column output: transformations on the raw value
+            # (mapping intentionally not applied here — mapping is only for the unified output)
+            col_expr = _apply_trans(col_expr_raw)
+
             # Check if this column should be unified
             # Priority: 1) Equivalence groups (explicit), 2) JOIN columns (automatic)
             if col_id in unified_columns:
                 # Explicit unification from Equivalence module
                 unified_name = unified_columns[col_id]
-                
+
                 # Track that this column is a source of unification
                 unified_source_column_names.add(output_name)
-                
-                # Apply value mapping before unification (from Equivalence)
-                col_expr_with_mapping = build_col_expr_with_mapping(col_expr, col_id)
-                
+
+                # Equivalence mapping on the RAW value, then transformations on top.
+                # This guarantees 'CARDIOLOGIA' → 'Cardiologia' is evaluated before
+                # any casing/normalisation rule changes the source value.
+                col_expr_with_mapping = _apply_trans(build_col_expr_with_mapping(col_expr_raw, col_id))
+
                 if unified_name not in columns_for_unification:
                     columns_for_unification[unified_name] = []
                 columns_for_unification[unified_name].append(col_expr_with_mapping)
-                
+
                 # If NOT excluding source columns, also add the original column
                 if not exclude_source_columns:
                     # Keep source columns untouched; apply Equivalence mapping only to unified output
                     select_columns.append(f'{col_expr} AS "{output_name}"')
                     output_columns.append(output_name)
-                    
+
             elif col_id in join_column_unification:
                 # Automatic unification for JOIN columns
                 unified_name = join_column_unification[col_id]
-                
+
                 # Track that this column is a source of unification
                 unified_source_column_names.add(output_name)
-                
-                # Apply value mapping if any
-                col_expr_with_mapping = build_col_expr_with_mapping(col_expr, col_id)
-                
+
+                # Same order: mapping on raw, then transforms
+                col_expr_with_mapping = _apply_trans(build_col_expr_with_mapping(col_expr_raw, col_id))
+
                 if unified_name not in columns_for_unification:
                     columns_for_unification[unified_name] = []
                 columns_for_unification[unified_name].append(col_expr_with_mapping)
-                
+
                 # JOIN columns are always unified (no separate column for each source)
                 # This is the expected behavior - we don't want t0.isic_id, t1.isic_id separately
-                
+
             else:
-                # Regular column (not unified)
-                col_expr = build_col_expr_with_mapping(col_expr, col_id)
-                
+                # Regular column (not unified): mapping on raw, then transforms
+                col_expr = _apply_trans(build_col_expr_with_mapping(col_expr_raw, col_id))
+
                 select_columns.append(f'{col_expr} AS "{output_name}"')
                 output_columns.append(output_name)
         
@@ -2307,12 +2323,37 @@ class SilverTransformationService:
             warnings=warnings
         )
     
+    async def create_queued_execution(self, config_id: int) -> int:
+        """
+        Create a PENDING execution record for Airflow dispatch.
+        Returns the execution_id so the DAG can reference it.
+        """
+        config     = await self.get_transform_config(config_id)
+        start_time = datetime.now()
+        execution  = TransformExecution(
+            config_id=config_id,
+            status=TransformStatus.PENDING,
+            started_at=start_time,
+            config_snapshot={"queued_at": start_time.isoformat(), "name": config.name},
+        )
+        self.db.add(execution)
+        await self.db.flush()
+        await self.db.commit()
+        logger.info(f"Created PENDING execution {execution.id} for Silver config {config_id}")
+        return execution.id
+
     async def execute_transform_config(
         self,
-        config_id: int
+        config_id: int,
+        preexisting_execution_id: int | None = None,
     ) -> TransformExecuteResponse:
         """
         Execute a transform config (Bronze → Silver) using Spark.
+
+        preexisting_execution_id: when set (Airflow dispatch path) the execution
+        record already exists with status=PENDING and will be updated to
+        RUNNING → SUCCESS/FAILED here. When None (direct path) a new record
+        is created with status=RUNNING.
         
         This method:
         1. Reads Bronze Delta Lake tables using Spark
@@ -2327,17 +2368,21 @@ class SilverTransformationService:
         - UDF support for Python transformations
         - More efficient write operations
         """
+        # ======================================================================
+        # PHASE 1 — Read all config from DB and register RUNNING status.
+        # After this block the DB connection is released back to the pool so
+        # it is not held idle during the long Spark execution.
+        # ======================================================================
         config = await self.get_transform_config(config_id)
-        
+
         start_time = datetime.now()
-        
-        # Create config snapshot for reproducibility
+
         config_snapshot = {
             "name": config.name,
             "description": config.description,
             "source_bronze_config_id": config.source_bronze_config_id,
             "source_bronze_version": config.source_bronze_version,
-            "source_bronze_dataset_id": config.source_bronze_dataset_id,  # Legacy
+            "source_bronze_dataset_id": config.source_bronze_dataset_id,
             "silver_bucket": config.silver_bucket,
             "silver_path_prefix": config.silver_path_prefix,
             "column_group_ids": config.column_group_ids,
@@ -2346,181 +2391,245 @@ class SilverTransformationService:
             "image_labeling_config": config.image_labeling_config,
             "llm_extractions": config.llm_extractions,
             "exclude_unified_source_columns": config.exclude_unified_source_columns,
-            "write_mode": "overwrite",  # Always overwrite
+            "write_mode": "overwrite",
             "snapshot_at": start_time.isoformat(),
         }
-        
-        # Create execution record
-        execution = TransformExecution(
-            config_id=config_id,
-            status=TransformStatus.RUNNING,
-            started_at=start_time,
-            config_snapshot=config_snapshot,
-        )
-        self.db.add(execution)
-        await self.db.flush()
-        
-        try:
-            # Get Bronze source info (new or legacy)
-            if config.source_bronze_config_id:
-                bronze_info = await self._get_bronze_config_info(
-                    config.source_bronze_config_id,
-                    config.source_bronze_version
+
+        if preexisting_execution_id:
+            # Airflow dispatch path: update the pre-created PENDING record
+            from sqlalchemy import select as _select
+            _stmt = _select(TransformExecution).where(
+                TransformExecution.id == preexisting_execution_id
+            )
+            _result = await self.db.execute(_stmt)
+            execution = _result.scalar_one_or_none()
+            if execution is None:
+                raise ValueError(
+                    f"Preexisting execution {preexisting_execution_id} not found"
                 )
-            else:
-                # Legacy: use source_bronze_dataset_id
-                bronze_info = await self._get_bronze_dataset_info(config.source_bronze_dataset_id)
-            
-            if not bronze_info:
-                raise ValueError(f"Bronze source not found for config {config_id}")
-            
-            # Build output path
-            output_bucket = config.silver_bucket or self.silver_bucket
-            if config.silver_path_prefix:
-                output_path = f"s3a://{output_bucket}/{config.silver_path_prefix}"
-            else:
-                output_path = f"s3a://{output_bucket}/{config.id}-{config.name}"
-            
-            # Execute transformation with Spark
-            rows_processed, rows_output, post_llm_filters, delta_version = await self._execute_spark_transform(
+            execution.status        = TransformStatus.RUNNING
+            execution.started_at    = start_time
+            execution.config_snapshot = config_snapshot
+            await self.db.flush()
+            execution_id = execution.id
+        else:
+            # Direct execution path: create a new RUNNING record
+            execution = TransformExecution(
+                config_id=config_id,
+                status=TransformStatus.RUNNING,
+                started_at=start_time,
+                config_snapshot=config_snapshot,
+            )
+            self.db.add(execution)
+            await self.db.flush()
+            execution_id = execution.id
+
+        if config.source_bronze_config_id:
+            bronze_info = await self._get_bronze_config_info(
+                config.source_bronze_config_id,
+                config.source_bronze_version,
+            )
+        else:
+            bronze_info = await self._get_bronze_dataset_info(config.source_bronze_dataset_id)
+
+        if not bronze_info:
+            raise ValueError(f"Bronze source not found for config {config_id}")
+
+        # Pre-load DB-dependent Spark prerequisites while the session is still open.
+        preloaded_norm_rules = await self._load_transformation_rules(
+            config.column_transformations or []
+        )
+        preloaded_equiv_data = None
+        if config.column_group_ids:
+            preloaded_equiv_data = await self.load_equivalence_for_virtualized(
+                config.column_group_ids
+            )
+
+        # Commit RUNNING status and release the DB connection back to the pool.
+        # The session object stays alive; SQLAlchemy will lazily reacquire a
+        # connection when Phase 3 issues its first query.
+        await self.db.commit()
+        await self.db.close()
+
+        # ======================================================================
+        # PHASE 2 — Spark execution.  NO DB connection held during this block.
+        # ======================================================================
+
+        # Prevent Bronze from stopping the shared JVM while this job is active.
+        if hasattr(self.spark_manager, 'acquire'):
+            self.spark_manager.acquire()
+
+        output_bucket = config.silver_bucket or self.silver_bucket
+        if config.silver_path_prefix:
+            output_path = f"s3a://{output_bucket}/{config.silver_path_prefix}"
+        else:
+            output_path = f"s3a://{output_bucket}/{config.id}-{config.name}"
+
+        spark_error: Optional[Exception] = None
+        rows_processed = rows_output = delta_version = 0
+        df = None
+        post_llm_filters = None
+        llm_extraction_results: list = []
+
+        try:
+            await self._ensure_silver_bucket(output_bucket)
+
+            rows_processed, df, post_llm_filters = await self._execute_spark_transform(
                 bronze_info=bronze_info,
                 config=config,
-                output_path=output_path
+                output_path=output_path,
+                _preloaded_norm_rules=preloaded_norm_rules,
+                _preloaded_equiv_data=preloaded_equiv_data,
             )
-            
-            # Execute LLM extractions if configured (post-Spark processing)
-            llm_extraction_results = []
+
+            if df is None:
+                raise ValueError("No Bronze data available for transformation")
+
+            import asyncio as _asyncio
+            from concurrent.futures import ThreadPoolExecutor as _TPE
+
             if config.llm_extractions:
-                llm_extraction_results = await self._execute_llm_extractions(
+                rows_output, delta_version, llm_extraction_results = await self._execute_llm_extractions(
                     config=config,
                     bronze_info=bronze_info,
                     output_path=output_path,
-                    post_llm_filters=post_llm_filters
+                    post_llm_filters=post_llm_filters,
+                    existing_df=df,
                 )
-                # Re-read row count and delta version after LLM columns added
-                import asyncio as _asyncio
-                from concurrent.futures import ThreadPoolExecutor as _TPE
+            else:
                 _loop = _asyncio.get_event_loop()
-                def _recount_and_version():
-                    from delta.tables import DeltaTable
-                    spark = self.spark_manager.get_or_create_session()
-                    count = spark.read.format("delta").load(output_path).count()
-                    ver = delta_version
-                    try:
-                        dt = DeltaTable.forPath(spark, output_path)
-                        h = dt.history(1).collect()
-                        if h:
-                            ver = h[0].asDict().get("version", ver)
-                    except Exception:
-                        pass
-                    return count, ver
-                with _TPE(max_workers=1) as _executor:
-                    rows_output, delta_version = await _loop.run_in_executor(_executor, _recount_and_version)
-            
-            # Update execution record
-            execution.status = TransformStatus.SUCCESS
-            execution.finished_at = datetime.now()
-            execution.rows_processed = rows_processed
-            execution.rows_output = rows_output
-            execution.output_path = output_path
-            execution.delta_version = delta_version
-            execution.write_mode_used = "overwrite"
-            execution.rows_inserted = rows_output
-            execution.execution_details = {
+                with _TPE(max_workers=5) as _executor:
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            rows_output, delta_version = await _loop.run_in_executor(
+                                _executor, self._write_silver_delta, df, output_path
+                            )
+                            break
+                        except Exception as _e:
+                            logger.error(f"Attempt {attempt + 1}/{max_retries} failed writing Silver Delta: {_e}")
+                            if attempt == max_retries - 1:
+                                raise
+                            await _asyncio.sleep(2 ** attempt)
+
+        except Exception as e:
+            spark_error = e
+            logger.error(f"Transform execution failed: {str(e)}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+        finally:
+            if hasattr(self.spark_manager, 'release'):
+                self.spark_manager.release()
+
+        # ======================================================================
+        # PHASE 3 — Persist results.  Session lazily reacquires a DB connection.
+        # ======================================================================
+        try:
+            exec_result = await self.db.execute(
+                select(TransformExecution).where(TransformExecution.id == execution_id)
+            )
+            exec_obj = exec_result.scalar_one()
+
+            cfg_result = await self.db.execute(
+                select(TransformConfig).where(TransformConfig.id == config_id)
+            )
+            config_obj = cfg_result.scalar_one()
+
+            if spark_error is not None:
+                exec_obj.status = TransformStatus.FAILED
+                exec_obj.finished_at = datetime.now()
+                exec_obj.error_message = str(spark_error)
+                config_obj.last_execution_time = datetime.now()
+                config_obj.last_execution_status = TransformStatus.FAILED
+                config_obj.last_execution_error = str(spark_error)
+                await self.db.commit()
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=f"Transform execution failed: {str(spark_error)}",
+                )
+
+            exec_obj.status = TransformStatus.SUCCESS
+            exec_obj.finished_at = datetime.now()
+            exec_obj.rows_processed = rows_processed
+            exec_obj.rows_output = rows_output
+            exec_obj.output_path = output_path
+            exec_obj.delta_version = delta_version
+            exec_obj.write_mode_used = "overwrite"
+            exec_obj.rows_inserted = rows_output
+            exec_obj.execution_details = {
                 "bronze_tables": bronze_info.get('tables', []),
                 "transformations_applied": {
                     "column_transformations": len(config.column_transformations or []),
                     "column_groups": len(config.column_group_ids or []),
                     "filters": 1 if config.filters else 0,
-                    "llm_extractions": len(config.llm_extractions or [])
+                    "llm_extractions": len(config.llm_extractions or []),
                 },
                 "llm_extraction_results": [
                     {k: v for k, v in r.items() if k != "values"}
                     for r in llm_extraction_results
-                ] if llm_extraction_results else None
+                ] if llm_extraction_results else None,
             }
-            
-            # Update config status
-            result = await self.db.execute(
-                select(TransformConfig).where(TransformConfig.id == config_id)
-            )
-            config_obj = result.scalar_one()
             config_obj.last_execution_time = datetime.now()
             config_obj.last_execution_status = TransformStatus.SUCCESS
             config_obj.last_execution_rows = rows_output
             config_obj.last_execution_error = None
             config_obj.current_delta_version = delta_version
-            
             await self.db.commit()
-            
-            # Register table in Trino for SQL queries
-            trino_registered = await self.register_silver_table_in_trino(
-                config_id=config_id,
-                config_name=config.name,
-                output_path=output_path
-            )
-            
-            execution_time = (datetime.now() - start_time).total_seconds()
-            
-            message = f"Silver transformation completed. {rows_output} rows written to {output_path}"
-            if trino_registered:
-                table_name = self.trino._sanitize_identifier(f"{config_id}_{config.name}")
-                message += f". Table registered in Trino as {self.silver_catalog}.{self.silver_schema}.{table_name}"
-            
-            # Build LLM extraction result summaries for response
-            llm_result_summaries = None
-            if llm_extraction_results:
-                from ...api.schemas.silver_schemas import LLMExtractionColumnResult
-                llm_result_summaries = [
-                    LLMExtractionColumnResult(
-                        column_name=r["column_name"],
-                        output_type=r["output_type"],
-                        rows_processed=r["rows_processed"],
-                        rows_success=r["rows_success"],
-                        rows_failed=r["rows_failed"],
-                        error_rate=r["error_rate"],
-                    )
-                    for r in llm_extraction_results
-                ]
-            
-            return TransformExecuteResponse(
-                config_id=config_id,
-                config_name=config.name,
-                execution_id=execution.id,
-                status=TransformStatusEnum.SUCCESS,
-                rows_processed=rows_processed,
-                rows_output=rows_output,
-                output_path=output_path,
-                execution_time_seconds=execution_time,
-                message=message,
-                llm_extraction_results=llm_result_summaries,
-                config_snapshot=config_snapshot,
-            )
-            
-        except Exception as e:
-            logger.error(f"Transform execution failed: {str(e)}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            
-            execution.status = TransformStatus.FAILED
-            execution.finished_at = datetime.now()
-            execution.error_message = str(e)
-            
-            result = await self.db.execute(
-                select(TransformConfig).where(TransformConfig.id == config_id)
-            )
-            config_obj = result.scalar_one()
-            config_obj.last_execution_time = datetime.now()
-            config_obj.last_execution_status = TransformStatus.FAILED
-            config_obj.last_execution_error = str(e)
-            
-            await self.db.commit()
-            
+
+        except HTTPException:
+            raise
+        except Exception as db_err:
+            logger.error(f"Phase-3 DB write failed after Spark success: {db_err}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Transform execution failed: {str(e)}"
+                detail=f"Transform execution failed saving results: {str(db_err)}",
             )
-    
+
+        # Register table in Trino (fire-and-forget errors are already logged inside)
+        trino_registered = await self.register_silver_table_in_trino(
+            config_id=config_id,
+            config_name=config.name,
+            output_path=output_path,
+        )
+
+        execution_time = (datetime.now() - start_time).total_seconds()
+        message = f"Silver transformation completed. {rows_output} rows written to {output_path}"
+        if trino_registered:
+            table_name = self.trino._sanitize_identifier(f"{config_id}_{config.name}")
+            message += f". Table registered in Trino as {self.silver_catalog}.{self.silver_schema}.{table_name}"
+
+        llm_result_summaries = None
+        if llm_extraction_results:
+            from ...api.schemas.silver_schemas import LLMExtractionColumnResult
+            llm_result_summaries = [
+                LLMExtractionColumnResult(
+                    column_name=r["column_name"],
+                    output_type=r["output_type"],
+                    rows_processed=r["rows_processed"],
+                    rows_success=r["rows_success"],
+                    rows_failed=r["rows_failed"],
+                    error_rate=r["error_rate"],
+                )
+                for r in llm_extraction_results
+            ]
+
+        return TransformExecuteResponse(
+            config_id=config_id,
+            config_name=config.name,
+            execution_id=execution_id,
+            status=TransformStatusEnum.SUCCESS,
+            rows_processed=rows_processed,
+            rows_output=rows_output,
+            output_path=output_path,
+            execution_time_seconds=execution_time,
+            message=message,
+            delta_version=delta_version,
+            write_mode_used="overwrite",
+            rows_inserted=rows_output,
+            llm_extraction_results=llm_result_summaries,
+            config_snapshot=config_snapshot,
+        )
+
     async def _get_bronze_dataset_info(self, dataset_id: int) -> Optional[Dict[str, Any]]:
         """
         Get Bronze dataset information including paths and column mappings.
@@ -2656,13 +2765,14 @@ class SilverTransformationService:
         )
         latest_execution = exec_result.scalar_one_or_none()
         
-        if not latest_execution or not latest_execution.output_paths:
+        has_known_paths = bool(bronze_config.known_output_paths)
+        has_exec_paths = latest_execution and latest_execution.output_paths
+        
+        if not has_known_paths and not has_exec_paths:
             logger.warning(f"No successful execution found for Bronze config {bronze_config_id}")
             return None
 
         # Rebuild Bronze execution plan to recover column mappings and inter-source links.
-        # Silver persistent transformations need these mappings to resolve external_column.id
-        # to the real Bronze column names (including prefixed names when duplicates exist).
         preview = None
         try:
             from ..bronze.ingestion_service import BronzeIngestionService
@@ -2682,25 +2792,28 @@ class SilverTransformationService:
             bronze_service = BronzeIngestionService(self.db)
             preview = await bronze_service.generate_ingestion_plan_simplified(preview_request)
         except Exception as e:
-            # Keep backward-compatible behavior if we cannot rebuild preview.
             logger.warning(
                 f"Could not rebuild Bronze plan for config {bronze_config_id}: {e}. "
                 "Falling back to execution paths without column mappings."
             )
 
-        # Build output-path mapping from execution (preferred source of truth).
-        # group_results keeps group_name/output_path pairs.
-        execution_groups = latest_execution.group_results or []
+        # Build path mapping: prefer known_output_paths (stable), fall back to execution
         group_path_by_name = {}
-        for g in execution_groups:
-            if not isinstance(g, dict):
-                continue
-            group_name = g.get('group_name')
-            output_path = g.get('output_path')
-            if group_name and output_path:
-                group_path_by_name[group_name] = output_path
+        if has_known_paths:
+            # known_output_paths is {connection_name: s3a_path}
+            # group_name in preview typically matches connection_name
+            group_path_by_name = dict(bronze_config.known_output_paths)
+        
+        if latest_execution:
+            for g in (latest_execution.group_results or []):
+                if not isinstance(g, dict):
+                    continue
+                group_name = g.get('group_name') or g.get('connection_name')
+                output_path = g.get('output_path')
+                if group_name and output_path and group_name not in group_path_by_name:
+                    group_path_by_name[group_name] = output_path
 
-        fallback_paths = list(latest_execution.output_paths or [])
+        fallback_paths = list((latest_execution.output_paths if latest_execution else None) or [])
         fallback_idx = 0
 
         tables = []
@@ -2808,22 +2921,24 @@ class SilverTransformationService:
         self,
         bronze_info: Dict[str, Any],
         config: TransformConfigResponse,
-        output_path: str
+        output_path: str,
+        _preloaded_norm_rules: Optional[Dict] = None,
+        _preloaded_equiv_data: Optional[Dict] = None,
     ) -> Tuple[int, int, Optional[Dict], int]:
         """
         Execute the transformation using PySpark.
-        
+
         This runs in a separate thread to avoid blocking the async event loop.
-        
+        DB-dependent pre-loading (norm_rules, equiv_data) can be injected via
+        _preloaded_* params so the caller can close the DB session before entering
+        the thread pool, freeing the connection while Spark runs.
+
         Returns:
-            Tuple of (rows_processed, rows_output, post_llm_filters, delta_version)
-            post_llm_filters is returned so the caller can pass it to _execute_llm_extractions.
-            delta_version is the Delta Lake version after writing.
+            Tuple of (rows_processed, df, post_llm_filters)
         """
         import asyncio
         from concurrent.futures import ThreadPoolExecutor
-        
-        # Get transformation config for Spark
+
         transform_config = {
             'config_id': config.id,
             'column_transformations': config.column_transformations,
@@ -2831,24 +2946,27 @@ class SilverTransformationService:
             'column_group_ids': config.column_group_ids,
             'exclude_unified_source_columns': getattr(config, 'exclude_unified_source_columns', False)
         }
-        
-        # Load normalization rules from column_transformations
-        norm_rules = await self._load_transformation_rules(transform_config.get('column_transformations', []))
+
+        # Use pre-loaded values when provided (DB already closed), otherwise load now.
+        if _preloaded_norm_rules is not None:
+            norm_rules = _preloaded_norm_rules
+        else:
+            norm_rules = await self._load_transformation_rules(transform_config.get('column_transformations', []))
         transform_config['normalization_rules'] = norm_rules
-        
-        # Load column group info from Equivalence
-        equiv_data = None
-        if transform_config.get('column_group_ids'):
+
+        equiv_data = _preloaded_equiv_data
+        if equiv_data is None and transform_config.get('column_group_ids'):
             equiv_data = await self.load_equivalence_for_virtualized(transform_config['column_group_ids'])
+        if equiv_data is not None:
             transform_config['equivalence_data'] = equiv_data
-        
-        # Classify filter conditions into pre/post phases (BEFORE thread pool)
+
+        # Classify filter conditions into pre/post phases (pure logic, no DB)
         bronze_col_names = set()
         for mapping in bronze_info.get('column_mappings', {}).values():
             name = mapping.get('bronze_column_name') or mapping.get('original_column_name', '')
             if name:
                 bronze_col_names.add(name)
-        
+
         pre_filters, post_transform_filters, post_llm_filters = self._classify_filter_conditions(
             filters=transform_config.get('filters'),
             column_transformations=config.column_transformations,
@@ -2857,46 +2975,40 @@ class SilverTransformationService:
             exclude_unified_source_columns=transform_config.get('exclude_unified_source_columns', False),
             bronze_column_names=bronze_col_names
         )
-        
-        # Replace filters with classified versions for Spark
+
         transform_config['filters'] = pre_filters
         transform_config['post_transform_filters'] = post_transform_filters
-        
-        # Execute Spark transformation in thread pool
+
+        # Execute Spark transformation in thread pool (no DB, no write yet)
         loop = asyncio.get_event_loop()
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            rows_processed, rows_output, delta_version = await loop.run_in_executor(
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            rows_processed, df = await loop.run_in_executor(
                 executor,
                 self._run_spark_transform,
                 bronze_info,
                 transform_config,
-                output_path
             )
-        
-        return rows_processed, rows_output, post_llm_filters, delta_version
+
+        return rows_processed, df, post_llm_filters
     
     async def _execute_llm_extractions(
         self,
         config: TransformConfigResponse,
         bronze_info: Dict[str, Any],
         output_path: str,
-        post_llm_filters: Optional[Dict] = None
-    ) -> List[Dict[str, Any]]:
+        post_llm_filters: Optional[Dict] = None,
+        existing_df: Optional[Any] = None,
+    ) -> Tuple[int, int, List[Dict[str, Any]]]:
         """
         Execute LLM extractions on the Silver data after Spark transform.
-        
-        This method:
-        1. Reads the Silver Delta table written by Spark
-        2. For each LLM extraction definition:
-           a. Resolves source_column_id to the actual column name in the data
-           b. Collects column values from the DataFrame
-           c. Calls LLMExtractionService to process all values via LLM
-           d. Adds the new column to the DataFrame
-        3. Applies post-LLM filters if any (conditions on LLM-created columns)
-        4. Overwrites the Silver Delta table with the new columns added
-        
+
+        When *existing_df* is provided (the in-memory DataFrame from _run_spark_transform)
+        it is used directly, skipping the Delta read.  After all LLM columns are added
+        the DataFrame is written to Delta **once** — this is the only Delta commit for
+        the entire execution, ensuring consecutive version numbers.
+
         Returns:
-            List of extraction result dicts with stats per column.
+            (rows_output, delta_version, extraction_results)
         """
         from .llm_extraction_service import get_llm_extraction_service
         from concurrent.futures import ThreadPoolExecutor
@@ -2905,24 +3017,24 @@ class SilverTransformationService:
         llm_service = get_llm_extraction_service()
         extractions = config.llm_extractions or []
         
-        if not extractions:
-            return []
-        
         logger.info(f"Starting LLM extractions: {len(extractions)} column(s) to create")
         
         # Resolve source_column_id to actual column names in the data
         bronze_column_map = bronze_info.get('column_mappings', {})
         
-        # Read Silver data in a thread (Spark is blocking)
         loop = asyncio.get_event_loop()
-        
-        def _read_silver_data():
-            spark = self.spark_manager.get_or_create_session()
-            df = spark.read.format("delta").load(output_path)
-            return df
-        
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            df = await loop.run_in_executor(executor, _read_silver_data)
+
+        if existing_df is not None:
+            # Use the in-memory DataFrame — no Delta read needed
+            df = existing_df
+        else:
+            # Fallback: read from Delta (only when called without a pre-built DataFrame)
+            def _read_silver_data():
+                spark = self.spark_manager.get_or_create_session()
+                return spark.read.format("delta").load(output_path)
+
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                df = await loop.run_in_executor(executor, _read_silver_data)
         
         all_columns = df.columns
         all_results = []
@@ -3070,47 +3182,62 @@ class SilverTransformationService:
             with ThreadPoolExecutor(max_workers=1) as executor:
                 await loop.run_in_executor(executor, _apply_post_llm_filters)
         
-        # Write back the DataFrame with new LLM columns (and post-LLM filters applied)
-        if all_results:
-            def _write_back():
-                logger.info(f"Writing Silver data with {len(all_results)} LLM column(s) to: {output_path}")
-                df.write \
-                    .format("delta") \
-                    .mode("overwrite") \
-                    .option("overwriteSchema", "true") \
-                    .option("mergeSchema", "true") \
-                    .save(output_path)
-            
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                await loop.run_in_executor(executor, _write_back)
-        
-        logger.info(f"LLM extractions complete: {len(all_results)} column(s) processed")
-        return all_results
+        # Single Delta write — with or without LLM results the df must be persisted here
+        def _write_final():
+            logger.info(
+                f"Writing Silver Delta with {len(all_results)} LLM column(s) to: {output_path}"
+            )
+            # Cache before write so count() reads from memory, not a second S3 scan
+            df.cache()
+            rows_written = df.count()
+            df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .option("overwriteSchema", "true") \
+                .option("mergeSchema", "true") \
+                .save(output_path)
+            df.unpersist()
+            delta_ver = self._read_delta_version(output_path)
+            logger.info(f"Silver Delta written (LLM path): {rows_written} rows, delta_version={delta_ver}")
+            return rows_written, delta_ver
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            rows_output, delta_version = await loop.run_in_executor(executor, _write_final)
+
+        logger.info(
+            f"LLM extractions complete: {len(all_results)} column(s) processed, "
+            f"{rows_output} rows, delta_version={delta_version}"
+        )
+        return rows_output, delta_version, all_results
     
     def _run_spark_transform(
         self,
         bronze_info: Dict[str, Any],
         transform_config: Dict[str, Any],
-        output_path: str
-    ) -> Tuple[int, int]:
+    ) -> Tuple[int, Any]:
         """
         Run the Spark transformation (blocking, runs in thread pool).
-        
-        This is the core transformation logic using PySpark.
+
+        Returns (total_rows, df) where df is the fully-transformed Spark DataFrame.
+        Does NOT write to Delta — the caller is responsible for the single final write
+        so that each execution produces exactly one Delta commit.
         """
         from pyspark.sql import functions as F
         from pyspark.sql.types import StringType
-        
+
         spark = self.spark_manager.get_or_create_session()
-        
-        # Read all Bronze tables and union them
+
+        # Read all Bronze tables.
+        # We do a single count() per table for logging only. The actual data evaluation
+        # happens later, inside _write_silver_delta, where the final DataFrame is cached
+        # once so that the count() and the Delta write share one S3 scan instead of two.
         dfs = []
         total_rows = 0
-        
+
         for table in bronze_info.get('tables', []):
             table_path = table['output_path']
             logger.info(f"Reading Bronze table from: {table_path}")
-            
+
             try:
                 df = spark.read.format("delta").load(table_path)
                 row_count = df.count()
@@ -3120,100 +3247,185 @@ class SilverTransformationService:
             except Exception as e:
                 logger.error(f"Error reading Bronze table {table_path}: {e}")
                 continue
-        
+
         if not dfs:
             logger.warning("No Bronze tables found to transform")
-            return 0, 0
-        
+            return 0, None
+
         # Combine DataFrames using JOINs (if InterSourceLinks exist) or UNION
         inter_source_links = bronze_info.get('inter_source_links', [])
-        
-        # Debug: Log DataFrame columns
-        for idx, df_item in enumerate(dfs):
-            logger.info(f"DataFrame {idx} columns: {df_item.columns}")
-            logger.info(f"DataFrame {idx} count: {df_item.count()}")
-        
+
         if len(dfs) == 1:
             df = dfs[0]
         elif inter_source_links:
-            # Log the InterSourceLinks for debugging
             for link in inter_source_links:
-                logger.info(f"InterSourceLink: group[{link.get('left_group_index')}].{link.get('left_column_name')} = "
-                           f"group[{link.get('right_group_index')}].{link.get('right_column_name')} "
-                           f"(strategy: {link.get('join_strategy')})")
-            
-            # Use JOINs based on InterSourceLinks
+                logger.info(
+                    f"InterSourceLink: group[{link.get('left_group_index')}]."
+                    f"{link.get('left_column_name')} = "
+                    f"group[{link.get('right_group_index')}]."
+                    f"{link.get('right_column_name')} "
+                    f"(strategy: {link.get('join_strategy')})"
+                )
             df = self._join_dataframes_with_links(dfs, inter_source_links, bronze_info)
             logger.info(f"Joined {len(dfs)} DataFrames using {len(inter_source_links)} InterSourceLinks")
-            logger.info(f"After JOIN row count: {df.count()}")
         else:
-            # Fallback to UNION if no InterSourceLinks defined
-            # This preserves backward compatibility but may not be correct semantically
             logger.warning("No InterSourceLinks found - using UNION (may produce incorrect results)")
             df = dfs[0]
             for other_df in dfs[1:]:
                 df = df.unionByName(other_df, allowMissingColumns=True)
-        
+
         logger.info(f"Total rows to process: {total_rows}")
-        
-        # Apply PRE-FILTERS on original Bronze data (only conditions on unmodified columns)
-        # Pre-filters are classified by _classify_filter_conditions in _execute_spark_transform
-        pre_filter_count = df.count()
+
+        # Apply PRE-FILTERS on original Bronze data
         df = self._apply_spark_filters(df, transform_config, bronze_info)
-        post_filter_count = df.count()
-        logger.info(f"Pre-filter applied: {pre_filter_count} rows before, {post_filter_count} rows after")
-        
-        # Apply column_transformations (same format as Virtualized, uses column_id)
-        # This resolves column_id → bronze_column_name using BronzeColumnMapping
-        df = self._apply_column_transformations(df, transform_config, bronze_info)
-        
-        # Apply column_group_ids from Equivalence module
-        # This handles both column unification and value mappings from Equivalence
+
+        # Apply Equivalence FIRST on original Bronze data so value mappings
+        # match raw source values (e.g. 'CARDIOLOGIA' → 'Cardiologia') before
+        # any casing/normalization transformation mutates those values.
         df = self._apply_equivalence_groups(df, transform_config, bronze_info)
-        
+
+        # Apply column_transformations after equivalence
+        df = self._apply_column_transformations(df, transform_config, bronze_info)
+
         # Apply POST-TRANSFORM FILTERS on transformed/unified data
-        # These are conditions on columns modified by transformations or created by equivalence
         post_transform_filters = transform_config.get('post_transform_filters')
         if post_transform_filters:
-            pre_post_count = df.count()
             post_config = {**transform_config, 'filters': post_transform_filters}
             df = self._apply_spark_filters(df, post_config, bronze_info)
-            post_post_count = df.count()
-            logger.info(f"Post-transform filter applied: {pre_post_count} rows before, {post_post_count} rows after")
-        
+
         # Add Silver metadata columns
         df = df.withColumn("_silver_timestamp", F.current_timestamp())
         df = df.withColumn("_transform_config_id", F.lit(transform_config.get('config_id')))
-        
-        # Write to Silver Delta Lake using versioning service (tracks delta_version)
-        from delta.tables import DeltaTable
-        
-        logger.info(f"Writing Silver Delta to: {output_path}")
-        
+
+        logger.info(f"Spark transform pipeline built: {total_rows} source rows (write deferred)")
+        return total_rows, df
+
+    # Target Parquet file size: 128 MB (sweet spot for S3/MinIO columnar queries)
+    _TARGET_FILE_BYTES: int = 134_217_728  # 128 MB
+    # Minimum rows before attempting an OPTIMIZE pass (skip for tiny datasets)
+    _OPTIMIZE_MIN_ROWS: int = 10_000
+
+    def _optimal_partitions(self, df: Any) -> int:
+        """
+        Estimate the number of output partitions that yields ~128 MB Parquet files.
+
+        Strategy:
+        1. Read the estimated logical size from the Spark query plan (free, no scan).
+        2. If the estimate is below 1× the target size, return 1 — coalesce to a
+           single partition. This avoids the overhead of managing many near-empty
+           shuffle partitions for small datasets.
+        3. For large data (multi-GB), calculate n = ceil(bytes / TARGET_FILE_BYTES).
+        4. Cap at 200 to stay predictable.
+
+        Note: below 2× _TARGET_FILE_BYTES we skip the manual coalesce/repartition
+        entirely and rely on Delta's optimizeWrite + AQE to handle the sizing, which
+        is faster for datasets that fit in a single file.
+        """
+        try:
+            estimated_bytes = int(
+                df._jdf.queryExecution().optimizedPlan().stats().sizeInBytes()
+            )
+            if estimated_bytes > 0:
+                if estimated_bytes <= self._TARGET_FILE_BYTES * 2:
+                    # Small data: one output file is ideal; let Delta / AQE handle it.
+                    return 1
+                n = max(1, estimated_bytes // self._TARGET_FILE_BYTES + 1)
+                logger.debug(
+                    f"Plan-estimated size {estimated_bytes/1e6:.1f} MB → {n} partition(s)"
+                )
+                return min(n, 200)
+        except Exception:
+            pass
+
+        # Fallback when plan stats are unavailable — default to 1 for safety.
+        return 1
+
+    def _write_silver_delta(self, df: Any, output_path: str) -> Tuple[int, int]:
+        """
+        Write *df* to the Silver Delta table at *output_path* (blocking, thread pool).
+
+        Pipeline:
+        1. Coalesce/repartition to target ~128 MB Parquet files.
+           - coalesce  : cheap (no shuffle), used when we need fewer partitions.
+           - repartition: full shuffle, used only when current partitions < optimal
+             (i.e., data is heavily skewed into one large partition).
+        2. Write with Delta's optimizeWrite (rebalances within the commit).
+        3. Run OPTIMIZE (bin-packing) for datasets above _OPTIMIZE_MIN_ROWS so that
+           concurrent writes or micro-batches are compacted into full-sized files.
+
+        Returns (rows_output, delta_version).
+        """
+        logger.info(f"Preparing to write Silver Delta to: {output_path}")
+
+        spark = self.spark_manager.get_or_create_session()
+
+        # ── Step 1: right-size partitions before writing ──────────────────────
+        target_parts = self._optimal_partitions(df)
+        current_parts = df.rdd.getNumPartitions()
+
+        if current_parts > target_parts:
+            # Narrow: merge small partitions without a shuffle
+            logger.debug(f"coalesce {current_parts} → {target_parts} partition(s)")
+            df = df.coalesce(target_parts)
+        elif current_parts < target_parts:
+            # Widen: redistribute skewed data evenly (costs a shuffle)
+            logger.debug(f"repartition {current_parts} → {target_parts} partition(s)")
+            df = df.repartition(target_parts)
+        # else: already at the right count, no-op
+
+        # ── Step 2: write ─────────────────────────────────────────────────────
         df.write \
             .format("delta") \
             .mode("overwrite") \
             .option("overwriteSchema", "true") \
             .option("mergeSchema", "true") \
             .save(output_path)
-        
-        # Read back delta version from history
-        delta_version = 0
+
+        delta_version = self._read_delta_version(output_path)
+
+        # ── Step 3: read row count from Delta commit metrics (no full scan) ───
+        rows_output = 0
+        try:
+            from delta.tables import DeltaTable
+            delta_table = DeltaTable.forPath(spark, output_path)
+            history = delta_table.history(1).collect()
+            if history:
+                metrics = history[0].asDict().get("operationMetrics", {})
+                rows_output = int(metrics.get("numOutputRows", 0))
+        except Exception as e:
+            logger.warning(f"Could not get row count from Delta history: {e}")
+
+        # ── Step 4: OPTIMIZE (bin-packing) ────────────────────────────────────
+        # Compacts the small files produced by concurrent writes or the initial
+        # coalesce into full 128 MB Parquet files for fast downstream queries.
+        # Skipped for tiny datasets to avoid unnecessary overhead.
+        if rows_output >= self._OPTIMIZE_MIN_ROWS:
+            try:
+                spark.sql(f"OPTIMIZE delta.`{output_path}`")
+                logger.info(f"OPTIMIZE completed for {output_path}")
+            except Exception as opt_err:
+                # Non-fatal: data is already written; OPTIMIZE is a best-effort
+                # compaction and can be retried independently.
+                logger.warning(f"OPTIMIZE skipped (non-fatal): {opt_err}")
+
+        logger.info(
+            f"Silver Delta written: {rows_output} rows, "
+            f"delta_version={delta_version}, partitions_written={target_parts}"
+        )
+        return rows_output, delta_version
+
+    def _read_delta_version(self, output_path: str) -> int:
+        """Return the latest Delta commit version for *output_path* without a full table scan."""
+        from delta.tables import DeltaTable
+        spark = self.spark_manager.get_or_create_session()
         try:
             delta_table = DeltaTable.forPath(spark, output_path)
             history = delta_table.history(1).collect()
             if history:
-                delta_version = history[0].asDict().get("version", 0)
+                return history[0].asDict().get("version", 0)
         except Exception as e:
-            logger.warning(f"Could not read Delta version: {e}")
-        
-        # Get output row count
-        output_df = spark.read.format("delta").load(output_path)
-        rows_output = output_df.count()
-        
-        logger.info(f"Silver transformation complete: {total_rows} rows processed, {rows_output} rows written, delta_version={delta_version}")
-        
-        return total_rows, rows_output, delta_version
+            logger.warning(f"Could not read Delta version for {output_path}: {e}")
+        return 0
     
     def _join_dataframes_with_links(
         self,
@@ -3582,6 +3794,26 @@ class SilverTransformationService:
                         if bronze_col != unified_name:  # Don't drop if same name
                             columns_to_drop.add(bronze_col)
                             
+                # --- Unify _bronze_path dynamically if they exist ---
+                bronze_path_cols = [f"_{c}_bronze_path" for c in bronze_cols if f"_{c}_bronze_path" in df.columns]
+                if len(bronze_path_cols) > 1:
+                    unified_path_name = f"_{unified_name}_bronze_path"
+                    coalesce_inputs_paths = [F.col(c) for c in bronze_path_cols]
+                    df = df.withColumn(unified_path_name, F.coalesce(*coalesce_inputs_paths))
+                    logger.info(f"Unified image path columns {bronze_path_cols} into '{unified_path_name}'")
+                    if exclude_source_columns:
+                        for path_col in bronze_path_cols:
+                            if path_col != unified_path_name:
+                                columns_to_drop.add(path_col)
+                elif len(bronze_path_cols) == 1:
+                    path_col = bronze_path_cols[0]
+                    unified_path_name = f"_{unified_name}_bronze_path"
+                    if path_col != unified_path_name:
+                        df = df.withColumn(unified_path_name, F.col(path_col))
+                        logger.info(f"Aliased image path column {path_col} as '{unified_path_name}'")
+                        if exclude_source_columns:
+                            columns_to_drop.add(path_col)
+                            
             elif len(col_infos) == 1:
                 # Single column - just alias
                 bronze_col = col_infos[0]['bronze_col']
@@ -3593,6 +3825,15 @@ class SilverTransformationService:
                     # Mark source column for potential removal
                     if exclude_source_columns:
                         columns_to_drop.add(bronze_col)
+
+                # --- Alias _bronze_path dynamically if they exist ---
+                bronze_path_col = f"_{bronze_col}_bronze_path"
+                unified_path_name = f"_{unified_name}_bronze_path"
+                if bronze_path_col in df.columns and bronze_path_col != unified_path_name:
+                    df = df.withColumn(unified_path_name, F.col(bronze_path_col))
+                    logger.info(f"Aliased image path column {bronze_path_col} as '{unified_path_name}'")
+                    if exclude_source_columns:
+                        columns_to_drop.add(bronze_path_col)
         
         # Drop source columns if configured
         if exclude_source_columns and columns_to_drop:
@@ -3924,41 +4165,62 @@ class SilverTransformationService:
             return False
     
     async def _ensure_silver_schema_async(self):
-        """Create the silver schema in Trino if it doesn't exist."""
+        """Create the silver catalog and schema in Trino if they don't exist.
+
+        Because Trino uses ``catalog.store=memory``, catalogs are lost on every
+        restart.  This method auto-creates the Silver Delta catalog via
+        ``TrinoManager.ensure_internal_delta_catalog_async`` before checking the
+        schema, so callers never need to pre-provision the catalog manually.
+        """
         try:
             conn = await self.trino.get_connection()
             cur = await conn.cursor()
-            
-            # Check if silver catalog exists
+
+            # Check if silver catalog exists; create it on-the-fly if not.
+            # Trino uses catalog.store=memory, so catalogs are lost on restart.
             await cur.execute(f"SHOW CATALOGS LIKE '{self.silver_catalog}'")
             catalogs = await cur.fetchall()
-            
+
             if not catalogs:
-                logger.warning(
-                    f"Silver catalog '{self.silver_catalog}' does not exist in Trino. "
-                    f"Make sure silver.properties is configured in trino/catalog/"
+                logger.info(
+                    f"Silver catalog '{self.silver_catalog}' not found — creating dynamically."
                 )
                 await conn.close()
-                return
-            
+                created = await self.trino.ensure_internal_delta_catalog_async(
+                    self.silver_catalog
+                )
+                if not created:
+                    logger.error(
+                        f"Could not create Silver catalog '{self.silver_catalog}'. "
+                        f"Silver table will not be registered in Trino."
+                    )
+                    return
+                # Re-open connection on the newly created catalog
+                conn = await self.trino.get_connection()
+                cur = await conn.cursor()
+
             # Check if schema exists
-            await cur.execute(f"SHOW SCHEMAS FROM {self.silver_catalog} LIKE '{self.silver_schema}'")
+            await cur.execute(
+                f"SHOW SCHEMAS FROM {self.silver_catalog} LIKE '{self.silver_schema}'"
+            )
             schemas = await cur.fetchall()
-            
+
             if not schemas:
-                # Create schema with location pointing to silver bucket
-                create_schema_sql = f"""
-                    CREATE SCHEMA IF NOT EXISTS {self.silver_catalog}.{self.silver_schema}
-                    WITH (location = 's3a://{self.silver_bucket}/')
-                """
-                logger.info(f"Creating silver schema with SQL: {create_schema_sql}")
+                create_schema_sql = (
+                    f"CREATE SCHEMA IF NOT EXISTS "
+                    f"{self.silver_catalog}.{self.silver_schema} "
+                    f"WITH (location = 's3a://{self.silver_bucket}/')"
+                )
+                logger.info(f"Creating Silver schema: {self.silver_catalog}.{self.silver_schema}")
                 await cur.execute(create_schema_sql)
                 await cur.fetchall()
-                logger.info(f"Created silver schema: {self.silver_catalog}.{self.silver_schema}")
-            
+                logger.info(f"Created Silver schema: {self.silver_catalog}.{self.silver_schema}")
+            else:
+                logger.debug(f"Silver schema already exists: {self.silver_catalog}.{self.silver_schema}")
+
             await conn.close()
         except Exception as e:
-            logger.error(f"Failed to ensure silver schema exists: {e}")
+            logger.error(f"Failed to ensure Silver schema exists: {e}")
     
     async def get_silver_table_info(self, config_id: int) -> Optional[Dict[str, Any]]:
         """

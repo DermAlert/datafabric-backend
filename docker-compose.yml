@@ -12,10 +12,24 @@ x-airflow-common:
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://postgres:postgres@postgres-airflow/dermalert_airflow
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
     AIRFLOW__CORE__FERNET_KEY: ''
+    # Chave fixa compartilhada entre webserver e worker para que os tokens JWT
+    # de log-serving sejam válidos em ambos os containers. Sem isso cada
+    # container gera uma chave aleatória no boot → InvalidSignatureError.
+    AIRFLOW__WEBSERVER__SECRET_KEY: '7aa10963cfba2b3a1bdc0d50f0963ce4f8b1dcfd952c7245294a7c6314c083a7'
     AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
+    # Scheduler tuning: reduz reprocessamento contínuo de DAGs
+    AIRFLOW__SCHEDULER__MIN_FILE_PROCESS_INTERVAL: '30'
+    AIRFLOW__SCHEDULER__DAG_DIR_LIST_INTERVAL: '300'
+    AIRFLOW__SCHEDULER__PARSING_PROCESSES: '2'
+    AIRFLOW__SCHEDULER__MAX_DAGRUNS_TO_CREATE_PER_LOOP: '5'
+    AIRFLOW__SCHEDULER__MAX_TIS_PER_QUERY: '16'
+    # Triggerer: limita capacidade (padrão é 1000, excessivo em dev)
+    AIRFLOW__TRIGGERER__DEFAULT_CAPACITY: '100'
+    # Reduz verbosidade de log
+    AIRFLOW__LOGGING__LOGGING_LEVEL: 'WARNING'
     AWS_REGION: us-east-1
     AWS_S3_ALLOW_UNSAFE_RENAME: "true"
     _PIP_ADDITIONAL_REQUIREMENTS: ${_PIP_ADDITIONAL_REQUIREMENTS:-minio deltalake==1.4.2 beautifulsoup4 openpyxl}
@@ -41,21 +55,28 @@ services:
     build: ./project
     command: >
       bash -c "poetry run alembic upgrade head &&
-      poetry run uvicorn app.main:app --reload --workers 1 --host 0.0.0.0 --port 8000"
+      poetry run uvicorn app.main:app --workers 1 --host 0.0.0.0 --port 8000"
     env_file:
       - .env
     volumes:
       - ./project:/usr/src/app
+      # Persist Ivy/Maven JAR cache so Spark dependencies (delta-spark,
+      # hadoop-aws, trino-jdbc) are not re-downloaded on every container restart.
+      - spark_ivy_cache:/tmp/.ivy2
     ports:
       - 8004:8000
+      # Spark driver RPC + BlockManager ports — executors connect back to these.
+      # Fixed ports (not random) so docker-compose can expose them to the shared network.
+      - "7078:7078"   # spark.driver.port
+      - "7079:7079"   # spark.blockManager.port
+      - "4040:4040"   # Spark UI
     depends_on:
       postgres-backend:
         condition: service_healthy
       trino:
         condition: service_started
-      # - hive-metastore
     extra_hosts:
-      - "localhost:host-gateway"  # Mapeia localhost para o host
+      - "localhost:host-gateway"
     networks:
       - shared-network
 
@@ -109,6 +130,13 @@ services:
     image: postgres:18.1
     ports: 
       - 5433:5432
+    # Airflow clients: scheduler(1) + webserver(1) + workers(≤3) + headroom = ~20
+    command: >
+      postgres
+      -c max_connections=50
+      -c shared_buffers=256MB
+      -c work_mem=8MB
+      -c jit=off
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
@@ -127,6 +155,21 @@ services:
     image: postgres:18.1
     ports: 
       - 5434:5432
+    # Connection budget:
+    #   FastAPI pool  : pool_size(30) + max_overflow(70) = 100
+    #   Airflow       : ~20
+    #   Trino JDBC    : ~10
+    #   tools / admin : ~5
+    #   safety buffer : 15
+    #   TOTAL         : ~150  →  max_connections=200
+    command: >
+      postgres
+      -c max_connections=200
+      -c io_method=worker
+      -c io_workers=4
+      -c shared_buffers=512MB
+      -c work_mem=16MB
+      -c jit=off
     environment:
       - POSTGRES_USER=postgres
       - POSTGRES_PASSWORD=postgres
@@ -221,6 +264,91 @@ services:
       - minio
       # - hive-metastore
     restart: unless-stopped
+
+  # ==========================================================================
+  # Spark Standalone Cluster
+  # Isolates Spark JVM from the FastAPI process — eliminates CPU starvation.
+  # Switch backend from local[*] to spark://spark-master:7077 via .env.
+  #
+  # Web UIs:
+  #   Master:  http://localhost:8082
+  #   Worker:  http://localhost:8083
+  # ==========================================================================
+  spark-master:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark-worker
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+      --host spark-master --port 7077 --webui-port 8082
+    environment:
+      SPARK_MASTER_HOST: spark-master
+      SPARK_MASTER_PORT: "7077"
+      SPARK_MASTER_WEBUI_PORT: "8082"
+      # MinIO credentials so executors can access S3A directly
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      AWS_REGION: us-east-1
+      # Enable FileSystem recovery so Master state survives restarts
+      # Without this, backend's SparkSession waits forever for the old Master
+      SPARK_MASTER_OPTS: "-Dspark.deploy.recoveryMode=FILESYSTEM -Dspark.deploy.recoveryDirectory=/opt/spark/recovery"
+    volumes:
+      - spark_master_recovery:/opt/spark/recovery
+    ports:
+      - "7077:7077"
+      - "8082:8082"
+    networks:
+      - shared-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl --silent --fail http://localhost:8082 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  spark-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark-worker
+    command: >
+      /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
+      spark://spark-master:7077 --webui-port 8083
+    environment:
+      SPARK_MASTER: spark://spark-master:7077
+      # Give each worker 6 GB RAM and 4 cores — adjust to your machine.
+      # With pool_size=3, max 3 jobs × 2 executors = 6 executors share these.
+      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-6g}
+      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+      SPARK_WORKER_WEBUI_PORT: "8083"
+      AWS_ACCESS_KEY_ID: minio
+      AWS_SECRET_ACCESS_KEY: minio123
+      AWS_REGION: us-east-1
+    ports:
+      - "8083:8083"
+    depends_on:
+      spark-master:
+        condition: service_healthy
+    networks:
+      - shared-network
+    restart: unless-stopped
+    # Detect the "TCP survives master restart" scenario: the Master loses all
+    # in-memory state after a restart, but the Worker's existing TCP connection
+    # keeps heartbeats flowing — the Master just ignores them because the Worker
+    # ID is completely unknown to the new process. Without this healthcheck the
+    # Worker sits unregistered indefinitely, making all Spark jobs stall.
+    #
+    # The check queries the Master REST API and verifies that THIS worker
+    # (matched by container hostname) appears with state ALIVE. If not, the
+    # container is marked unhealthy → Docker restarts it → clean registration.
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python3 -c \"import urllib.request as u,json,sys,socket,os; ip=socket.gethostbyname(socket.gethostname()); data=json.loads(u.urlopen('http://spark-master:8082/json/',timeout=5).read()); sys.exit(0) if any(w.get('state')=='ALIVE' and ip in w.get('id','') for w in data.get('workers',[])) else os.system('kill 1')\""
+      interval: 30s
+      timeout: 10s
+      retries: 2
+      start_period: 60s
 
   airflow-webserver:
     <<: *airflow-common
@@ -348,6 +476,12 @@ services:
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
         exec /entrypoint airflow version
+        # Create spark_pool for controlling Spark job concurrency
+        airflow pools set spark_pool ${SPARK_POOL_SIZE:-3} "Controls max concurrent Spark jobs (Silver + Bronze)" || true
+        # Create HTTP connection for the datafabric backend
+        airflow connections add datafabric_backend \
+          --conn-type http \
+          --conn-host http://dermalert-backend:8000 || true
     environment:
       <<: *airflow-common-env
       _AIRFLOW_DB_MIGRATE: 'true'
@@ -379,6 +513,8 @@ volumes:
   airflow_pgdata:
   backend_pgdata:
   metastore_pgdata:
+  spark_ivy_cache:
+  spark_master_recovery:
 
 networks:
   shared-network:

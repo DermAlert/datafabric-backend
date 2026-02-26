@@ -104,7 +104,11 @@ class ShareTable(AuditMixin, Base):
         server_default='DELTA'
     )
     
-    # Reference to virtualized config (only one should be set, based on source_type)
+    # Reference to source config — only one is set depending on source_type
+    # Persistent Bronze/Silver (materialized Delta Lake)
+    bronze_persistent_config_id = Column(Integer, nullable=True)
+    silver_persistent_config_id = Column(Integer, nullable=True)
+    # Virtualized Bronze/Silver (on-demand Trino query)
     bronze_virtualized_config_id = Column(Integer, nullable=True)
     silver_virtualized_config_id = Column(Integer, nullable=True)
     
@@ -117,6 +121,9 @@ class ShareTable(AuditMixin, Base):
     current_version = Column(Integer, nullable=False, default=1)
     min_reader_version = Column(Integer, nullable=False, default=1)
     min_writer_version = Column(Integer, nullable=False, default=1)
+    
+    # Optional pinned Delta Lake version for time-travel sharing (bronze/silver source types only)
+    pinned_delta_version = Column(Integer, nullable=True)
     
     # Table metadata for Delta protocol
     table_format = Column(String(50), nullable=False, default='parquet')
@@ -180,9 +187,9 @@ class RecipientAccessLog(Base):
     
     id = Column(Integer, primary_key=True)
     recipient_id = Column(Integer, ForeignKey('delta_sharing.recipients.id'), nullable=False)
-    share_id = Column(Integer, ForeignKey('delta_sharing.shares.id'), nullable=True)
-    schema_id = Column(Integer, ForeignKey('delta_sharing.share_schemas.id'), nullable=True)
-    table_id = Column(Integer, ForeignKey('delta_sharing.share_tables.id'), nullable=True)
+    share_id = Column(Integer, ForeignKey('delta_sharing.shares.id', ondelete='SET NULL'), nullable=True)
+    schema_id = Column(Integer, ForeignKey('delta_sharing.share_schemas.id', ondelete='SET NULL'), nullable=True)
+    table_id = Column(Integer, ForeignKey('delta_sharing.share_tables.id', ondelete='SET NULL'), nullable=True)
     
     # Request details
     operation = Column(String(100), nullable=False)  # list_shares, get_table_metadata, query_table, etc.

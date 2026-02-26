@@ -396,10 +396,10 @@ class DeltaSharingProtocolService:
         """Get table version"""
         table = await self._get_accessible_table(recipient, share_name, schema_name, table_name)
         
-        # For simplicity, return current version. In a full implementation,
-        # you would handle time travel queries with starting_timestamp
+        # If the table has a pinned Delta version, report that version to the client
+        effective_version = table.pinned_delta_version if table.pinned_delta_version is not None else table.current_version
         return TableVersionResponse(
-            version=table.current_version,
+            version=effective_version,
             timestamp=table.data_atualizacao.isoformat() if table.data_atualizacao else None
         )
     
@@ -408,8 +408,8 @@ class DeltaSharingProtocolService:
         """Get table metadata (streaming response)"""
         table = await self._get_accessible_table(recipient, share_name, schema_name, table_name)
         
-        # Store table version for header (can be accessed by caller)
-        self._current_table_version = table.current_version
+        # Store effective version for header: pinned takes precedence over current
+        self._current_table_version = table.pinned_delta_version if table.pinned_delta_version is not None else table.current_version
         
         # Yield protocol information
         protocol = DeltaSharingProtocol(
@@ -427,8 +427,13 @@ class DeltaSharingProtocolService:
         """Query table data (streaming response)"""
         table = await self._get_accessible_table(recipient, share_name, schema_name, table_name)
         
-        # Store table version for header (can be accessed by caller)
-        self._current_table_version = table.current_version
+        # Effective version: server-side pin takes precedence over client request
+        if table.pinned_delta_version is not None:
+            self._current_table_version = table.pinned_delta_version
+        elif query_request.version is not None:
+            self._current_table_version = query_request.version
+        else:
+            self._current_table_version = table.current_version
         
         # Yield protocol information
         protocol = DeltaSharingProtocol(
@@ -581,258 +586,274 @@ class DeltaSharingProtocolService:
             numFiles=None  # Would be calculated from actual files
         )
     
-    async def _get_table_files(self, table: ShareTable, query_request: QueryTableRequest) -> List[FileAction]:
-        """Get files for a table using Delta Lake to avoid data duplication"""
-        files = []
-        
-        # If table has a storage location, read from Delta Lake
-        if table.storage_location and self.spark:
-            try:
-                # Build Delta Lake path
-                bucket_name, prefix = self._parse_storage_location(table.storage_location)
-                delta_path = f"s3a://{bucket_name}/{prefix}"
-                
-                logger.info(f"Reading Delta table from: {delta_path}")
-                
-                # Read Delta Lake table to get current files only (no duplicates)
-                delta_table = self.spark.read.format("delta").load(delta_path)
-                
-                # Get the underlying files from the Delta Lake transaction log
-                # This ensures we only get the current version of files, no duplicates
-                table_details = self.spark.sql(f"DESCRIBE DETAIL delta.`{delta_path}`").collect()
-                
-                if table_details:
-                    # Get table location and list current files
-                    table_location = table_details[0]['location']
-                    current_version = table_details[0]['minReaderVersion']
-                    
-                    # Use Delta Lake's internal file listing to get current files only
+    async def _get_files_from_delta_log(
+        self, bucket_name: str, prefix: str, version: Optional[int] = None
+    ) -> List[str]:
+        """
+        Read the Delta transaction log directly from MinIO to build the list of
+        active Parquet files at a specific version.
+
+        This replaces inputFiles() (which scans actual Parquet data and blocks the
+        asyncio event loop) with a fast, async approach that reads only the small
+        _delta_log/*.json commit files (~20-30 KB each).
+
+        Returns a list of s3a:// paths for the active files at the requested version.
+        """
+        import asyncio
+        loop = asyncio.get_event_loop()
+        log_prefix = f"{prefix}/_delta_log/"
+
+        def _list_log_files():
+            files = []
+            paginator = self.minio_client.get_paginator('list_objects_v2')
+            for page in paginator.paginate(Bucket=bucket_name, Prefix=log_prefix):
+                for obj in page.get('Contents', []):
+                    key = obj['Key']
+                    filename = key.split('/')[-1]
+                    # Only process commit JSON files — skip .crc and checkpoint parquets
+                    if not filename.endswith('.json'):
+                        continue
                     try:
-                        # Build base query
-                        base_query = f"SELECT input_file_name() as file_path, count(*) as row_count FROM delta.`{delta_path}`"
-                        
-                        # Apply filters if provided
-                        where_clause = ""
-                        if query_request.jsonPredicateHints:
-                            logger.info(f"Raw jsonPredicateHints received: {query_request.jsonPredicateHints}")
-                            
-                            # Handle both string and dict formats
-                            predicate_dict = query_request.jsonPredicateHints
-                            if isinstance(predicate_dict, str):
-                                try:
-                                    predicate_dict = json.loads(predicate_dict)
-                                    logger.info(f"Parsed jsonPredicateHints to dict: {predicate_dict}")
-                                except json.JSONDecodeError as e:
-                                    logger.warning(f"Failed to parse jsonPredicateHints as JSON: {e}")
-                                    predicate_dict = None
-                            
-                            if predicate_dict:
-                                logger.info(f"Converting predicate to SQL: {predicate_dict}")
-                                logger.info(f"Converting predicate to SQL: {predicate_dict}")
-                                sql_condition = self._convert_json_predicate_to_sql(predicate_dict)
-                                logger.info(f"SQL condition result: {sql_condition}")
-                                if sql_condition:
-                                    where_clause = f" WHERE {sql_condition}"
-                                    logger.info(f"Generated WHERE clause: {where_clause}")
-                                else:
-                                    logger.warning("Failed to convert predicate to SQL condition")
-                            else:
-                                logger.warning("Predicate dict is None after processing")
-                        
-                        # Build base query to find files that contain data matching the filter
-                        # IMPORTANT: Delta Sharing protocol limitation workaround
-                        # Standard Delta Sharing works at file level, but for mixed data files,
-                        # we need to actually filter the data and create temporary filtered files
-                        
-                        if where_clause:
-                            logger.info("Applying data-level filtering using PySpark")
-                            
-                            try:
-                                # Read the full Delta table and apply the filter
-                                filtered_df = self.spark.sql(f"""
-                                    SELECT * FROM delta.`{delta_path}`
-                                    {where_clause}
-                                """)
-                                
-                                # Check if filtered data exists
-                                filtered_count = filtered_df.count()
-                                logger.info(f"Filter matched {filtered_count} rows")
-                                
-                                if filtered_count == 0:
-                                    logger.info("No data matches the filter")
-                                    return []
-                                
-                                # Create a temporary location for filtered data
-                                import uuid
-                                temp_suffix = str(uuid.uuid4())[:8]
-                                temp_location = f"{prefix}_filtered_{temp_suffix}"
-                                temp_delta_path = f"s3a://{bucket_name}/{temp_location}"
-                                
-                                logger.info(f"Saving filtered data to temporary location: {temp_delta_path}")
-                                
-                                # Save filtered data as Delta format to temporary location
-                                filtered_df.write.format("delta").mode("overwrite").save(temp_delta_path)
-                                
-                                # Now get the files from the filtered Delta table
-                                filtered_files_query = f"SELECT DISTINCT input_file_name() as file_path FROM delta.`{temp_delta_path}`"
-                                filtered_files_df = self.spark.sql(filtered_files_query)
-                                active_files = [row['file_path'] for row in filtered_files_df.collect()]
-                                
-                                logger.info(f"Created {len(active_files)} filtered files")
-                                
-                                # Note: In production, you'd want to clean up temp files after some time
-                                # For now, we'll let them accumulate (they're relatively small)
-                                
-                            except Exception as e:
-                                logger.error(f"Error creating filtered data: {e}")
-                                # Fallback to standard file-level filtering
-                                files_with_data_query = f"""
-                                    SELECT DISTINCT input_file_name() as file_path
-                                    FROM delta.`{delta_path}`
-                                    {where_clause}
-                                """
-                                logger.info(f"Falling back to file-level filtering: {files_with_data_query}")
-                                relevant_files_df = self.spark.sql(files_with_data_query)
-                                active_files = [row['file_path'] for row in relevant_files_df.collect()]
-                            
-                        else:
-                            # No filter, get all files
-                            all_files_query = f"SELECT DISTINCT input_file_name() as file_path FROM delta.`{delta_path}`"
-                            logger.info(f"Getting all files: {all_files_query}")
-                            active_files_df = self.spark.sql(all_files_query)
-                            active_files = [row['file_path'] for row in active_files_df.collect()]
-                        
-                        logger.info(f"Found {len(active_files)} active files in Delta table")
-                        
-                        # Create file actions for each active file
-                        for file_path in active_files:
-                            # Extract the key from the full path
-                            if bucket_name in file_path:
-                                # Remove the s3a:// prefix and bucket name
-                                key = file_path.replace(f"s3a://{bucket_name}/", "")
-                            else:
-                                # Fallback: extract just the filename
-                                key = file_path.split('/')[-1]
-                            
-                            # Decode URL-encoded characters (Spark returns paths with %20 for spaces, etc.)
-                            # This prevents double-encoding when generate_presigned_url encodes again
-                            key = unquote(key)
-                            
-                            # Generate presigned URL
-                            try:
-                                presigned_url = self.minio_client.generate_presigned_url(
-                                    'get_object',
-                                    Params={'Bucket': bucket_name, 'Key': key},
-                                    ExpiresIn=3600  # 1 hour
-                                )
-                                presigned_url = self._rewrite_presigned_url(presigned_url)
-                                
-                                # Get file size (try to get from MinIO)
-                                file_size = 0
-                                try:
-                                    response = self.minio_client.head_object(bucket_name, key)
-                                    file_size = response.get('ContentLength', 0)
-                                except:
-                                    file_size = 0  # Default if we can't get size
-                                
-                                # Create file action
-                                file_action = FileAction(
-                                    url=presigned_url,
-                                    id=key.split('/')[-1],  # Use filename as ID
-                                    partitionValues={},  # Would be parsed from path in production
-                                    size=file_size,
-                                    stats=None,  # Would include min/max/null stats in production
-                                    version=table.current_version,
-                                    timestamp=int(datetime.now().timestamp() * 1000)
-                                )
-                                files.append(file_action)
-                                
-                            except Exception as e:
-                                logger.warning(f"Could not generate presigned URL for {key}: {e}")
-                                continue
-                    
-                    except Exception as e:
-                        logger.warning(f"Could not get active files from Delta table, falling back to file listing: {e}")
-                        # Fallback to original method but filter for current version only
-                        return await self._get_table_files_fallback(table, query_request)
-                
-            except Exception as e:
-                logger.error(f"Error reading Delta table for {table.id}: {e}")
-                # Fallback to original method
-                return await self._get_table_files_fallback(table, query_request)
-        else:
-            # Fallback if no Spark or no storage location
+                        file_version = int(filename.replace('.json', ''))
+                        if version is None or file_version <= version:
+                            files.append((file_version, key))
+                    except ValueError:
+                        pass
+            files.sort(key=lambda x: x[0])
+            return files
+
+        def _read_log_file(key):
+            resp = self.minio_client.get_object(Bucket=bucket_name, Key=key)
+            return resp['Body'].read().decode('utf-8')
+
+        log_files = await loop.run_in_executor(None, _list_log_files)
+        if not log_files:
+            logger.warning(f"No delta log files found at {log_prefix} (version={version})")
+            return []
+
+        # Validate that the requested version actually exists in the log.
+        # Delta Lake time-travel raises an error for versions beyond the table history.
+        if version is not None:
+            max_available = max(v for v, _ in log_files)
+            if version > max_available:
+                from fastapi import HTTPException, status as http_status
+                raise HTTPException(
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Delta version {version} does not exist for this table. "
+                        f"Latest available version is {max_available}."
+                    ),
+                )
+
+        # Replay all add/remove actions up to the requested version
+        active: set[str] = set()
+        for _, log_key in log_files:
+            content = await loop.run_in_executor(None, _read_log_file, log_key)
+            for line in content.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    action = json.loads(line)
+                    if action.get('add'):
+                        path = unquote(action['add']['path'])
+                        active.add(path)
+                    elif action.get('remove'):
+                        path = unquote(action['remove']['path'])
+                        active.discard(path)
+                except (json.JSONDecodeError, KeyError, TypeError):
+                    pass
+
+        logger.info(
+            f"Delta log replay (version={version}): {len(active)} active files in {prefix}"
+        )
+        return [f"s3a://{bucket_name}/{prefix}/{f}" for f in active]
+
+    async def _get_table_files(self, table: ShareTable, query_request: QueryTableRequest) -> List[FileAction]:
+        """Get files for a table by replaying the Delta transaction log."""
+        files = []
+
+        if not table.storage_location:
             return await self._get_table_files_fallback(table, query_request)
-        
-        logger.info(f"Found {len(files)} files for table {table.id} using Delta Lake")
+
+        try:
+            bucket_name, prefix = self._parse_storage_location(table.storage_location)
+
+            # Effective version: server-side pin takes precedence over client request
+            effective_version = table.pinned_delta_version
+            if effective_version is None and query_request.version is not None:
+                effective_version = query_request.version
+
+            if effective_version is not None:
+                logger.info(f"Serving {table.storage_location} at version {effective_version}")
+            else:
+                logger.info(f"Serving {table.storage_location} (latest)")
+
+            # Parse filter condition from request
+            sql_condition = None
+            if query_request.jsonPredicateHints:
+                logger.info(f"Raw jsonPredicateHints: {query_request.jsonPredicateHints}")
+                predicate_dict = query_request.jsonPredicateHints
+                if isinstance(predicate_dict, str):
+                    try:
+                        predicate_dict = json.loads(predicate_dict)
+                    except json.JSONDecodeError as e:
+                        logger.warning(f"Failed to parse jsonPredicateHints: {e}")
+                        predicate_dict = None
+                if predicate_dict:
+                    sql_condition = self._convert_json_predicate_to_sql(predicate_dict)
+                    logger.info(f"SQL filter: {sql_condition}")
+
+            if sql_condition and self.spark:
+                # Filter path: Spark is required. Run in an executor thread so we don't
+                # block the asyncio event loop during the synchronous Spark operations.
+                import asyncio, uuid as _uuid
+                loop = asyncio.get_event_loop()
+                delta_path = f"s3a://{bucket_name}/{prefix}"
+                _eff_ver = effective_version
+
+                def _run_spark_filter():
+                    reader = self.spark.read.format("delta")
+                    if _eff_ver is not None:
+                        reader = reader.option("versionAsOf", _eff_ver)
+                    df = reader.load(delta_path)
+                    filtered = df.filter(sql_condition)
+                    count = filtered.count()
+                    if count == 0:
+                        return []
+                    temp_path = f"s3a://{bucket_name}/{prefix}_filtered_{_uuid.uuid4().hex[:8]}"
+                    filtered.write.format("delta").mode("overwrite").save(temp_path)
+                    return list(self.spark.read.format("delta").load(temp_path).inputFiles())
+
+                try:
+                    active_files = await loop.run_in_executor(None, _run_spark_filter)
+                except Exception as e:
+                    logger.error(f"Spark filter error: {e} — falling back to unfiltered")
+                    active_files = await self._get_files_from_delta_log(
+                        bucket_name, prefix, effective_version
+                    )
+            else:
+                # No filter — read delta log directly (fast async, no Spark needed)
+                active_files = await self._get_files_from_delta_log(
+                    bucket_name, prefix, effective_version
+                )
+
+            # Build FileActions with presigned URLs
+            # generate_presigned_url and head_object are blocking network calls —
+            # run the entire loop in a thread to avoid blocking the event loop.
+            import asyncio as _asyncio
+            _eff_ver_for_files = effective_version
+            _table_ver = table.current_version
+            _rewrite = self._rewrite_presigned_url
+            _client = self.minio_client
+
+            def _build_file_actions():
+                result = []
+                for file_path in active_files:
+                    if f"s3a://{bucket_name}/" in file_path:
+                        key = file_path.replace(f"s3a://{bucket_name}/", "")
+                    elif file_path.startswith(prefix):
+                        key = file_path
+                    else:
+                        key = f"{prefix}/{file_path}"
+
+                    key = unquote(key)
+                    try:
+                        presigned_url = _client.generate_presigned_url(
+                            'get_object',
+                            Params={'Bucket': bucket_name, 'Key': key},
+                            ExpiresIn=3600,
+                        )
+                        presigned_url = _rewrite(presigned_url)
+
+                        file_size = 0
+                        try:
+                            head = _client.head_object(Bucket=bucket_name, Key=key)
+                            file_size = head.get('ContentLength', 0)
+                        except Exception:
+                            pass
+
+                        result.append(FileAction(
+                            url=presigned_url,
+                            id=key.split('/')[-1],
+                            partitionValues={},
+                            size=file_size,
+                            stats=None,
+                            version=_eff_ver_for_files if _eff_ver_for_files is not None else _table_ver,
+                            timestamp=int(datetime.now().timestamp() * 1000),
+                        ))
+                    except Exception as e:
+                        logger.warning(f"Could not generate presigned URL for {key}: {e}")
+                return result
+
+            files = await _asyncio.to_thread(_build_file_actions)
+
+        except Exception as e:
+            from fastapi import HTTPException as _HTTPException
+            if isinstance(e, _HTTPException):
+                raise  # version-not-found and similar errors must propagate to the client
+            logger.error(f"Error building file list for table {table.id}: {e}")
+            return await self._get_table_files_fallback(table, query_request)
+
+        logger.info(f"Found {len(files)} files for table {table.id}")
         return files
     
     async def _get_table_files_fallback(self, table: ShareTable, query_request: QueryTableRequest) -> List[FileAction]:
         """Fallback method to get table files using MinIO listing (may have duplicates)"""
-        files = []
-        
-        if table.storage_location:
+        if not table.storage_location:
+            logger.info(f"Found 0 files for table {table.id} using fallback method")
+            return []
+
+        # list_objects_v2 and generate_presigned_url are blocking — offload to thread pool.
+        import asyncio as _asyncio
+
+        _client = self.minio_client
+        _rewrite = self._rewrite_presigned_url
+        _table_ver = table.current_version
+        _table_id = table.id
+
+        def _list_and_build():
+            result = []
             try:
-                # List objects in the storage location - Look for parquet files
                 bucket_name, prefix = self._parse_storage_location(table.storage_location)
-                
-                response = self.minio_client.list_objects_v2(
-                    Bucket=bucket_name,
-                    Prefix=prefix
-                )
-                
-                # Keep track of parquet files we've seen
-                parquet_files = set()
-                
+                response = _client.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+                parquet_files: set = set()
+
                 for obj in response.get('Contents', []):
                     key = obj['Key']
-                    
-                    # Look for parquet files (MinIO stores them as directories)
                     if 'part-' in key and '.snappy.parquet' in key:
-                        # Extract the parquet file path
-                        if key.endswith('/xl.meta'):
-                            parquet_path = key.replace('/xl.meta', '')
-                        else:
-                            parquet_path = key
-                            
-                        # Avoid duplicates
-                        if parquet_path in parquet_files:
+                        parquet_path = key.replace('/xl.meta', '') if key.endswith('/xl.meta') else key
+                        if parquet_path in parquet_files or '_delta_log' in parquet_path:
                             continue
                         parquet_files.add(parquet_path)
-                        
-                        # Skip delta log files
-                        if '_delta_log' in parquet_path:
-                            continue
-                        
-                        # Generate presigned URL for the actual parquet file
                         try:
-                            presigned_url = self.minio_client.generate_presigned_url(
+                            presigned_url = _client.generate_presigned_url(
                                 'get_object',
                                 Params={'Bucket': bucket_name, 'Key': parquet_path},
-                                ExpiresIn=3600  # 1 hour
+                                ExpiresIn=3600,
                             )
-                            presigned_url = self._rewrite_presigned_url(presigned_url)
-                            
-                            # Create file action
-                            file_action = FileAction(
+                            presigned_url = _rewrite(presigned_url)
+                            result.append(FileAction(
                                 url=presigned_url,
-                                id=parquet_path.split('/')[-1],  # Use filename as ID
-                                partitionValues={},  # Would be parsed from path in production
+                                id=parquet_path.split('/')[-1],
+                                partitionValues={},
                                 size=obj.get('Size', 0),
-                                stats=None,  # Would include min/max/null stats in production
-                                version=table.current_version,
-                                timestamp=int(obj.get('LastModified', obj.get('last_modified', datetime.now())).timestamp() * 1000)
-                            )
-                            files.append(file_action)
+                                stats=None,
+                                version=_table_ver,
+                                timestamp=int(
+                                    obj.get('LastModified', obj.get('last_modified', datetime.now()))
+                                    .timestamp() * 1000
+                                ),
+                            ))
                         except Exception as e:
                             logger.warning(f"Could not generate presigned URL for {parquet_path}: {e}")
-                            continue
-                        
             except ClientError as e:
-                logger.error(f"Error accessing storage for table {table.id}: {e}")
+                logger.error(f"Error accessing storage for table {_table_id}: {e}")
             except Exception as e:
-                logger.error(f"Unexpected error accessing storage for table {table.id}: {e}")
-        
+                logger.error(f"Unexpected error accessing storage for table {_table_id}: {e}")
+            return result
+
+        files = await _asyncio.to_thread(_list_and_build)
         logger.info(f"Found {len(files)} files for table {table.id} using fallback method")
         return files
     
@@ -844,11 +865,18 @@ class DeltaSharingProtocolService:
                 bucket_name, prefix = self._parse_storage_location(table.storage_location)
                 delta_path = f"s3a://{bucket_name}/{prefix}"
                 
-                logger.info(f"Reading schema from Delta table: {delta_path}")
+                pinned_version = getattr(table, 'pinned_delta_version', None)
+                if pinned_version is not None:
+                    logger.info(f"Reading schema from Delta table: {delta_path} at pinned version {pinned_version}")
+                else:
+                    logger.info(f"Reading schema from Delta table: {delta_path}")
                 
                 try:
-                    # Read Delta table and get schema
-                    delta_table = self.spark.read.format("delta").load(delta_path)
+                    # Read Delta table (at pinned version for time-travel) and get schema
+                    delta_reader = self.spark.read.format("delta")
+                    if pinned_version is not None:
+                        delta_reader = delta_reader.option("versionAsOf", pinned_version)
+                    delta_table = delta_reader.load(delta_path)
                     spark_schema = delta_table.schema
                     
                     # Convert Spark schema to Delta Sharing format
@@ -884,63 +912,51 @@ class DeltaSharingProtocolService:
             return None
         
     async def _read_delta_schema(self, storage_location: str) -> Optional[str]:
-        """Read schema from Delta Lake transaction log"""
-        try:
-            bucket_name, prefix = self._parse_storage_location(storage_location)
-            
-            # Look for Delta log files
-            response = self.minio_client.list_objects_v2(
-                Bucket=bucket_name,
-                Prefix=f"{prefix}/_delta_log"
-            )
-            
-            # Find Delta log JSON files (look for the directory structure in MinIO)
-            json_files = []
-            for obj in response.get('Contents', []):
-                if '.json' in obj['Key'] and not obj['Key'].endswith('/xl.meta'):
-                    json_files.append(obj['Key'])
-                elif '.json/xl.meta' in obj['Key']:
-                    # Extract the json file path (remove /xl.meta)
-                    json_file = obj['Key'].replace('/xl.meta', '')
-                    json_files.append(json_file)
-            
-            if json_files:
-                # Sort to get the first file which should have metadata
+        """Read schema from Delta Lake transaction log (non-blocking)."""
+        # list_objects_v2 and get_object are blocking network calls — run in thread pool.
+        import asyncio as _asyncio
+        import json as _json
+
+        _client = self.minio_client
+
+        def _sync_read() -> Optional[str]:
+            try:
+                bucket_name, prefix = self._parse_storage_location(storage_location)
+                response = _client.list_objects_v2(
+                    Bucket=bucket_name,
+                    Prefix=f"{prefix}/_delta_log",
+                )
+                json_files = []
+                for obj in response.get('Contents', []):
+                    key = obj['Key']
+                    if '.json' in key and not key.endswith('/xl.meta'):
+                        json_files.append(key)
+                    elif '.json/xl.meta' in key:
+                        json_files.append(key.replace('/xl.meta', ''))
+
+                if not json_files:
+                    return None
+
                 json_files.sort()
-                metadata_file = json_files[0]  # Start with the first file which should have metadata
-                
-                # Try to read the metadata file
                 try:
-                    obj_response = self.minio_client.get_object(
-                        Bucket=bucket_name,
-                        Key=metadata_file
-                    )
+                    obj_response = _client.get_object(Bucket=bucket_name, Key=json_files[0])
                     content = obj_response['Body'].read().decode('utf-8')
-                    
-                    # Parse Delta log entries (NDJSON format - one JSON per line)
-                    import json as json_module
-                    lines = content.strip().split('\n')
-                    
-                    for line in lines:
+                    for line in content.strip().split('\n'):
                         if line.strip():
                             try:
-                                log_entry = json_module.loads(line)
-                                
-                                # Look for metaData entry
-                                if 'metaData' in log_entry:
-                                    schema_string = log_entry['metaData'].get('schemaString')
-                                    if schema_string:
-                                        return schema_string
-                            except json_module.JSONDecodeError:
+                                entry = _json.loads(line)
+                                schema_string = entry.get('metaData', {}).get('schemaString')
+                                if schema_string:
+                                    return schema_string
+                            except _json.JSONDecodeError:
                                 continue
-                        
                 except Exception as e:
-                    logger.warning(f"Could not read Delta log file {metadata_file}: {e}")
-                    
-        except Exception as e:
-            logger.warning(f"Could not read Delta schema from {storage_location}: {e}")
-            
-        return None
+                    logger.warning(f"Could not read Delta log file {json_files[0]}: {e}")
+            except Exception as e:
+                logger.warning(f"Could not read Delta schema from {storage_location}: {e}")
+            return None
+
+        return await _asyncio.to_thread(_sync_read)
         
         fields = []
         for field in arrow_schema:

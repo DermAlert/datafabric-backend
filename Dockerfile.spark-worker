@@ -1,0 +1,65 @@
+# Custom Spark 4.0 worker image — matches the backend's Python/Java environment
+# so Python UDFs serialized by the driver (FastAPI) run identically on workers.
+#
+# Build: docker compose build spark-master spark-worker
+#
+FROM python:3.11-slim-bookworm
+
+ENV SPARK_VERSION=4.0.0
+ENV HADOOP_VERSION=3
+ENV SPARK_HOME=/opt/spark
+ENV PATH="${SPARK_HOME}/bin:${SPARK_HOME}/sbin:${PATH}"
+ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+ENV PATH="${JAVA_HOME}/bin:${PATH}"
+
+# Python workers spawned by executors must use the same interpreter
+ENV PYSPARK_PYTHON=python3
+ENV PYSPARK_DRIVER_PYTHON=python3
+ENV PYSPARK_HADOOP_VERSION=3
+
+# Install Java 17 (same as backend) + minimal utilities
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        openjdk-17-jre-headless \
+        curl \
+        procps \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and install Apache Spark 4.0
+RUN curl -fsSL \
+    "https://archive.apache.org/dist/spark/spark-${SPARK_VERSION}/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION}.tgz" \
+    | tar -xz -C /opt/ && \
+    mv /opt/spark-${SPARK_VERSION}-bin-hadoop${HADOOP_VERSION} ${SPARK_HOME} && \
+    chmod -R 755 ${SPARK_HOME}
+
+# Pre-download Delta Lake + Hadoop-AWS + Trino JDBC JARs into the local Maven
+# cache so workers don't need internet access on every startup.
+# Versions must match spark_manager.py / pyproject.toml / running Trino server.
+ENV DELTA_JAR_VERSION=4.0.0
+ENV HADOOP_AWS_VERSION=3.4.0
+ENV TRINO_JDBC_VERSION=479
+RUN ${SPARK_HOME}/bin/spark-shell \
+    --packages "io.delta:delta-spark_2.13:${DELTA_JAR_VERSION},org.apache.hadoop:hadoop-aws:${HADOOP_AWS_VERSION},io.trino:trino-jdbc:${TRINO_JDBC_VERSION}" \
+    --conf spark.driver.bindAddress=127.0.0.1 \
+    -e "System.exit(0)" 2>/dev/null || true
+
+# Install Python packages — exact same versions as the backend
+COPY ./project/pyproject.toml /tmp/pyproject.toml
+RUN pip install --no-cache-dir \
+    pyspark==4.0.0 \
+    delta-spark==4.0.0 \
+    boto3 \
+    pyarrow \
+    unicodedata2 \
+    pandas \
+    azure-storage-blob \
+    google-cloud-storage
+
+WORKDIR ${SPARK_HOME}
+
+# Expose Spark Master / Worker default ports
+# Master: 7077 (Spark protocol), 8082 (Web UI)
+# Worker: 8083 (Web UI), random for executor communication
+EXPOSE 7077 8082 8083
+
+CMD ["/bin/bash"]

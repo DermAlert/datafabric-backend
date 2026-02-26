@@ -11,7 +11,7 @@ Key concepts:
 - TransformConfig: Config for materialization (Bronze → Silver Delta) with inline filters
 """
 
-from sqlalchemy import Column, Integer, String, ForeignKey, JSON, Boolean, Text, Enum as SQLEnum, Float
+from sqlalchemy import Column, Integer, String, ForeignKey, JSON, Boolean, Text, Enum as SQLEnum, Float, Index
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
 from sqlalchemy import UniqueConstraint, TIMESTAMP
@@ -263,7 +263,11 @@ class TransformExecution(AuditMixin, Base):
     Tracks each execution including versioning info and merge statistics.
     """
     __tablename__ = "silver_executions"
-    __table_args__ = {'schema': 'datasets'}
+    __table_args__ = (
+        Index('ix_silver_exec_config_status', 'config_id', 'status'),
+        Index('ix_silver_exec_config_finished', 'config_id', 'finished_at'),
+        {'schema': 'datasets'},
+    )
 
     id = Column(Integer, primary_key=True)
     config_id = Column(Integer, ForeignKey('datasets.silver_persistent_configs.id', ondelete='CASCADE'), nullable=False)

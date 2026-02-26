@@ -345,6 +345,64 @@ class TrinoManager:
             if 'conn' in locals():
                 await conn.close()
 
+    async def ensure_internal_delta_catalog_async(self, catalog_name: str) -> bool:
+        """
+        Create an internal Delta Lake catalog (bronze or silver) pointing to MinIO.
+
+        Unlike ``ensure_catalog_exists_async``, which is for user-defined data
+        connections, this method creates the fixed internal catalogs that the
+        platform itself uses for storing Bronze and Silver tables.
+
+        Because Trino uses ``catalog.store=memory``, all catalogs are lost on
+        every Trino restart.  This method is idempotent (``CREATE CATALOG IF NOT
+        EXISTS``) and safe to call on every request or at application startup.
+
+        Args:
+            catalog_name: Trino catalog name to create (e.g. ``"bronze"``, ``"silver"``).
+
+        Returns:
+            ``True`` if the catalog already existed or was created successfully.
+        """
+        endpoint = self.minio_endpoint
+        if not endpoint.startswith("http"):
+            scheme = "https" if self.minio_secure else "http"
+            endpoint = f"{scheme}://{endpoint}"
+
+        metastore_path = (
+            f"s3a://{self.internal_metastore_bucket.rstrip('/')}/{catalog_name}/"
+        )
+
+        properties = {
+            "hive.metastore": "file",
+            "hive.metastore.catalog.dir": metastore_path,
+            "delta.register-table-procedure.enabled": "true",
+            "fs.native-s3.enabled": "true",
+            "s3.region": "us-east-1",
+            "delta.enable-non-concurrent-writes": "true",
+            "s3.path-style-access": "true",
+            "s3.aws-access-key": self.minio_access_key,
+            "s3.aws-secret-key": self.minio_secret_key,
+            "s3.endpoint": endpoint,
+        }
+
+        create_sql = self.create_catalog_query(catalog_name, "delta_lake", properties)
+
+        try:
+            conn = await self.get_connection()
+            cur = await conn.cursor()
+            await cur.execute(create_sql)
+            await cur.fetchall()
+            logger.info(f"[TrinoManager] Internal Delta catalog '{catalog_name}' ready")
+            return True
+        except Exception as e:
+            logger.error(
+                f"[TrinoManager] Failed to create internal Delta catalog '{catalog_name}': {e}"
+            )
+            return False
+        finally:
+            if "conn" in locals():
+                await conn.close()
+
     def ensure_catalog_exists(self, connection_name: str, connection_type: str, params: Dict[str, Any], connection_id: Optional[int] = None) -> bool:
         """
         Synchronous wrapper for ensure_catalog_exists_async.

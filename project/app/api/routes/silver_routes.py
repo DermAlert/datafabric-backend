@@ -12,9 +12,24 @@ Use ColumnGroup and ColumnMapping from Equivalence for semantic unification.
 NOTE: Filters are now defined inline within each config (not as separate entities).
 """
 
+import os
+import logging
+
+import httpx
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List, Optional
+
+_logger = logging.getLogger(__name__)
+
+# When True, POST /execute dispatches to Airflow (returns 202) instead of
+# running Spark synchronously. Set SILVER_AIRFLOW_DISPATCH_ENABLED=true in .env.
+_AIRFLOW_DISPATCH   = os.getenv("SILVER_AIRFLOW_DISPATCH_ENABLED", "false").lower() == "true"
+_AIRFLOW_API_URL    = os.getenv("AIRFLOW_API_URL",    "http://airflow-webserver:8080")
+_AIRFLOW_API_USER   = os.getenv("AIRFLOW_API_USER",   "airflow")
+_AIRFLOW_API_PASS   = os.getenv("AIRFLOW_API_PASS",   "airflow")
+_AIRFLOW_DAG_ID     = "spark_execution"
 
 from ..schemas.data_query_schemas import SilverDataQueryRequest
 from ..schemas.silver_schemas import (
@@ -54,7 +69,7 @@ from ..schemas.silver_schemas import (
 )
 from ...services.silver.transformation_service import SilverTransformationService
 from ...services.silver.versioning_service import SilverVersioningService
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...database.models.silver import TransformConfig, TransformStatus, TransformExecution
 import logging
 
@@ -1021,7 +1036,60 @@ async def execute_transform_config(
     config_id: int,
     service: SilverTransformationService = Depends(get_service)
 ):
-    return await service.execute_transform_config(config_id)
+    if not _AIRFLOW_DISPATCH:
+        # Direct (synchronous) execution — original behaviour
+        return await service.execute_transform_config(config_id)
+
+    # -----------------------------------------------------------------------
+    # Airflow dispatch path: create a QUEUED execution record, trigger the
+    # spark_execution DAG, and return 202 immediately.
+    # The Airflow spark_pool enforces max-concurrency; the client polls
+    # GET /api/silver/persistent/configs/{config_id}/executions for status.
+    # -----------------------------------------------------------------------
+    execution_id = await service.create_queued_execution(config_id)
+
+    dag_conf = {
+        "job_type":     "silver",
+        "config_id":    config_id,
+        "execution_id": execution_id,
+        "priority":     1,
+    }
+
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{_AIRFLOW_API_URL}/api/v1/dags/{_AIRFLOW_DAG_ID}/dagRuns",
+                auth=(_AIRFLOW_API_USER, _AIRFLOW_API_PASS),
+                json={"conf": dag_conf},
+            )
+            resp.raise_for_status()
+            dag_run_id = resp.json().get("dag_run_id", "unknown")
+            _logger.info(
+                f"Silver config {config_id} queued via Airflow: "
+                f"dag_run_id={dag_run_id} execution_id={execution_id}"
+            )
+    except Exception as exc:
+        # Airflow unreachable — fall back to synchronous execution so the
+        # user never gets a silent failure.
+        _logger.warning(
+            f"Airflow dispatch failed ({exc}), falling back to direct execution "
+            f"for Silver config {config_id}"
+        )
+        return await service.execute_transform_config(config_id)
+
+    return JSONResponse(
+        status_code=202,
+        content={
+            "status":       "queued",
+            "execution_id": execution_id,
+            "dag_run_id":   dag_run_id,
+            "message":      (
+                f"Silver job queued (execution_id={execution_id}). "
+                "Poll GET /api/silver/persistent/configs/"
+                f"{config_id}/executions for status."
+            ),
+        },
+    )
 
 
 @router.get(
@@ -1172,6 +1240,7 @@ async def list_config_executions(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to list config executions: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1298,6 +1367,7 @@ async def get_silver_version_history(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get version history: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1465,6 +1535,7 @@ async def query_silver_data_with_time_travel(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to query Silver data: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1663,6 +1734,7 @@ async def query_silver_data_filtered(
             detail=f"Invalid filter parameter: {str(e)}"
         )
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to query Silver data with filters: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1739,6 +1811,7 @@ async def test_llm_extraction(
             detail=str(e)
         )
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"LLM extraction test failed: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

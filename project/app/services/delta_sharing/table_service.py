@@ -10,10 +10,12 @@ from datetime import datetime, timedelta
 from ...database.models.delta_sharing import (
     Share, ShareSchema, ShareTable, Recipient, 
     RecipientAccessLog, ShareTableVersion, ShareTableFile,
-    ShareStatus, TableShareStatus, recipient_shares
+    ShareStatus, TableShareStatus, ShareTableSourceType, recipient_shares
 )
 from ...database.models.core import Dataset, Organization
 from ...database.models.storage import DatasetStorage
+from ...database.models.bronze import BronzePersistentConfig, BronzeVirtualizedConfig
+from ...database.models.silver import TransformConfig, VirtualizedConfig
 from ...api.schemas.delta_sharing_schemas import (
     ShareTableCreate, ShareTableUpdate, ShareTableDetail,
     RecipientCreate, RecipientUpdate, RecipientDetail,
@@ -208,7 +210,22 @@ class TableService:
         update_data = table_data.dict(exclude_unset=True)
         version_updated = False
         dataset_id_changed = False
-        
+
+        if 'name' in update_data and update_data['name'] and update_data['name'] != db_table.name:
+            dup_query = select(ShareTable).where(
+                and_(
+                    ShareTable.schema_id == schema_id,
+                    ShareTable.name == update_data['name'],
+                    ShareTable.id != table_id,
+                )
+            )
+            dup_result = await self.db.execute(dup_query)
+            if dup_result.scalar_one_or_none():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Table name '{update_data['name']}' already exists in this schema"
+                )
+
         for field, value in update_data.items():
             old_value = getattr(db_table, field)
             if old_value != value:
@@ -363,17 +380,66 @@ class TableService:
         
         self.db.add(version)
     
+    async def _resolve_source_name_description(self, table: ShareTable) -> tuple[str, Optional[str]]:
+        """Return (name, description) from the linked source config, falling back to stored values."""
+        source_type = getattr(table, 'source_type', None)
+
+        if source_type == ShareTableSourceType.BRONZE:
+            config_id = getattr(table, 'bronze_persistent_config_id', None)
+            if config_id:
+                result = await self.db.execute(
+                    select(BronzePersistentConfig).where(BronzePersistentConfig.id == config_id)
+                )
+                config = result.scalar_one_or_none()
+                if config:
+                    return config.name, config.description
+
+        elif source_type == ShareTableSourceType.SILVER:
+            config_id = getattr(table, 'silver_persistent_config_id', None)
+            if config_id:
+                result = await self.db.execute(
+                    select(TransformConfig).where(TransformConfig.id == config_id)
+                )
+                config = result.scalar_one_or_none()
+                if config:
+                    return config.name, config.description
+
+        elif source_type == ShareTableSourceType.BRONZE_VIRTUALIZED:
+            config_id = getattr(table, 'bronze_virtualized_config_id', None)
+            if config_id:
+                result = await self.db.execute(
+                    select(BronzeVirtualizedConfig).where(BronzeVirtualizedConfig.id == config_id)
+                )
+                config = result.scalar_one_or_none()
+                if config:
+                    return config.name, getattr(config, 'description', None)
+
+        elif source_type == ShareTableSourceType.SILVER_VIRTUALIZED:
+            config_id = getattr(table, 'silver_virtualized_config_id', None)
+            if config_id:
+                result = await self.db.execute(
+                    select(VirtualizedConfig).where(VirtualizedConfig.id == config_id)
+                )
+                config = result.scalar_one_or_none()
+                if config:
+                    return config.name, getattr(config, 'description', None)
+
+        return table.name, table.description
+
     async def _build_table_detail(self, table: ShareTable, schema: ShareSchema, share: Share, dataset=None) -> ShareTableDetail:
         """Build detailed table information. Dataset may be None for virtualized tables."""
-        # Get source_type as string value
         source_type_value = "delta"
         if hasattr(table, 'source_type') and table.source_type is not None:
             source_type_value = table.source_type.value if hasattr(table.source_type, 'value') else str(table.source_type)
-        
+
+        # Always resolve name/description from the live source config
+        live_name, live_description = await self._resolve_source_name_description(table)
+
         return ShareTableDetail(
             id=table.id,
-            name=table.name,
-            description=table.description,
+            name=live_name,
+            protocol_table_name=table.name,
+            description=live_description,
             schema_id=table.schema_id,
             schema_name=schema.name,
             share_id=schema.share_id,
@@ -384,10 +450,13 @@ class TableService:
             share_mode=table.share_mode,
             filter_condition=table.filter_condition,
             current_version=table.current_version,
+            pinned_delta_version=getattr(table, 'pinned_delta_version', None),
             table_format=table.table_format,
             partition_columns=table.partition_columns,
             storage_location=table.storage_location,
             source_type=source_type_value,
+            bronze_persistent_config_id=getattr(table, 'bronze_persistent_config_id', None),
+            silver_persistent_config_id=getattr(table, 'silver_persistent_config_id', None),
             bronze_virtualized_config_id=getattr(table, 'bronze_virtualized_config_id', None),
             silver_virtualized_config_id=getattr(table, 'silver_virtualized_config_id', None),
             data_criacao=table.data_criacao,

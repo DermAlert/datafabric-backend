@@ -46,60 +46,65 @@ class BronzeVersioningService:
     ) -> Dict[str, Any]:
         """
         Execute OVERWRITE operation.
-        
-        This replaces all data but Delta Lake still maintains version history
-        for time travel.
-        
-        Args:
-            spark: SparkSession
-            source_df: DataFrame to write
-            output_path: S3A path for Delta table
-            
-        Returns:
-            Dict with delta_version, rows_inserted, total_rows, size_bytes, num_files
+
+        All blocking Spark I/O is offloaded to a thread so the asyncio event
+        loop stays responsive to other requests while this writes to Delta.
         """
-        from delta.tables import DeltaTable
-        
-        logger.info(f"Executing OVERWRITE at {output_path}")
-        
-        source_df.write \
-            .format("delta") \
-            .mode("overwrite") \
-            .option("overwriteSchema", "true") \
-            .option("mergeSchema", "true") \
-            .save(output_path)
-        
-        # Get version info and metrics from Delta history
-        delta_table = DeltaTable.forPath(spark, output_path)
-        history = delta_table.history(1).collect()
-        
-        version = 0
-        size_bytes = None
-        num_files = None
-        
-        if history:
-            row_dict = history[0].asDict()
-            version = row_dict["version"]
-            metrics = row_dict.get("operationMetrics", {}) or {}
-            size_bytes = int(metrics.get("numOutputBytes", 0)) or None
-            num_files = int(metrics.get("numFiles", 0)) or int(metrics.get("numAddedFiles", 0)) or None
-        
-        row_count = source_df.count()
-        
-        return {
-            'delta_version': version,
-            'rows_inserted': row_count,
-            'rows_updated': 0,
-            'rows_deleted': 0,
-            'total_rows': row_count,
-            'size_bytes': size_bytes,
-            'num_files': num_files
-        }
+        import asyncio
+        from concurrent.futures import ThreadPoolExecutor
+
+        def _sync_write() -> Dict:
+            from delta.tables import DeltaTable
+
+            logger.info(f"Executing OVERWRITE at {output_path}")
+
+            source_df.write \
+                .format("delta") \
+                .mode("overwrite") \
+                .option("overwriteSchema", "true") \
+                .option("mergeSchema", "true") \
+                .save(output_path)
+
+            # Version info
+            delta_table = DeltaTable.forPath(spark, output_path)
+            history = delta_table.history(1).collect()
+
+            version = 0
+            size_bytes = None
+            num_files = None
+
+            if history:
+                row_dict = history[0].asDict()
+                version = row_dict["version"]
+                metrics = row_dict.get("operationMetrics", {}) or {}
+                size_bytes = int(metrics.get("numOutputBytes", 0)) or None
+                num_files = (
+                    int(metrics.get("numFiles", 0))
+                    or int(metrics.get("numAddedFiles", 0))
+                    or None
+                )
+
+            row_count = source_df.count()
+
+            return {
+                "delta_version": version,
+                "rows_inserted": row_count,
+                "rows_updated": 0,
+                "rows_deleted": 0,
+                "total_rows": row_count,
+                "size_bytes": size_bytes,
+                "num_files": num_files,
+            }
+
+        loop = asyncio.get_event_loop()
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            return await loop.run_in_executor(executor, _sync_write)
     
     async def get_version_history(
         self,
         config_id: int,
         config_name: str,
+        known_output_paths: dict = None,
         limit: int = 100
     ) -> BronzeVersionHistoryResponse:
         """
@@ -112,6 +117,7 @@ class BronzeVersioningService:
         Args:
             config_id: Config ID
             config_name: Config name
+            known_output_paths: Stable path registry from config (optional)
             limit: Maximum versions to return
         
         Returns:
@@ -120,7 +126,6 @@ class BronzeVersioningService:
         from ...database.models.bronze import BronzeExecutionStatus
         
         try:
-            # Get all successful executions for this config (they have the aggregated metrics)
             executions_result = await self.db.execute(
                 select(BronzeExecution)
                 .where(
@@ -141,30 +146,33 @@ class BronzeVersioningService:
                     versions=[]
                 )
             
-            # Collect all unique output paths
-            all_output_paths = set()
-            for exec in executions:
-                if exec.output_paths:
-                    all_output_paths.update(exec.output_paths)
+            # Use known_output_paths from config when available; fall back to union of execution paths
+            if known_output_paths:
+                all_output_paths = sorted(known_output_paths.values())
+            else:
+                path_set = set()
+                for exc in executions:
+                    if exc.output_paths:
+                        path_set.update(exc.output_paths)
+                all_output_paths = sorted(path_set)
             
             versions = []
-            for exec in executions:
-                # Get size and file metrics from execution_details
-                exec_details = exec.execution_details or {}
+            for exc in executions:
+                exec_details = exc.execution_details or {}
                 
-                # Use execution timestamp and metrics (already aggregated across all paths)
                 version_info = DeltaVersionInfo(
-                    version=exec.delta_version if exec.delta_version is not None else 0,
-                    timestamp=exec.finished_at or exec.started_at,
-                    operation=exec.write_mode_used.upper() if exec.write_mode_used else "WRITE",
-                    execution_id=exec.id,
-                    rows_inserted=exec.rows_inserted,
-                    rows_updated=exec.rows_updated,
-                    rows_deleted=exec.rows_deleted,
-                    total_rows=exec.rows_ingested,
+                    version=exc.version_number if exc.version_number is not None else (exc.delta_version if exc.delta_version is not None else 0),
+                    timestamp=exc.finished_at or exc.started_at,
+                    operation=exc.write_mode_used.upper() if exc.write_mode_used else "WRITE",
+                    execution_id=exc.id,
+                    rows_inserted=exc.rows_inserted,
+                    rows_updated=exc.rows_updated,
+                    rows_deleted=exc.rows_deleted,
+                    total_rows=exc.rows_ingested,
                     num_files=exec_details.get('num_files'),
                     size_bytes=exec_details.get('size_bytes'),
-                    config_snapshot=exec.config_snapshot
+                    config_snapshot=exc.config_snapshot,
+                    path_delta_versions=getattr(exc, 'path_delta_versions', None),
                 )
                 versions.append(version_info)
             
@@ -174,7 +182,7 @@ class BronzeVersioningService:
                 config_id=config_id,
                 config_name=config_name,
                 current_version=current_version,
-                output_paths=sorted(list(all_output_paths)),
+                output_paths=all_output_paths,
                 versions=versions
             )
         

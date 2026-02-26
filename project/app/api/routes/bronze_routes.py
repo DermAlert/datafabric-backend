@@ -21,15 +21,20 @@ Key endpoints:
 - GET /bronze/configs/persistent/{id}/executions: View execution history
 """
 
+import os
+import logging
+
 from fastapi import APIRouter, Body, Depends, HTTPException, status, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
+from sqlalchemy import func
 from typing import List, Optional
 from datetime import datetime
-import logging
+
+_logger = logging.getLogger(__name__)
 
 from ..schemas.data_query_schemas import BronzeDataQueryRequest
-from ...database.session import get_db
+from ...database.session import get_db, release_connection, reraise_db_timeout
 from ...database.models.core import Dataset, DataConnection
 from ...database.models.bronze import (
     DatasetBronzeConfig,
@@ -131,6 +136,7 @@ async def preview_relationship_usage(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to preview relationship usage: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -169,13 +175,14 @@ async def get_bronze_config(
                 detail=f"Bronze configuration not found for dataset {dataset_id}"
             )
         
-        # Count ingestion groups
-        groups_query = select(DatasetIngestionGroup).where(
-            DatasetIngestionGroup.bronze_config_id == config.id
+        # COUNT(*) — does not load rows, just counts them
+        groups_count_result = await db.execute(
+            select(func.count(DatasetIngestionGroup.id)).where(
+                DatasetIngestionGroup.bronze_config_id == config.id
+            )
         )
-        groups_result = await db.execute(groups_query)
-        groups = groups_result.scalars().all()
-        
+        ingestion_groups_count = groups_count_result.scalar_one()
+
         return DatasetBronzeConfigResponse(
             id=config.id,
             dataset_id=config.dataset_id,
@@ -187,12 +194,13 @@ async def get_bronze_config(
             partition_columns=config.partition_columns,
             last_ingestion_time=config.last_ingestion_time,
             last_ingestion_status=config.last_ingestion_status.value if config.last_ingestion_status else None,
-            ingestion_groups_count=len(groups)
+            ingestion_groups_count=ingestion_groups_count,
         )
         
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get Bronze config: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -230,12 +238,26 @@ async def get_ingestion_groups(
                 detail=f"Bronze configuration not found for dataset {dataset_id}"
             )
         
-        # Get ingestion groups with connection info
+        # Subquery: count tables per group in one pass (avoids N+1)
+        tables_count_sq = (
+            select(
+                IngestionGroupTable.ingestion_group_id,
+                func.count(IngestionGroupTable.id).label('tables_count'),
+            )
+            .group_by(IngestionGroupTable.ingestion_group_id)
+            .subquery()
+        )
+
+        # Get ingestion groups with connection info + pre-joined table counts
         groups_query = select(
             DatasetIngestionGroup,
-            DataConnection.name.label('connection_name')
+            DataConnection.name.label('connection_name'),
+            func.coalesce(tables_count_sq.c.tables_count, 0).label('tables_count'),
         ).join(
             DataConnection, DatasetIngestionGroup.connection_id == DataConnection.id
+        ).outerjoin(
+            tables_count_sq,
+            DatasetIngestionGroup.id == tables_count_sq.c.ingestion_group_id,
         ).where(
             DatasetIngestionGroup.bronze_config_id == config.id
         ).order_by(
@@ -249,13 +271,7 @@ async def get_ingestion_groups(
         for group_row in groups:
             group = group_row[0]
             conn_name = group_row[1]
-            
-            # Count tables in this group
-            tables_query = select(IngestionGroupTable).where(
-                IngestionGroupTable.ingestion_group_id == group.id
-            )
-            tables_result = await db.execute(tables_query)
-            tables_count = len(tables_result.scalars().all())
+            tables_count = group_row[2]
             
             response.append(IngestionGroupResponse(
                 id=group.id,
@@ -275,6 +291,7 @@ async def get_ingestion_groups(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get ingestion groups: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -313,12 +330,20 @@ async def get_inter_source_links(
                 detail=f"Bronze configuration not found for dataset {dataset_id}"
             )
         
-        # Get inter-source links
+        # Alias to join DatasetIngestionGroup twice (left and right)
+        from sqlalchemy.orm import aliased
+        LeftGroup = aliased(DatasetIngestionGroup, flat=True)
+        RightGroup = aliased(DatasetIngestionGroup, flat=True)
+
+        # Single query: fetch both group names via two JOINs — no N+1
         links_query = select(
             InterSourceLink,
-            DatasetIngestionGroup.group_name.label('left_group_name'),
+            LeftGroup.group_name.label('left_group_name'),
+            RightGroup.group_name.label('right_group_name'),
         ).join(
-            DatasetIngestionGroup, InterSourceLink.left_group_id == DatasetIngestionGroup.id
+            LeftGroup, InterSourceLink.left_group_id == LeftGroup.id
+        ).join(
+            RightGroup, InterSourceLink.right_group_id == RightGroup.id
         ).where(
             InterSourceLink.bronze_config_id == config.id
         )
@@ -329,13 +354,7 @@ async def get_inter_source_links(
         response = []
         for link_row in links:
             link = link_row[0]
-            
-            # Get right group name
-            right_group_query = select(DatasetIngestionGroup.group_name).where(
-                DatasetIngestionGroup.id == link.right_group_id
-            )
-            right_result = await db.execute(right_group_query)
-            right_group_name = right_result.scalar_one_or_none()
+            right_group_name = link_row[2]
             
             response.append({
                 'id': link.id,
@@ -355,6 +374,7 @@ async def get_inter_source_links(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get inter-source links: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -383,8 +403,8 @@ async def list_virtualized_configs(
         query = select(BronzeVirtualizedConfig)
         if not include_inactive:
             query = query.where(BronzeVirtualizedConfig.is_active == True)
-        query = query.order_by(BronzeVirtualizedConfig.name)
-        
+        query = query.order_by(BronzeVirtualizedConfig.name).limit(500)
+
         result = await db.execute(query)
         configs = result.scalars().all()
         
@@ -406,6 +426,7 @@ async def list_virtualized_configs(
             for c in configs
         ]
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to list virtualized configs: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -497,7 +518,6 @@ async def create_virtualized_config(
         
         db.add(config)
         await db.commit()
-        await db.refresh(config)
         
         return BronzeVirtualizedConfigResponse(
             id=config.id,
@@ -517,6 +537,7 @@ async def create_virtualized_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         logger.error(f"Failed to create virtualized config: {str(e)}")
         raise HTTPException(
@@ -568,6 +589,7 @@ async def get_virtualized_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get virtualized config: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -611,7 +633,6 @@ async def update_virtualized_config(
             setattr(config, field, value)
         
         await db.commit()
-        await db.refresh(config)
         
         return BronzeVirtualizedConfigResponse(
             id=config.id,
@@ -631,6 +652,7 @@ async def update_virtualized_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         logger.error(f"Failed to update virtualized config: {str(e)}")
         raise HTTPException(
@@ -670,6 +692,7 @@ async def delete_virtualized_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         logger.error(f"Failed to delete virtualized config: {str(e)}")
         raise HTTPException(
@@ -740,6 +763,7 @@ async def query_virtualized_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to execute virtualized query: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -797,6 +821,7 @@ async def list_persistent_configs(
             for c in configs
         ]
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to list persistent configs: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -904,7 +929,6 @@ async def create_persistent_config(
         
         db.add(config)
         await db.commit()
-        await db.refresh(config)
         
         return BronzePersistentConfigResponse(
             id=config.id,
@@ -936,6 +960,7 @@ async def create_persistent_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         logger.error(f"Failed to create persistent config: {str(e)}")
         raise HTTPException(
@@ -999,6 +1024,7 @@ async def get_persistent_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get persistent config: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1067,7 +1093,6 @@ async def update_persistent_config(
         }
         
         await db.commit()
-        await db.refresh(config)
         
         return BronzePersistentConfigResponse(
             id=config.id,
@@ -1099,6 +1124,7 @@ async def update_persistent_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         logger.error(f"Failed to update persistent config: {str(e)}")
         raise HTTPException(
@@ -1138,6 +1164,7 @@ async def delete_persistent_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         logger.error(f"Failed to delete persistent config: {str(e)}")
         raise HTTPException(
@@ -1205,6 +1232,7 @@ async def preview_persistent_config(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to preview persistent config: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1231,6 +1259,7 @@ async def execute_persistent_config(
     db: AsyncSession = Depends(get_db),
 ):
     """Execute a persistent config with proper Delta Lake versioning."""
+
     try:
         # Get config
         result = await db.execute(
@@ -1273,8 +1302,19 @@ async def execute_persistent_config(
         )
         db.add(execution)
         await db.commit()
-        await db.refresh(execution)
-        
+        # Save IDs before release_connection expunges objects from the session.
+        # expire_on_commit=False keeps .id accessible on detached objects, but
+        # saving them explicitly avoids any ambiguity in the except block below.
+        execution_id = execution.id
+        config_id_val = config.id
+
+        # Release the DB connection back to the pool before the long-running
+        # Spark + Trino execution.  The session remains alive; it will lazily
+        # reacquire a connection from the pool when the post-Spark DB writes
+        # begin.  This prevents the QueuePool from being exhausted by
+        # concurrent executions that each hold a connection for minutes.
+        await release_connection(db)
+
         try:
             # Convert config tables to TableColumnSelection
             tables = [TableColumnSelection(**t) for t in config.tables]
@@ -1294,13 +1334,48 @@ async def execute_persistent_config(
                 properties=config.properties or {},
             )
             
-            # Update execution record with versioning info
+            # After release_connection(), the session was closed and all objects
+            # were expunged. Re-fetch execution and config by the saved IDs to
+            # get fresh objects properly tracked by the session before writing.
+            config_name_saved = config.name
+
+            exec_result = await db.execute(
+                select(BronzeExecution).where(BronzeExecution.id == execution_id)
+            )
+            execution = exec_result.scalar_one()
+
+            cfg_result = await db.execute(
+                select(BronzePersistentConfig).where(BronzePersistentConfig.id == config_id_val)
+            )
+            config = cfg_result.scalar_one()
+
+            # Calculate sequential version_number
+            last_version_result = await db.execute(
+                select(func.max(BronzeExecution.version_number))
+                .where(BronzeExecution.config_id == config.id)
+            )
+            last_version = last_version_result.scalar()
+            new_version = (last_version + 1) if last_version is not None else 0
+            
+            # path_delta_versions: only paths written in THIS execution
+            path_delta_versions = ingestion_result.get('path_delta_versions', {})
+            
+            # Accumulate known_output_paths on the config (union, never removes)
+            existing_paths = dict(config.known_output_paths or {})
+            for group in ingestion_result['groups']:
+                if group.status == IngestionStatusEnum.SUCCESS:
+                    existing_paths[group.connection_name] = group.output_path
+            config.known_output_paths = existing_paths
+            
+            # Update execution record
             execution.status = BronzeExecutionStatus(ingestion_result['status'].value)
             execution.finished_at = datetime.utcnow()
             execution.rows_ingested = ingestion_result['total_rows_ingested']
             execution.output_paths = ingestion_result['bronze_paths']
             execution.group_results = [g.model_dump() for g in ingestion_result['groups']]
-            execution.delta_version = ingestion_result.get('delta_version')
+            execution.version_number = new_version
+            execution.path_delta_versions = path_delta_versions
+            execution.delta_version = new_version
             execution.write_mode_used = ingestion_result.get('write_mode_used')
             execution.merge_keys_used = ingestion_result.get('merge_keys_used')
             execution.rows_inserted = ingestion_result.get('rows_inserted')
@@ -1316,21 +1391,21 @@ async def execute_persistent_config(
             config.last_execution_time = datetime.utcnow()
             config.last_execution_status = BronzeExecutionStatus(ingestion_result['status'].value)
             config.last_execution_rows = ingestion_result['total_rows_ingested']
-            config.current_delta_version = ingestion_result.get('delta_version')
+            config.current_delta_version = new_version
             
             await db.commit()
             
             return BronzePersistentExecuteResponse(
                 config_id=config.id,
-                config_name=config.name,
-                execution_id=execution.id,
+                config_name=config_name_saved,
+                execution_id=execution_id,
                 status=ingestion_result['status'],
                 groups=ingestion_result['groups'],
                 total_rows_ingested=ingestion_result['total_rows_ingested'],
                 bronze_paths=ingestion_result['bronze_paths'],
                 execution_time_seconds=ingestion_result['execution_time_seconds'],
                 message=ingestion_result['message'],
-                delta_version=ingestion_result.get('delta_version'),
+                delta_version=new_version,
                 write_mode_used=ingestion_result.get('write_mode_used'),
                 merge_keys_used=ingestion_result.get('merge_keys_used'),
                 rows_inserted=ingestion_result.get('rows_inserted'),
@@ -1339,22 +1414,38 @@ async def execute_persistent_config(
             )
             
         except Exception as exec_error:
-            # Update execution record with error
+            # Re-fetch by stored IDs so FAILED status is reliably persisted
+            # even if the SUCCESS path partially overwrote the local variables.
+            try:
+                exec_res = await db.execute(
+                    select(BronzeExecution).where(BronzeExecution.id == execution_id)
+                )
+                execution = exec_res.scalar_one_or_none() or execution
+                cfg_res = await db.execute(
+                    select(BronzePersistentConfig).where(BronzePersistentConfig.id == config_id_val)
+                )
+                config = cfg_res.scalar_one_or_none() or config
+            except Exception:
+                pass
+
             execution.status = BronzeExecutionStatus.FAILED
             execution.finished_at = datetime.utcnow()
             execution.error_message = str(exec_error)
             
-            # Update config
             config.last_execution_time = datetime.utcnow()
             config.last_execution_status = BronzeExecutionStatus.FAILED
             config.last_execution_error = str(exec_error)
             
-            await db.commit()
+            try:
+                await db.commit()
+            except Exception:
+                await db.rollback()
             raise
         
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to execute persistent config: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1421,6 +1512,7 @@ async def list_config_executions(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to list config executions: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1540,11 +1632,11 @@ async def get_version_history(
                 detail=f"Persistent config {config_id} not found"
             )
         
-        # Get version history from execution records (aggregated metrics)
         versioning_service = BronzeVersioningService(db)
         history = await versioning_service.get_version_history(
             config_id=config_id,
             config_name=config.name,
+            known_output_paths=config.known_output_paths,
             limit=limit
         )
         
@@ -1553,6 +1645,7 @@ async def get_version_history(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to get version history: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1661,48 +1754,78 @@ async def query_bronze_data(
                 detail=f"Persistent config {config_id} not found"
             )
         
-        # Get output path from the latest successful execution
-        # Note: We check for successful executions directly, not config.last_execution_status
-        # because the last execution might have failed but a previous one succeeded
-        # This is the actual path where data was written
-        execution_result = await db.execute(
-            select(BronzeExecution)
-            .where(
-                BronzeExecution.config_id == config_id,
-                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
-            )
-            .order_by(BronzeExecution.started_at.desc())
-            .limit(1)
-        )
-        latest_execution = execution_result.scalar_one_or_none()
-        
-        if not latest_execution or not latest_execution.output_paths:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No successful execution found with output paths. Run execute first."
-            )
-        
-        # Get the output path from execution record
-        output_paths = latest_execution.output_paths
-        if path_index >= len(output_paths):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"path_index {path_index} is out of range. Available paths: {len(output_paths)} (0-{len(output_paths)-1})"
-            )
-        
-        output_path = output_paths[path_index]
-        
-        # Query using Spark
+        # Resolve output path and Delta version for time-travel
         from ...services.infrastructure.spark_manager import SparkManager
         spark_manager = SparkManager()
-        
         versioning_service = BronzeVersioningService(db)
+        
+        delta_version_for_path = None
+        
+        if version is not None:
+            # Time-travel: resolve version_number -> actual Delta version for the requested path
+            target_exec_result = await db.execute(
+                select(BronzeExecution).where(
+                    BronzeExecution.config_id == config_id,
+                    BronzeExecution.version_number == version
+                )
+            )
+            exec_at_version = target_exec_result.scalar_one_or_none()
+            if not exec_at_version:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Version {version} not found for config {config_id}"
+                )
+            
+            version_paths = exec_at_version.path_delta_versions or {}
+            available_paths = sorted(version_paths.keys())
+            
+            if not available_paths:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Version {version} has no output paths"
+                )
+            if path_index >= len(available_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {path_index} is out of range for version {version}. Available paths: {len(available_paths)} (0-{len(available_paths)-1})"
+                )
+            
+            output_path = available_paths[path_index]
+            delta_version_for_path = version_paths[output_path]
+        else:
+            # Latest data: use stable known_output_paths from config
+            if config.known_output_paths:
+                stable_paths = [v for _, v in sorted(config.known_output_paths.items())]
+            else:
+                execution_result = await db.execute(
+                    select(BronzeExecution)
+                    .where(
+                        BronzeExecution.config_id == config_id,
+                        BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+                    )
+                    .order_by(BronzeExecution.started_at.desc())
+                    .limit(1)
+                )
+                latest_execution = execution_result.scalar_one_or_none()
+                if not latest_execution or not latest_execution.output_paths:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="No successful execution found with output paths. Run execute first."
+                    )
+                stable_paths = latest_execution.output_paths
+            
+            if path_index >= len(stable_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {path_index} is out of range. Available paths: {len(stable_paths)} (0-{len(stable_paths)-1})"
+                )
+            output_path = stable_paths[path_index]
         
         with spark_manager.session_scope() as spark:
             columns, data, total_rows = await versioning_service.query_at_version(
                 spark=spark,
                 output_path=output_path,
-                version=version,
+                version=delta_version_for_path,
                 timestamp=as_of_timestamp,
                 limit=limit,
                 offset=offset
@@ -1734,6 +1857,7 @@ async def query_bronze_data(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to query Bronze data: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1856,44 +1980,76 @@ async def query_bronze_data_filtered(
                 detail=f"Persistent config {config_id} not found"
             )
         
-        # Get output path from the latest successful execution
-        execution_result = await db.execute(
-            select(BronzeExecution)
-            .where(
-                BronzeExecution.config_id == config_id,
-                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
-            )
-            .order_by(BronzeExecution.started_at.desc())
-            .limit(1)
-        )
-        latest_execution = execution_result.scalar_one_or_none()
-        
-        if not latest_execution or not latest_execution.output_paths:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="No successful execution found with output paths. Run execute first."
-            )
-        
-        output_paths = latest_execution.output_paths
-        if body.path_index >= len(output_paths):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"path_index {body.path_index} is out of range. Available paths: {len(output_paths)} (0-{len(output_paths)-1})"
-            )
-        
-        output_path = output_paths[body.path_index]
-        
-        # Query using Spark with filters
+        # Resolve output path and Delta version for time-travel
         from ...services.infrastructure.spark_manager import SparkManager
         spark_manager = SparkManager()
-        
         versioning_service = BronzeVersioningService(db)
+        
+        delta_version_for_path = None
+        
+        if body.version is not None:
+            target_exec_result = await db.execute(
+                select(BronzeExecution).where(
+                    BronzeExecution.config_id == config_id,
+                    BronzeExecution.version_number == body.version
+                )
+            )
+            exec_at_version = target_exec_result.scalar_one_or_none()
+            if not exec_at_version:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Version {body.version} not found for config {config_id}"
+                )
+            
+            version_paths = exec_at_version.path_delta_versions or {}
+            available_paths = sorted(version_paths.keys())
+            
+            if not available_paths:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Version {body.version} has no output paths"
+                )
+            if body.path_index >= len(available_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {body.path_index} is out of range for version {body.version}. Available paths: {len(available_paths)} (0-{len(available_paths)-1})"
+                )
+            
+            output_path = available_paths[body.path_index]
+            delta_version_for_path = version_paths[output_path]
+        else:
+            if config.known_output_paths:
+                stable_paths = [v for _, v in sorted(config.known_output_paths.items())]
+            else:
+                execution_result = await db.execute(
+                    select(BronzeExecution)
+                    .where(
+                        BronzeExecution.config_id == config_id,
+                        BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+                    )
+                    .order_by(BronzeExecution.started_at.desc())
+                    .limit(1)
+                )
+                latest_execution = execution_result.scalar_one_or_none()
+                if not latest_execution or not latest_execution.output_paths:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="No successful execution found with output paths. Run execute first."
+                    )
+                stable_paths = latest_execution.output_paths
+            
+            if body.path_index >= len(stable_paths):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"path_index {body.path_index} is out of range. Available paths: {len(stable_paths)} (0-{len(stable_paths)-1})"
+                )
+            output_path = stable_paths[body.path_index]
         
         with spark_manager.session_scope() as spark:
             columns, data, total_rows = await versioning_service.query_at_version(
                 spark=spark,
                 output_path=output_path,
-                version=body.version,
+                version=delta_version_for_path,
                 timestamp=body.as_of_timestamp,
                 limit=body.limit,
                 offset=body.offset,
@@ -1932,6 +2088,7 @@ async def query_bronze_data_filtered(
             detail=f"Invalid filter parameter: {str(e)}"
         )
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to query Bronze data with filters: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

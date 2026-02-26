@@ -6,7 +6,7 @@ from sqlalchemy import and_, or_, func, case
 from typing import List, Optional, Dict, Any
 from sqlalchemy import join, outerjoin
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...database.models import equivalence
 from ...database.models import metadata
 from ...core.auth import get_current_user
@@ -101,6 +101,7 @@ async def list_semantic_domains(
         
         return domains
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao listar domínios semânticos: {str(e)}"
@@ -141,11 +142,11 @@ async def create_semantic_domain(
         domain = equivalence.SemanticDomain(**domain_data.model_dump())
         db.add(domain)
         await db.commit()
-        await db.refresh(domain)
         return domain
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -195,6 +196,7 @@ async def get_semantic_domain(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar domínio semântico: {str(e)}"
@@ -240,11 +242,11 @@ async def update_semantic_domain(
             setattr(domain, field, value)
 
         await db.commit()
-        await db.refresh(domain)
         return domain
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -278,6 +280,7 @@ async def delete_semantic_domain(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -367,6 +370,7 @@ async def search_semantic_domains(
             items=domains
         )
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar domínios semânticos: {str(e)}"
@@ -446,6 +450,7 @@ async def list_data_dictionary_terms(
         
         return terms
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao listar termos do dicionário: {str(e)}"
@@ -474,11 +479,11 @@ async def create_data_dictionary_term(
         term = equivalence.DataDictionary(**term_data.model_dump())
         db.add(term)
         await db.commit()
-        await db.refresh(term)
         return term
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -546,6 +551,7 @@ async def get_data_dictionary_term(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar termo: {str(e)}"
@@ -590,11 +596,11 @@ async def update_data_dictionary_term(
             setattr(term, field, value)
 
         await db.commit()
-        await db.refresh(term)
         return term
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -628,6 +634,7 @@ async def delete_data_dictionary_term(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -742,6 +749,7 @@ async def search_data_dictionary(
             items=terms
         )
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar termos do dicionário: {str(e)}"
@@ -845,6 +853,7 @@ async def list_column_groups(
         
         return groups
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao listar grupos de colunas: {str(e)}"
@@ -862,9 +871,9 @@ async def create_column_group(
         group = equivalence.ColumnGroup(**group_data.model_dump())
         db.add(group)
         await db.commit()
-        await db.refresh(group)
         return group
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1012,6 +1021,7 @@ async def get_column_group(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar grupo de colunas: {str(e)}"
@@ -1044,11 +1054,11 @@ async def update_column_group(
             setattr(group, field, value)
 
         await db.commit()
-        await db.refresh(group)
         return group
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1082,6 +1092,7 @@ async def delete_column_group(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1211,6 +1222,7 @@ async def search_column_groups(
             items=groups
         )
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar grupos de colunas: {str(e)}"
@@ -1270,6 +1282,7 @@ async def list_column_mappings(
         
         return mappings
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao listar mapeamentos de colunas: {str(e)}"
@@ -1309,11 +1322,11 @@ async def create_column_mapping(
         mapping = equivalence.ColumnMapping(**mapping_data.model_dump())
         db.add(mapping)
         await db.commit()
-        await db.refresh(mapping)
         return mapping
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1348,13 +1361,11 @@ async def create_bulk_column_mappings(
 
         await db.commit()
         
-        for mapping in mappings:
-            await db.refresh(mapping)
-            
         return mappings
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1388,11 +1399,11 @@ async def update_column_mapping(
             setattr(mapping, field, value)
 
         await db.commit()
-        await db.refresh(mapping)
         return mapping
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1426,6 +1437,7 @@ async def delete_column_mapping(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1518,6 +1530,7 @@ async def search_column_mappings(
             items=mappings
         )
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar mapeamentos de colunas: {str(e)}"
@@ -1573,6 +1586,7 @@ async def list_value_mappings(
         
         return mappings
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao listar mapeamentos de valores: {str(e)}"
@@ -1629,11 +1643,11 @@ async def create_value_mapping(
         mapping = equivalence.ValueMapping(**mapping_data.model_dump())
         db.add(mapping)
         await db.commit()
-        await db.refresh(mapping)
         return mapping
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1688,13 +1702,11 @@ async def create_bulk_value_mappings(
 
         await db.commit()
         
-        for mapping in mappings:
-            await db.refresh(mapping)
-            
         return mappings
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1750,11 +1762,11 @@ async def update_value_mapping(
             setattr(mapping, field, value)
 
         await db.commit()
-        await db.refresh(mapping)
         return mapping
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1788,6 +1800,7 @@ async def delete_value_mapping(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1873,6 +1886,7 @@ async def search_value_mappings(
             items=mappings
         )
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar mapeamentos de valores: {str(e)}"
@@ -1952,6 +1966,7 @@ async def search_unmapped_columns(
         
         return {"columns": columns}
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar colunas: {str(e)}"
@@ -2032,6 +2047,7 @@ async def get_available_columns_for_mapping(
         
         return {"columns": columns}
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao buscar colunas disponíveis: {str(e)}"
@@ -2139,6 +2155,7 @@ async def get_mapping_coverage_statistics(
             "data_type_breakdown": data_type_stats
         }
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Erro ao calcular estatísticas: {str(e)}"

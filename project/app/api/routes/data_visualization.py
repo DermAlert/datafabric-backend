@@ -6,7 +6,7 @@ from typing import List, Optional, Dict, Any, Union
 import json
 from datetime import datetime, date
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...database.models import core
 from ...database.models import metadata
 from ...core.auth import get_current_user
@@ -118,6 +118,7 @@ async def visualize_table_data(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to visualize table data: {str(e)}"
@@ -210,6 +211,7 @@ async def execute_sql_query(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to execute query: {str(e)}"
@@ -324,6 +326,7 @@ async def get_table_sample_stats(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get table sample stats: {str(e)}"

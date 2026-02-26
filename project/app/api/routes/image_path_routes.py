@@ -5,7 +5,7 @@ from sqlalchemy import update, and_
 from typing import List, Optional
 from datetime import datetime
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...database.models import core
 from ...database.models import metadata
 from ...core.auth import get_current_user
@@ -88,6 +88,7 @@ async def update_column_image_path(
         await db.rollback()
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -170,6 +171,7 @@ async def bulk_update_columns_image_path(
         await db.rollback()
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -236,6 +238,7 @@ async def list_table_image_path_columns(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving table image path columns: {str(e)}"

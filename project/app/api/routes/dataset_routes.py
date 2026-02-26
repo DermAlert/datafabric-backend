@@ -5,7 +5,7 @@ from typing import List, Optional
 from datetime import datetime
 import logging
 
-from ...database.session import get_db
+from ...database.session import get_db, reraise_db_timeout, reraise_db_timeout
 from ...database.models.core import Dataset
 from ...core.auth import get_current_user
 from ..schemas.dataset_schemas import (
@@ -113,6 +113,7 @@ async def create_unified_dataset(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         logger.error(f"Failed to trigger dataset creation DAG: {str(e)}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -145,6 +146,7 @@ async def preview_unified_dataset(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating preview: {str(e)}"
@@ -183,6 +185,7 @@ async def get_dataset(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving dataset: {str(e)}"
@@ -202,6 +205,7 @@ async def update_dataset(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error updating dataset: {str(e)}"
@@ -220,6 +224,7 @@ async def delete_dataset(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error deleting dataset: {str(e)}"
@@ -238,6 +243,7 @@ async def search_datasets(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error searching datasets: {str(e)}"
@@ -259,6 +265,7 @@ async def get_dataset_images(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving dataset images: {str(e)}"
@@ -278,6 +285,7 @@ async def get_single_dataset_image(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving image: {str(e)}"
@@ -319,6 +327,7 @@ async def get_dataset_images_paginated(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving dataset images: {str(e)}"
@@ -351,6 +360,7 @@ async def get_dataset_image(
     except HTTPException:
         raise
     except Exception as e:
+        reraise_db_timeout(e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error retrieving dataset image: {str(e)}"

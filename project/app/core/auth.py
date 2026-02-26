@@ -1,3 +1,4 @@
+import asyncio
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from ..database.models.core import User
@@ -19,8 +20,12 @@ async def get_user(db: AsyncSession, user_id: int):
     return result.scalars().first()
 
 async def authenticate_user(db: AsyncSession, cpf: str, password: str):
-    user = await get_user_by_cpf(db, cpf) 
-    if not user or not verify_password(password, user.senha_hash):
+    user = await get_user_by_cpf(db, cpf)
+    if not user:
+        return False
+    # bcrypt.checkpw é CPU-intensivo — executar em thread pool para não bloquear o event loop
+    is_valid = await asyncio.to_thread(verify_password, password, user.senha_hash)
+    if not is_valid:
         return False
     return user
 
