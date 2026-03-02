@@ -13,6 +13,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 revision: str = "20260218_0008"
 down_revision: Union[str, None] = "20260218_0007"
@@ -21,16 +22,22 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        'share_tables',
-        sa.Column('bronze_persistent_config_id', sa.Integer(), nullable=True),
-        schema='delta_sharing'
-    )
-    op.add_column(
-        'share_tables',
-        sa.Column('silver_persistent_config_id', sa.Integer(), nullable=True),
-        schema='delta_sharing'
-    )
+    existing = {
+        col["name"]
+        for col in inspect(op.get_bind()).get_columns('share_tables', schema='delta_sharing')
+    }
+    if 'bronze_persistent_config_id' not in existing:
+        op.add_column(
+            'share_tables',
+            sa.Column('bronze_persistent_config_id', sa.Integer(), nullable=True),
+            schema='delta_sharing'
+        )
+    if 'silver_persistent_config_id' not in existing:
+        op.add_column(
+            'share_tables',
+            sa.Column('silver_persistent_config_id', sa.Integer(), nullable=True),
+            schema='delta_sharing'
+        )
 
 
 def downgrade() -> None:

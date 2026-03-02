@@ -13,6 +13,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision: str = "20260215_0005"
@@ -22,11 +23,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        'silver_persistent_configs',
-        sa.Column('llm_extractions', sa.JSON(), nullable=True),
-        schema='datasets'
-    )
+    existing = {
+        col["name"]
+        for col in inspect(op.get_bind()).get_columns('silver_persistent_configs', schema='datasets')
+    }
+    if 'llm_extractions' not in existing:
+        op.add_column(
+            'silver_persistent_configs',
+            sa.Column('llm_extractions', sa.JSON(), nullable=True),
+            schema='datasets'
+        )
 
 
 def downgrade() -> None:
