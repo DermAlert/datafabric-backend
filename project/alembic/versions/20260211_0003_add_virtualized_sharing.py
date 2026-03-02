@@ -16,12 +16,18 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision: str = "20260211_0003"
 down_revision: Union[str, None] = "20260211_0002"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
+
+
+def _existing_columns(table: str, schema: str) -> set[str]:
+    inspector = inspect(op.get_bind())
+    return {col["name"] for col in inspector.get_columns(table, schema=schema)}
 
 
 def upgrade() -> None:
@@ -33,31 +39,36 @@ def upgrade() -> None:
     )
     source_type_enum.create(op.get_bind(), checkfirst=True)
 
-    # Add source_type column with default 'DELTA' for existing rows
-    op.add_column(
-        'share_tables',
-        sa.Column(
-            'source_type',
-            source_type_enum,
-            nullable=False,
-            server_default='DELTA'
-        ),
-        schema='delta_sharing'
-    )
+    existing = _existing_columns('share_tables', 'delta_sharing')
 
-    # Add virtualized config reference columns
-    op.add_column(
-        'share_tables',
-        sa.Column('bronze_virtualized_config_id', sa.Integer(), nullable=True),
-        schema='delta_sharing'
-    )
-    op.add_column(
-        'share_tables',
-        sa.Column('silver_virtualized_config_id', sa.Integer(), nullable=True),
-        schema='delta_sharing'
-    )
+    if 'source_type' not in existing:
+        op.add_column(
+            'share_tables',
+            sa.Column(
+                'source_type',
+                source_type_enum,
+                nullable=False,
+                server_default='DELTA'
+            ),
+            schema='delta_sharing'
+        )
 
-    # Make dataset_id nullable (virtualized tables don't need one)
+    if 'bronze_virtualized_config_id' not in existing:
+        op.add_column(
+            'share_tables',
+            sa.Column('bronze_virtualized_config_id', sa.Integer(), nullable=True),
+            schema='delta_sharing'
+        )
+
+    if 'silver_virtualized_config_id' not in existing:
+        op.add_column(
+            'share_tables',
+            sa.Column('silver_virtualized_config_id', sa.Integer(), nullable=True),
+            schema='delta_sharing'
+        )
+
+    # Make dataset_id nullable (virtualized tables don't need one).
+    # Safe to run multiple times – ALTER COLUMN is idempotent for nullability.
     op.alter_column(
         'share_tables',
         'dataset_id',

@@ -12,6 +12,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy import inspect
 
 # revision identifiers, used by Alembic.
 revision: str = "20260218_0006"
@@ -21,11 +22,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.add_column(
-        'share_tables',
-        sa.Column('pinned_delta_version', sa.Integer(), nullable=True),
-        schema='delta_sharing'
-    )
+    existing = {
+        col["name"]
+        for col in inspect(op.get_bind()).get_columns('share_tables', schema='delta_sharing')
+    }
+    if 'pinned_delta_version' not in existing:
+        op.add_column(
+            'share_tables',
+            sa.Column('pinned_delta_version', sa.Integer(), nullable=True),
+            schema='delta_sharing'
+        )
 
 
 def downgrade() -> None:
