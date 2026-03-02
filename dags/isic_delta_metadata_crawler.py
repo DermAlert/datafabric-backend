@@ -5,7 +5,8 @@ import logging
 import time
 import pandas as pd
 import pyarrow as pa
-from deltalake import DeltaTable, write_deltalake
+from deltalake import DeltaTable, write_deltalake, ColumnProperties
+from deltalake.writer import WriterProperties
 from minio import Minio
 from airflow import DAG
 from airflow.operators.python import PythonOperator
@@ -226,36 +227,45 @@ def fetch_collections(**context):
         
         # Check if Delta table exists
         if delta_table_exists(delta_path):
-            logger.info("Delta table exists, reading existing data")
-            existing_df = safe_read_delta_table(delta_path)
-            logger.info(f"Found existing Delta table with {len(existing_df)} collections")
-            
-            # Perform upsert operation
-            new_collections, updated_collections = upsert_collections(existing_df, new_df, delta_path)
-            
-            logger.info(f"Collections processing complete:")
-            logger.info(f"  New collections added: {new_collections}")
-            logger.info(f"  Existing collections updated: {updated_collections}")
-            logger.info(f"  Total collections in table: {len(new_df)}")
-            
-            return {
-                "collections_count": len(new_df),
-                "new_collections": new_collections,
-                "updated_collections": updated_collections,
-                "timestamp": current_timestamp
-            }
-        else:
-            # Delta table doesn't exist, create it with all data
-            logger.info("Delta table doesn't exist, creating new table")
-            safe_write_delta_table(new_df, delta_path, mode="overwrite", schema=COLLECTIONS_SCHEMA)
-            logger.info(f"Successfully created new Delta table with {len(new_df)} collections")
-            
-            return {
-                "collections_count": len(new_df),
-                "new_collections": len(new_df),
-                "updated_collections": 0,
-                "timestamp": current_timestamp
-            }
+            try:
+                logger.info("Delta table exists, reading existing data")
+                existing_df = safe_read_delta_table(delta_path)
+                logger.info(f"Found existing Delta table with {len(existing_df)} collections")
+                
+                # Perform upsert operation
+                new_collections, updated_collections = upsert_collections(existing_df, new_df, delta_path)
+                
+                logger.info(f"Collections processing complete:")
+                logger.info(f"  New collections added: {new_collections}")
+                logger.info(f"  Existing collections updated: {updated_collections}")
+                logger.info(f"  Total collections in table: {len(new_df)}")
+                
+                return {
+                    "collections_count": len(new_df),
+                    "new_collections": new_collections,
+                    "updated_collections": updated_collections,
+                    "timestamp": current_timestamp
+                }
+            except Exception as read_err:
+                # The existing Parquet files are unreadable (e.g. PyArrow version mismatch
+                # causing "Repetition level histogram size mismatch").  Since the API always
+                # returns the full collection list, a full overwrite recovers all current data.
+                logger.warning(
+                    f"Could not read existing Delta table ({read_err}). "
+                    "Recovering via full overwrite with fresh API data."
+                )
+        
+        # Delta table does not exist, or the existing table was unreadable — write fresh.
+        logger.info("Writing full dataset to Delta table (overwrite)")
+        safe_write_delta_table(new_df, delta_path, mode="overwrite", schema=COLLECTIONS_SCHEMA)
+        logger.info(f"Successfully wrote {len(new_df)} collections to Delta table")
+        
+        return {
+            "collections_count": len(new_df),
+            "new_collections": len(new_df),
+            "updated_collections": 0,
+            "timestamp": current_timestamp
+        }
         
     except Exception as e:
         logger.error(f"Error writing to Delta table: {str(e)}")
@@ -450,8 +460,7 @@ def download_images_batch(**context):
                 "timestamp": datetime.now().isoformat()
             }
 
-        dt = DeltaTable(base_path, storage_options=STORAGE_OPTIONS)
-        df_all_images = dt.to_pandas()
+        df_all_images = safe_read_delta_table(base_path)
         logger.info(f"Retrieved {len(df_all_images)} images from {IMAGES_METADATA_DELTA_PATH}")
         
         downloaded_count = 0
@@ -559,25 +568,33 @@ def safe_write_delta_table(df, table_path, mode="overwrite", max_retries=3, sche
             # Convert DataFrame to Arrow Table first
             arrow_table = convert_pandas_to_arrow(df, schema=schema)
             
-            # Try with schema evolution first
+            # Disable page-level statistics (including repetition level histograms) in the
+            # Rust Parquet writer.  deltalake 1.x / parquet-rs writes histograms that
+            # PyArrow 14+ rejects with "Repetition level histogram size mismatch".
+            # Setting statistics_enabled='NONE' removes the offending metadata from every
+            # column so PyArrow can read the files without validation errors.
+            wp = WriterProperties(
+                default_column_properties=ColumnProperties(statistics_enabled="NONE")
+            )
             try:
                 write_deltalake(
                     table_path,
                     arrow_table,
                     mode=mode,
                     storage_options=STORAGE_OPTIONS,
-                    schema_mode="merge"
+                    schema_mode="merge",
+                    writer_properties=wp,
                 )
                 logger.info(f"Successfully wrote {len(df)} records to {table_path}")
                 return True
             except Exception as schema_error:
-                # If schema evolution fails, try without it
                 logger.warning(f"Schema evolution failed, trying without: {str(schema_error)}")
                 write_deltalake(
                     table_path,
                     arrow_table,
                     mode=mode,
-                    storage_options=STORAGE_OPTIONS
+                    storage_options=STORAGE_OPTIONS,
+                    writer_properties=wp,
                 )
                 logger.info(f"Successfully wrote {len(df)} records to {table_path} (no schema evolution)")
                 return True
@@ -803,38 +820,37 @@ def safe_write_with_schema_evolution(df, delta_path, mode="overwrite", max_retri
             # Convert DataFrame to Arrow Table first
             arrow_table = convert_pandas_to_arrow(df)
             
-            # Try with schema evolution first
-            write_deltalake(
-                delta_path,
-                arrow_table,
-                mode=mode,
-                storage_options=STORAGE_OPTIONS,
-                schema_mode="merge",
-                partition_by=partition_by
+            wp = WriterProperties(
+                default_column_properties=ColumnProperties(statistics_enabled="NONE")
             )
-            
-            logger.info(f"Successfully wrote {len(df)} records to {delta_path}")
-            return True
-            
-        except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} with schema evolution failed: {str(e)}")
-            
-            # Try without schema evolution as fallback
             try:
-                logger.info(f"Attempt {attempt + 1}: Fallback write without schema evolution")
+                write_deltalake(
+                    delta_path,
+                    arrow_table,
+                    mode=mode,
+                    storage_options=STORAGE_OPTIONS,
+                    schema_mode="merge",
+                    partition_by=partition_by,
+                    writer_properties=wp,
+                )
+                logger.info(f"Successfully wrote {len(df)} records to {delta_path}")
+                return True
+            except Exception as schema_err:
+                logger.warning(f"Attempt {attempt + 1} with schema evolution failed: {str(schema_err)}")
                 arrow_table = convert_pandas_to_arrow(df)
                 write_deltalake(
                     delta_path,
                     arrow_table,
                     mode=mode,
                     storage_options=STORAGE_OPTIONS,
-                    partition_by=partition_by
+                    partition_by=partition_by,
+                    writer_properties=wp,
                 )
                 logger.info(f"Successfully wrote {len(df)} records to {delta_path} (fallback)")
                 return True
-            except Exception as fallback_error:
-                logger.warning(f"Fallback attempt {attempt + 1} also failed: {str(fallback_error)}")
             
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1} failed: {str(e)}")
             if attempt < max_retries - 1:
                 time.sleep(RETRY_DELAY * (attempt + 1))
             else:
