@@ -203,6 +203,11 @@ class TrinoExtractor:
                         if not folder_name:
                             continue
 
+                        # Skip internal metastore folder stored by the platform
+                        if folder_name == "_datafabric_metastore":
+                            logger.debug(f"Skipping internal metastore folder: {folder_name}")
+                            continue
+
                         logger.info(f"Inspecting folder: {folder_name}")
 
                         # If this folder itself contains _delta_log, treat it as a table in "default" schema

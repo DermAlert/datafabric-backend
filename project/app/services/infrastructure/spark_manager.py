@@ -16,8 +16,12 @@ Note: Spark is used for Silver layer because:
 """
 
 import os
+import json
+import time
 import logging
 import threading
+import urllib.request
+import urllib.error
 from typing import Optional, Dict, Any
 from contextlib import contextmanager
 
@@ -147,6 +151,86 @@ class SparkManager:
         
         logger.info("Forced cleanup of all PySpark/Py4j internal state")
     
+    def _get_master_rest_url(self) -> Optional[str]:
+        """Return the Spark Master REST URL, or None if running in local mode."""
+        if self.spark_mode == "local" or self.spark_master.startswith("local"):
+            return None
+        host = self.spark_master.replace("spark://", "").split(":")[0]
+        port = os.getenv("SPARK_MASTER_WEBUI_PORT", "8082")
+        return f"http://{host}:{port}"
+
+    def _query_master_json(self, timeout: int = 5) -> Optional[dict]:
+        """Fetch /json/ from the Spark Master REST API. Returns None on failure."""
+        url = self._get_master_rest_url()
+        if url is None:
+            return None
+        try:
+            resp = urllib.request.urlopen(f"{url}/json/", timeout=timeout)
+            return json.loads(resp.read())
+        except Exception:
+            return None
+
+    def _wait_for_master_ready(self, max_wait: int = 120, poll_interval: int = 3) -> None:
+        """
+        Block until the Spark Master has finished recovery and reports ALIVE
+        status with at least one alive worker. Prevents creating a SparkSession
+        during the recovery window (which causes orphaned app registrations).
+
+        Only applies to standalone/cluster mode; no-op for local mode.
+        """
+        if self._get_master_rest_url() is None:
+            return
+
+        deadline = time.monotonic() + max_wait
+        last_status = None
+        while time.monotonic() < deadline:
+            data = self._query_master_json()
+            if data:
+                status = data.get("status")
+                workers = data.get("aliveworkers", 0)
+                if status == "ALIVE" and workers > 0:
+                    logger.info(
+                        f"Spark Master ready (status={status}, "
+                        f"alive_workers={workers})"
+                    )
+                    return
+                if status != last_status:
+                    logger.info(
+                        f"Waiting for Spark Master: status={status}, "
+                        f"alive_workers={workers}"
+                    )
+                    last_status = status
+            time.sleep(poll_interval)
+
+        logger.warning(
+            f"Spark Master not ready after {max_wait}s — proceeding anyway "
+            "(session may need to be recreated later)"
+        )
+
+    def _is_app_registered_on_master(self) -> bool:
+        """
+        Check whether the current SparkSession's app ID still appears in the
+        Master's active-apps list. Returns True if running in local mode or if
+        the check cannot be performed (fail-open).
+        """
+        if self._spark_session is None:
+            return False
+        if self._get_master_rest_url() is None:
+            return True
+
+        try:
+            sc = self._spark_session.sparkContext
+            app_id = sc.applicationId
+        except Exception:
+            return False
+
+        data = self._query_master_json()
+        if data is None:
+            return True
+
+        active_ids = {app["id"] for app in data.get("activeapps", [])}
+        return app_id in active_ids
+
     def get_or_create_session(self):
         """
         Get or create a SparkSession configured for Delta Lake.
@@ -166,14 +250,23 @@ class SparkManager:
                 sc = self._spark_session.sparkContext
                 _ = sc.getConf().get("spark.app.name")
                 if not sc._jsc.sc().isStopped():
-                    # Verify the cached session uses the correct master.
-                    # If it doesn't (e.g., a legacy local session left over from
-                    # delta.py module-level init), stop it and recreate.
                     current_master = sc.getConf().get("spark.master", "")
                     if current_master != self.spark_master:
                         logger.warning(
                             f"Cached SparkSession uses master={current_master!r}, "
                             f"expected {self.spark_master!r}. Recreating session."
+                        )
+                        try:
+                            self._spark_session.stop()
+                        except Exception:
+                            pass
+                        self._spark_session = None
+                        SparkManager._spark_session = None
+                        self._force_cleanup_spark_state()
+                    elif not self._is_app_registered_on_master():
+                        logger.warning(
+                            "SparkSession app is no longer registered on Spark "
+                            "Master (orphaned after Master recovery). Recreating."
                         )
                         try:
                             self._spark_session.stop()
@@ -194,6 +287,8 @@ class SparkManager:
                 SparkManager._spark_session = None
                 self._force_cleanup_spark_state()
         
+        self._wait_for_master_ready()
+
         from pyspark.sql import SparkSession
         from delta import configure_spark_with_delta_pip
         
