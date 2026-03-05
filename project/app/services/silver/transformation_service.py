@@ -2488,29 +2488,46 @@ class SilverTransformationService:
             import asyncio as _asyncio
             from concurrent.futures import ThreadPoolExecutor as _TPE
 
+            # When LLM extractions are configured, stamp each row with a
+            # unique ID so the broadcast join can match LLM results back.
+            # This column is dropped in the final LLM overwrite.
+            if config.llm_extractions:
+                from pyspark.sql import functions as _F
+                df = df.withColumn("__silver_row_id", _F.monotonically_increasing_id())
+
+            # Write base data to Delta FIRST — frees JVM/Spark memory before
+            # the potentially long-running LLM API calls begin.
+            _loop = _asyncio.get_event_loop()
+            with _TPE(max_workers=5) as _executor:
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        rows_output, delta_version = await _loop.run_in_executor(
+                            _executor, self._write_silver_delta, df, output_path
+                        )
+                        break
+                    except Exception as _e:
+                        logger.error(f"Attempt {attempt + 1}/{max_retries} failed writing Silver Delta: {_e}")
+                        if attempt == max_retries - 1:
+                            raise
+                        await _asyncio.sleep(2 ** attempt)
+
+            # Release the in-memory DataFrame so Spark/JVM can reclaim heap
+            # before LLM processing starts.
+            try:
+                df.unpersist()
+            except Exception:
+                pass
+            del df
+            df = None
+
             if config.llm_extractions:
                 rows_output, delta_version, llm_extraction_results = await self._execute_llm_extractions(
                     config=config,
                     bronze_info=bronze_info,
                     output_path=output_path,
                     post_llm_filters=post_llm_filters,
-                    existing_df=df,
                 )
-            else:
-                _loop = _asyncio.get_event_loop()
-                with _TPE(max_workers=5) as _executor:
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            rows_output, delta_version = await _loop.run_in_executor(
-                                _executor, self._write_silver_delta, df, output_path
-                            )
-                            break
-                        except Exception as _e:
-                            logger.error(f"Attempt {attempt + 1}/{max_retries} failed writing Silver Delta: {_e}")
-                            if attempt == max_retries - 1:
-                                raise
-                            await _asyncio.sleep(2 ** attempt)
 
         except Exception as e:
             spark_error = e
@@ -2997,15 +3014,18 @@ class SilverTransformationService:
         bronze_info: Dict[str, Any],
         output_path: str,
         post_llm_filters: Optional[Dict] = None,
-        existing_df: Optional[Any] = None,
     ) -> Tuple[int, int, List[Dict[str, Any]]]:
         """
-        Execute LLM extractions on the Silver data after Spark transform.
+        Execute LLM extractions on Silver data already persisted to Delta.
 
-        When *existing_df* is provided (the in-memory DataFrame from _run_spark_transform)
-        it is used directly, skipping the Delta read.  After all LLM columns are added
-        the DataFrame is written to Delta **once** — this is the only Delta commit for
-        the entire execution, ensuring consecutive version numbers.
+        The base DataFrame has already been written to Delta by the caller,
+        so Spark/JVM memory is free during the (potentially long) LLM API calls.
+
+        Pipeline:
+        1. For each extraction, reads ONLY the source column from Delta (minimal memory).
+        2. Calls the LLM API and accumulates results as lightweight Python lists.
+        3. After all extractions complete, reads the Delta table ONCE, adds all
+           LLM columns via a single toPandas() round-trip, and overwrites Delta.
 
         Returns:
             (rows_output, delta_version, extraction_results)
@@ -3013,54 +3033,46 @@ class SilverTransformationService:
         from .llm_extraction_service import get_llm_extraction_service
         from concurrent.futures import ThreadPoolExecutor
         import asyncio
-        
+
         llm_service = get_llm_extraction_service()
         extractions = config.llm_extractions or []
-        
+
         logger.info(f"Starting LLM extractions: {len(extractions)} column(s) to create")
-        
-        # Resolve source_column_id to actual column names in the data
+
         bronze_column_map = bronze_info.get('column_mappings', {})
-        
         loop = asyncio.get_event_loop()
 
-        if existing_df is not None:
-            # Use the in-memory DataFrame — no Delta read needed
-            df = existing_df
-        else:
-            # Fallback: read from Delta (only when called without a pre-built DataFrame)
-            def _read_silver_data():
-                spark = self.spark_manager.get_or_create_session()
-                return spark.read.format("delta").load(output_path)
+        # Read column list from the persisted Delta table (schema only, no data)
+        def _get_columns():
+            spark = self.spark_manager.get_or_create_session()
+            return spark.read.format("delta").load(output_path).columns
 
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                df = await loop.run_in_executor(executor, _read_silver_data)
-        
-        all_columns = df.columns
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            all_columns = await loop.run_in_executor(executor, _get_columns)
+
         all_results = []
-        
+        llm_columns_to_add: Dict[str, Tuple[list, str]] = {}
+
         for ext_def in extractions:
             source_col_id = ext_def.get('source_column_id')
             new_col_name = ext_def['new_column_name']
-            
+            output_type = ext_def.get("output_type", "bool")
+
             # Resolve source_column_id to bronze column name
             source_col_name = None
             if source_col_id and bronze_column_map:
                 mapping = bronze_column_map.get(str(source_col_id)) or bronze_column_map.get(source_col_id)
                 if isinstance(mapping, dict):
-                    # bronze_column_map returns dicts like {bronze_column_name: "col", ...}
                     source_col_name = mapping.get('bronze_column_name') or mapping.get('original_column_name')
                 elif isinstance(mapping, str):
                     source_col_name = mapping
-            
-            # If found in mapping but not in DataFrame, check with prefixes
+
             if source_col_name and source_col_name not in all_columns:
                 for col in all_columns:
                     if col == source_col_name or col.endswith(f"_{source_col_name}"):
                         source_col_name = col
                         break
-            
-            # If not found in mapping at all, try to find by looking up external column name
+
             if not source_col_name:
                 from ...database.models.metadata import ExternalColumn
                 col_result = await self.db.execute(
@@ -3068,12 +3080,11 @@ class SilverTransformationService:
                 )
                 ext_col_name = col_result.scalar_one_or_none()
                 if ext_col_name:
-                    # Check if the column name exists in the DataFrame (may be prefixed)
                     for col in all_columns:
                         if col == ext_col_name or col.endswith(f"_{ext_col_name}"):
                             source_col_name = col
                             break
-            
+
             if not source_col_name or source_col_name not in all_columns:
                 logger.error(
                     f"LLM extraction '{new_col_name}': source column ID {source_col_id} "
@@ -3082,7 +3093,7 @@ class SilverTransformationService:
                 )
                 all_results.append({
                     "column_name": new_col_name,
-                    "output_type": ext_def.get("output_type", "unknown"),
+                    "output_type": output_type,
                     "values": [],
                     "rows_processed": 0,
                     "rows_success": 0,
@@ -3090,87 +3101,106 @@ class SilverTransformationService:
                     "error_rate": 1.0,
                 })
                 continue
-            
+
             logger.info(
                 f"LLM extraction '{new_col_name}': reading values from column '{source_col_name}'"
             )
-            
-            # Collect column values from Spark DataFrame (blocking)
-            def _collect_values():
+
+            # Read ONLY __silver_row_id + source column from Delta (column pruning).
+            def _collect_column_from_delta(_col=source_col_name):
                 from pyspark.sql import functions as F
-                rows = df.select(F.col(source_col_name).cast("string")).collect()
-                return [row[0] for row in rows]
-            
+                spark = self.spark_manager.get_or_create_session()
+                rows = spark.read.format("delta").load(output_path) \
+                    .select("__silver_row_id", F.col(_col).cast("string")) \
+                    .orderBy("__silver_row_id") \
+                    .collect()
+                return (
+                    [row["__silver_row_id"] for row in rows],
+                    [row[1] for row in rows],
+                )
+
             with ThreadPoolExecutor(max_workers=1) as executor:
-                column_values = await loop.run_in_executor(executor, _collect_values)
-            
-            # Run LLM extraction (async with concurrency)
+                row_ids, column_values = await loop.run_in_executor(executor, _collect_column_from_delta)
+
             result = await llm_service.process_extraction(ext_def, column_values)
             all_results.append(result)
-            
-            # Add the new column to the DataFrame via pandas (reliable row ordering)
-            extracted_values = result["values"]
-            
-            def _add_column_to_df(current_df, col_name, values, output_type):
-                """
-                Add LLM-extracted column to Spark DataFrame using pandas as intermediary.
-                This guarantees correct row ordering (monotonically_increasing_id is
-                partition-dependent and unreliable for cross-DataFrame joins).
-                """
+
+            llm_columns_to_add[new_col_name] = (row_ids, result["values"], output_type)
+            del column_values, row_ids
+
+        # If no columns were successfully extracted, return current Delta state
+        if not llm_columns_to_add:
+            def _get_current_state():
                 spark = self.spark_manager.get_or_create_session()
-                
-                # Convert to pandas, add column, convert back
-                pdf = current_df.toPandas()
-                
-                if len(values) != len(pdf):
-                    logger.warning(
-                        f"LLM values count ({len(values)}) != DataFrame rows ({len(pdf)}). "
-                        f"Padding/truncating to match."
-                    )
-                    # Pad with None or truncate
-                    if len(values) < len(pdf):
-                        values = values + [None] * (len(pdf) - len(values))
-                    else:
-                        values = values[:len(pdf)]
-                
-                # Use Python-native None (not pd.NA) -- Spark rejects pandas.NA types.
-                # Use object dtype for both bool and enum to safely hold None values.
-                if output_type == "bool":
-                    col_values = [bool(v) if v is not None else None for v in values]
-                else:
-                    col_values = [str(v) if v is not None else None for v in values]
-                
-                pdf[col_name] = col_values  # object dtype, Python None
-                
-                # Build explicit Spark schema to avoid type inference failures
-                # (when all values are None, Spark can't guess the type)
-                from pyspark.sql.types import StructType, StructField, BooleanType, StringType
-                
-                spark_schema = StructType()
-                for field in current_df.schema.fields:
-                    spark_schema.add(field)
-                
-                if output_type == "bool":
-                    spark_schema.add(StructField(col_name, BooleanType(), True))
-                else:
-                    spark_schema.add(StructField(col_name, StringType(), True))
-                
-                return spark.createDataFrame(pdf, schema=spark_schema)
-            
+                delta_ver = self._read_delta_version(output_path)
+                from delta.tables import DeltaTable
+                dt = DeltaTable.forPath(spark, output_path)
+                history = dt.history(1).collect()
+                rows = 0
+                if history:
+                    rows = int(history[0].asDict().get("operationMetrics", {}).get("numOutputRows", 0))
+                return rows, delta_ver
+
             with ThreadPoolExecutor(max_workers=1) as executor:
-                df = await loop.run_in_executor(
-                    executor, 
-                    _add_column_to_df, 
-                    df, 
-                    new_col_name, 
-                    extracted_values,
-                    ext_def.get("output_type", "bool")
-                )
-        
+                rows_output, delta_version = await loop.run_in_executor(executor, _get_current_state)
+            return rows_output, delta_version, all_results
+
+        # Spark-native: build a small DataFrame from LLM results keyed by
+        # __silver_row_id, then broadcast-join it onto the Delta table.
+        # Zero toPandas() — no type conversion issues, scales to any size.
+        def _add_all_llm_columns_spark():
+            from pyspark.sql import functions as F, Row
+            from pyspark.sql.types import (
+                StructType, StructField, LongType, BooleanType, StringType,
+            )
+
+            spark = self.spark_manager.get_or_create_session()
+
+            logger.info(
+                f"Adding {len(llm_columns_to_add)} LLM column(s) to Delta via "
+                f"broadcast join: {list(llm_columns_to_add.keys())}"
+            )
+
+            # Build schema and rows for the small LLM DataFrame
+            llm_schema_fields = [StructField("__silver_row_id", LongType(), False)]
+            for col_name, (_, _, col_type) in llm_columns_to_add.items():
+                if col_type == "bool":
+                    llm_schema_fields.append(StructField(col_name, BooleanType(), True))
+                else:
+                    llm_schema_fields.append(StructField(col_name, StringType(), True))
+            llm_schema = StructType(llm_schema_fields)
+
+            # All extractions share the same row_ids (same Delta table).
+            # Pick the first to get them.
+            first_key = next(iter(llm_columns_to_add))
+            shared_row_ids = llm_columns_to_add[first_key][0]
+
+            llm_rows = []
+            for i, rid in enumerate(shared_row_ids):
+                row_dict = {"__silver_row_id": int(rid)}
+                for col_name, (_, values, col_type) in llm_columns_to_add.items():
+                    val = values[i] if i < len(values) else None
+                    if val is not None:
+                        row_dict[col_name] = bool(val) if col_type == "bool" else str(val)
+                    else:
+                        row_dict[col_name] = None
+                llm_rows.append(Row(**row_dict))
+
+            llm_df = spark.createDataFrame(llm_rows, schema=llm_schema)
+
+            # Read base Delta and broadcast-join the small LLM DataFrame
+            base_df = spark.read.format("delta").load(output_path)
+            joined = base_df.join(F.broadcast(llm_df), "__silver_row_id", "left")
+
+            # Drop the internal row ID — not needed downstream
+            joined = joined.drop("__silver_row_id")
+            return joined
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            df = await loop.run_in_executor(executor, _add_all_llm_columns_spark)
+
         # Apply post-LLM filters if any (conditions on LLM-created columns)
-        if post_llm_filters and all_results:
-            from pyspark.sql import functions as F
-            
+        if post_llm_filters:
             def _apply_post_llm_filters():
                 nonlocal df
                 filter_config = {'filters': post_llm_filters}
@@ -3178,16 +3208,15 @@ class SilverTransformationService:
                 df = self._apply_spark_filters(df, filter_config, None)
                 post_count = df.count()
                 logger.info(f"Post-LLM filter applied: {pre_count} rows before, {post_count} rows after")
-            
+
             with ThreadPoolExecutor(max_workers=1) as executor:
                 await loop.run_in_executor(executor, _apply_post_llm_filters)
-        
-        # Single Delta write — with or without LLM results the df must be persisted here
+
+        # Overwrite Delta with LLM columns added
         def _write_final():
             logger.info(
-                f"Writing Silver Delta with {len(all_results)} LLM column(s) to: {output_path}"
+                f"Writing Silver Delta with {len(llm_columns_to_add)} LLM column(s) to: {output_path}"
             )
-            # Cache before write so count() reads from memory, not a second S3 scan
             df.cache()
             rows_written = df.count()
             df.write \
@@ -3491,7 +3520,9 @@ class SilverTransformationService:
         if duplicate_columns:
             logger.info(f"Duplicate columns found (will be prefixed): {duplicate_columns}")
         
-        # === STEP 3: Rename duplicate columns with group prefix ===
+        # === STEP 3: Rename duplicate columns using original table name ===
+        # Mirrors the Virtualized/Federated convention: "{table_name}_{column}"
+        # e.g. pacientes.sexo → pacientes_sexo, sus_pacientes.sexo → sus_pacientes_sexo
         # Also handle Bronze metadata columns (_source_table, _ingestion_timestamp)
         # These exist in every group and would cause duplicates on JOIN
         bronze_metadata_columns = {'_source_table', '_ingestion_timestamp'}
@@ -3500,27 +3531,38 @@ class SilverTransformationService:
         df_map = {}
         column_rename_map = {}  # Track renames: (idx, old_name) -> new_name
         
+        # Build reverse lookup: (group_index, bronze_col_name_lower) → original_table_name
+        # so we can prefix duplicates with the source table name (same as Virtualized).
+        col_to_table: dict = {}
+        for _col_id, mapping in bronze_info.get('column_mappings', {}).items():
+            grp_idx = mapping.get('group_index')
+            bcol = (mapping.get('bronze_column_name') or '').lower()
+            tbl = mapping.get('original_table_name') or ''
+            if grp_idx is not None and bcol and tbl:
+                col_to_table[(grp_idx, bcol)] = tbl
+        
+        # Pre-collect all original column names across DFs for collision detection
+        all_existing_cols = {c.lower() for d in dfs for c in d.columns}
+        # Track new names already assigned so two renames never collide
+        assigned_names: set = set()
+        
         for idx, df in enumerate(dfs):
-            # Get group name for prefix
-            group_name = ''
-            if idx < len(tables):
-                group_name = tables[idx].get('group_name', f'group_{idx}')
-                # Extract a shorter prefix from group_name (e.g., "part_mysql_patients" -> "patients")
-                parts = group_name.replace('part_', '').split('_')
-                # Use last part as prefix (usually the table name)
-                if len(parts) > 1:
-                    group_prefix = parts[-1]
-                else:
-                    group_prefix = parts[0] if parts else f'g{idx}'
-            else:
-                group_prefix = f'g{idx}'
+            group_name = tables[idx].get('group_name', f'group_{idx}') if idx < len(tables) else f'group_{idx}'
             
-            # Rename duplicate columns in this DataFrame
             renamed_df = df
             for col in df.columns:
                 col_lower = col.lower()
                 if col_lower in duplicate_columns:
-                    new_name = f"{group_prefix}_{col}"
+                    table_prefix = col_to_table.get((idx, col_lower))
+                    if table_prefix:
+                        new_name = f"{table_prefix}_{col}"
+                    else:
+                        new_name = f"g{idx}_{col}"
+                    nl = new_name.lower()
+                    if (nl in all_existing_cols and nl != col_lower) or nl in assigned_names:
+                        new_name = f"g{idx}_{col}"
+                        nl = new_name.lower()
+                    assigned_names.add(nl)
                     renamed_df = renamed_df.withColumnRenamed(col, new_name)
                     column_rename_map[(idx, col)] = new_name
                     logger.info(f"Renamed column '{col}' to '{new_name}' in group {idx} ({group_name})")
@@ -3535,26 +3577,34 @@ class SilverTransformationService:
             
             df_map[idx] = renamed_df
         
-        # Update bronze_info column_mappings with renamed columns
-        # This ensures equivalence/transformations can find the columns
+        # Update bronze_info column_mappings with renamed columns.
+        # Each rename entry (idx, old_name) must update exactly ONE matching
+        # mapping — the one belonging to the same group.  When group_index is
+        # missing we fall back to updating only the first unmatched entry to
+        # avoid accidentally rewriting mappings that belong to other groups.
         column_mappings = bronze_info.get('column_mappings', {})
+        updated_col_ids: set = set()
         for (idx, old_name), new_name in column_rename_map.items():
-            # Find and update the mapping that has this bronze_column_name AND belongs to this group
             for col_id, mapping in column_mappings.items():
+                if col_id in updated_col_ids:
+                    continue
                 bronze_col_name = mapping.get('bronze_column_name', '')
                 mapping_group_idx = mapping.get('group_index')
                 
-                # Match by column name AND group index (if available)
-                if bronze_col_name.lower() == old_name.lower():
-                    # If group_index is available, use it to be precise
-                    if mapping_group_idx is not None and mapping_group_idx != idx:
-                        continue  # This mapping is from a different group
-                    
-                    original_name = bronze_col_name
-                    mapping['bronze_column_name'] = new_name
-                    mapping['original_bronze_column_name'] = original_name
-                    mapping['is_prefixed_for_join'] = True
-                    logger.info(f"Updated column_mapping {col_id} (group {idx}): '{original_name}' -> '{new_name}'")
+                if bronze_col_name.lower() != old_name.lower():
+                    continue
+                
+                # Precise match when group_index is available
+                if mapping_group_idx is not None and mapping_group_idx != idx:
+                    continue
+                
+                original_name = bronze_col_name
+                mapping['bronze_column_name'] = new_name
+                mapping['original_bronze_column_name'] = original_name
+                mapping['is_prefixed_for_join'] = True
+                updated_col_ids.add(col_id)
+                logger.info(f"Updated column_mapping {col_id} (group {idx}): '{original_name}' -> '{new_name}'")
+                break  # one mapping per rename entry
         
         # === STEP 4: Proceed with JOIN using renamed DataFrames ===
         # Track which DataFrames have been joined
@@ -3774,6 +3824,25 @@ class SilverTransformationService:
             mapped_expr_by_bronze_col[bronze_col_name] = mapped_expr
             logger.info(f"Prepared Equivalence value mapping for {bronze_col_name} ({len(mappings)} mappings)")
         
+        # Defensive: drop truly-duplicate columns that slipped through the JOIN
+        # rename logic. PySpark DataFrames can carry two columns with the same
+        # name after a join, which causes AMBIGUOUS_REFERENCE errors later.
+        col_counts: dict = {}
+        for c in df.columns:
+            col_counts[c] = col_counts.get(c, 0) + 1
+        dup_cols = {c for c, cnt in col_counts.items() if cnt > 1}
+        if dup_cols:
+            logger.warning(f"Duplicate columns detected in DataFrame before equivalence: {dup_cols}. Deduplicating.")
+            keep_indices = []
+            seen_for_dedup: set = set()
+            for i, c in enumerate(df.columns):
+                if c not in seen_for_dedup:
+                    keep_indices.append(i)
+                    seen_for_dedup.add(c)
+                else:
+                    logger.warning(f"Dropping duplicate column '{c}' at position {i}")
+            df = df.select(*[df[i] for i in keep_indices])
+        
         # Check if we should exclude source columns after unification
         exclude_source_columns = transform_config.get('exclude_unified_source_columns', False)
         columns_to_drop = set()  # Track source columns to drop
@@ -3782,6 +3851,14 @@ class SilverTransformationService:
         for unified_name, col_infos in columns_by_unified_name.items():
             if len(col_infos) > 1:
                 # Multiple columns to unify - use COALESCE
+                # Deduplicate bronze_cols in case mappings point to the same name
+                seen_bronze: set = set()
+                deduped_infos = []
+                for ci in col_infos:
+                    if ci['bronze_col'] not in seen_bronze:
+                        seen_bronze.add(ci['bronze_col'])
+                        deduped_infos.append(ci)
+                col_infos = deduped_infos
                 bronze_cols = [c['bronze_col'] for c in col_infos]
                 coalesce_inputs = [mapped_expr_by_bronze_col.get(c, F.col(c)) for c in bronze_cols]
                 coalesce_expr = F.coalesce(*coalesce_inputs)

@@ -128,11 +128,19 @@ class TrinoManager:
             access_key = params.get("s3a_access_key") or params.get("access_key") or params.get("aws_access_key_id")
             secret_key = params.get("s3a_secret_key") or params.get("secret_key") or params.get("aws_secret_access_key")
             endpoint = params.get("endpoint_url") or params.get("s3a_endpoint") or params.get("endpoint")
+
+            # Prefer storing the file metastore inside the user's own bucket so the
+            # catalog's S3 credentials always have access to it.  Falling back to the
+            # platform-internal bucket is kept for connections that don't expose a
+            # bucket_name (e.g. raw AWS S3 without a fixed bucket).
+            bucket_name = params.get("bucket_name") or params.get("s3a_bucket")
+            catalog_name = self._sanitize_identifier(params.get("_connection_name", "default"), connection_id)
+            if bucket_name:
+                metastore_path = f"s3a://{bucket_name}/_datafabric_metastore/"
+            else:
+                metastore_path = f"s3a://{self.internal_metastore_bucket.rstrip('/')}/{catalog_name}/"
             
-            catalog_name = self._sanitize_identifier(params.get("_connection_name", "default"))
-            internal_metastore_path = f"s3a://{self.internal_metastore_bucket}/{catalog_name}/"
-            
-            logger.info(f"[TrinoManager] Using internal metastore at: {internal_metastore_path}")
+            logger.info(f"[TrinoManager] Using metastore at: {metastore_path}")
             
             # Se túnel ativo, substituir endpoint pelo endereço tunelado
             if has_tunnel_config(params):
@@ -145,7 +153,7 @@ class TrinoManager:
             
             props = {
                 "hive.metastore": "file",
-                "hive.metastore.catalog.dir": internal_metastore_path,
+                "hive.metastore.catalog.dir": metastore_path,
                 "delta.register-table-procedure.enabled": "true",
                 "fs.native-s3.enabled": "true",
                 "s3.region": region,

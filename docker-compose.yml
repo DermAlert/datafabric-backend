@@ -75,6 +75,8 @@ services:
         condition: service_healthy
       trino:
         condition: service_started
+      spark-master:
+        condition: service_healthy
     extra_hosts:
       - "localhost:host-gateway"
     networks:
@@ -475,10 +477,8 @@ services:
         fi
         mkdir -p /sources/logs /sources/dags /sources/plugins
         chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
-        exec /entrypoint airflow version
-        # Create spark_pool for controlling Spark job concurrency
-        airflow pools set spark_pool ${SPARK_POOL_SIZE:-3} "Controls max concurrent Spark jobs (Silver + Bronze)" || true
-        # Create HTTP connection for the datafabric backend
+        /entrypoint airflow version
+        airflow pools set spark_pool $${SPARK_POOL_SIZE:-3} "Controls max concurrent Spark jobs (Silver + Bronze)" || true
         airflow connections add datafabric_backend \
           --conn-type http \
           --conn-host http://dermalert-backend:8000 || true

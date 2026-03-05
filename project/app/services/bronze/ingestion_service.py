@@ -338,6 +338,7 @@ class BronzeIngestionService:
                     'table_id': table_id,
                     'table_name': table_info['table_name'],
                     'schema_name': table_info['schema_name'],
+                    'connection_id': table_info['connection_id'],
                     'connection_name': table_info['connection_name'],
                     'selected_columns': [c['column_name'] for c in cols],
                     'column_count': len(cols)
@@ -501,7 +502,15 @@ class BronzeIngestionService:
         
         # Ensure all source catalogs exist before executing queries
         # With catalog.store=memory, catalogs are volatile and need to be recreated
-        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        # For federated groups, collect connection_ids from all tables (not just the group-level id)
+        connection_id_set = set()
+        for g in preview.ingestion_groups:
+            if g.connection_id:
+                connection_id_set.add(g.connection_id)
+            for t in g.tables:
+                if t.get('connection_id'):
+                    connection_id_set.add(t['connection_id'])
+        connection_ids = list(connection_id_set)
         if connection_ids:
             logger.info(f"Ensuring source catalogs exist for connection_ids: {connection_ids}")
             catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
@@ -2214,7 +2223,15 @@ AS
         
         # Ensure all source catalogs exist before executing queries
         # With catalog.store=memory, catalogs are volatile and need to be recreated
-        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        # For federated groups, collect connection_ids from all tables (not just the group-level id)
+        connection_id_set = set()
+        for g in preview.ingestion_groups:
+            if g.connection_id:
+                connection_id_set.add(g.connection_id)
+            for t in g.tables:
+                if t.get('connection_id'):
+                    connection_id_set.add(t['connection_id'])
+        connection_ids = list(connection_id_set)
         if connection_ids:
             logger.info(f"Ensuring source catalogs exist for virtualized query: {connection_ids}")
             catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
@@ -2610,7 +2627,15 @@ AS
         
         # Ensure all source catalogs exist before executing queries
         # With catalog.store=memory, catalogs are volatile and need to be recreated
-        connection_ids = [g.connection_id for g in preview.ingestion_groups if g.connection_id]
+        # For federated groups, collect connection_ids from all tables (not just the group-level id)
+        connection_id_set = set()
+        for g in preview.ingestion_groups:
+            if g.connection_id:
+                connection_id_set.add(g.connection_id)
+            for t in g.tables:
+                if t.get('connection_id'):
+                    connection_id_set.add(t['connection_id'])
+        connection_ids = list(connection_id_set)
         if connection_ids:
             logger.info(f"Ensuring source catalogs exist for connection_ids: {connection_ids}")
             catalog_results = await self._ensure_source_catalogs_exist(connection_ids)
