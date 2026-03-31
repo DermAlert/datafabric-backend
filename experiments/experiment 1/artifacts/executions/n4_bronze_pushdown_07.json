@@ -1,0 +1,210 @@
+{
+  "row": {
+    "run_id": "exp1_20260315_v2",
+    "timestamp": "2026-03-15T21:50:37.264376",
+    "topology_n": 4,
+    "scenario": "bronze_pushdown",
+    "iteration": 7,
+    "is_warmup": false,
+    "config_id": 35,
+    "success": true,
+    "status": "success",
+    "latency_seconds_wall": 13.202588949992787,
+    "execution_time_seconds_api": 13.155173,
+    "rows_processed": 2524,
+    "rows_output": 2524,
+    "size_bytes": 239461,
+    "num_files": 4,
+    "delta_version": 6,
+    "delta_current_version": 6,
+    "cpu_avg_percent": 347.305,
+    "cpu_max_percent": 384.27,
+    "mem_avg_bytes": 12945982481,
+    "mem_max_bytes": 12987551179,
+    "sample_count": 4,
+    "error_message": null
+  },
+  "raw_response": {
+    "config_id": 35,
+    "config_name": "exp1_20260315_v2_n4_bronze_pushdown",
+    "execution_id": 474,
+    "status": "success",
+    "groups": [
+      {
+        "group_name": "part_exp1_sus_hospital_joined_0",
+        "connection_name": "exp1_sus_hospital",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_sus_hospital/",
+        "rows_ingested": 994,
+        "execution_time_seconds": 3.678571,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_backend_app_joined_0",
+        "connection_name": "exp1_backend_app",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_backend_app/",
+        "rows_ingested": 0,
+        "execution_time_seconds": 1.443585,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_laboratorio_privado_joined_0",
+        "connection_name": "exp1_laboratorio_privado",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_laboratorio_privado/",
+        "rows_ingested": 630,
+        "execution_time_seconds": 3.634585,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_imagem_diagnostica_joined_0",
+        "connection_name": "exp1_imagem_diagnostica",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_imagem_diagnostica/",
+        "rows_ingested": 900,
+        "execution_time_seconds": 3.822279,
+        "error_message": null
+      }
+    ],
+    "total_rows_ingested": 2524,
+    "bronze_paths": [
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_sus_hospital/",
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_backend_app/",
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_laboratorio_privado/",
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_imagem_diagnostica/"
+    ],
+    "execution_time_seconds": 13.155173,
+    "message": "Bronze ingestion completed successfully. 2524 rows ingested.",
+    "delta_version": 6,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 2524,
+    "rows_updated": 0,
+    "config_snapshot": {
+      "name": "exp1_20260315_v2_n4_bronze_pushdown",
+      "description": "Exp1 N=4 bronze pushdown",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 134,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 152,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 177,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 179,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "properties": {},
+      "snapshot_at": "2026-03-16T00:50:24.038719"
+    }
+  },
+  "raw_execution": {
+    "id": 474,
+    "config_id": 35,
+    "status": "success",
+    "started_at": "2026-03-16T00:50:24.038748Z",
+    "finished_at": "2026-03-16T00:50:37.224095Z",
+    "group_results": [
+      {
+        "group_name": "part_exp1_sus_hospital_joined_0",
+        "connection_name": "exp1_sus_hospital",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_sus_hospital/",
+        "rows_ingested": 994,
+        "execution_time_seconds": 3.678571,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_backend_app_joined_0",
+        "connection_name": "exp1_backend_app",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_backend_app/",
+        "rows_ingested": 0,
+        "execution_time_seconds": 1.443585,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_laboratorio_privado_joined_0",
+        "connection_name": "exp1_laboratorio_privado",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_laboratorio_privado/",
+        "rows_ingested": 630,
+        "execution_time_seconds": 3.634585,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_imagem_diagnostica_joined_0",
+        "connection_name": "exp1_imagem_diagnostica",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_imagem_diagnostica/",
+        "rows_ingested": 900,
+        "execution_time_seconds": 3.822279,
+        "error_message": null
+      }
+    ],
+    "rows_ingested": 2524,
+    "output_paths": [
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_sus_hospital/",
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_backend_app/",
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_laboratorio_privado/",
+      "s3a://datafabric-bronze/35-exp1_20260315_v2_n4_bronze_pushdown/part_exp1_imagem_diagnostica/"
+    ],
+    "error_message": null,
+    "delta_version": 6,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 2524,
+    "rows_updated": 0,
+    "rows_deleted": 0,
+    "config_snapshot": null
+  },
+  "raw_version": {
+    "delta_current_version": 6,
+    "delta_version": 6,
+    "size_bytes": 239461,
+    "num_files": 4,
+    "version_total_rows": 2524,
+    "operation": "OVERWRITE"
+  }
+}

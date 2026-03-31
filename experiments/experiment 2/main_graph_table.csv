@@ -1,0 +1,11 @@
+task_id,concept,arm,returned_total_rows,gold_total_rows,execution_time_seconds,tp,fp,fn,precision,recall,f1,normalization_accuracy,manual_source_columns_selected,config_time_sec
+T1,sex_gender,baseline,221,232,0.61,198,23,34,0.896,0.853,0.874,0.739,4,210
+T1,sex_gender,semantic,229,232,0.68,223,6,9,0.974,0.961,0.967,0.991,1,74
+T2,diagnosis,baseline,176,214,0.88,162,14,52,0.920,0.757,0.831,0.682,7,345
+T2,diagnosis,semantic,210,214,1.02,202,8,12,0.962,0.944,0.953,0.925,2,128
+T3,lesion_type,baseline,149,180,0.72,140,9,40,0.940,0.778,0.851,0.711,5,262
+T3,lesion_type,semantic,177,180,0.79,172,5,8,0.972,0.956,0.964,0.950,2,96
+T4,anatomical_site,baseline,301,329,0.93,288,13,41,0.957,0.875,0.914,0.790,6,284
+T4,anatomical_site,semantic,326,329,1.08,320,6,9,0.982,0.973,0.977,0.970,2,104
+T5,age_group,baseline,256,281,0.57,242,14,39,0.945,0.861,0.901,0.819,4,198
+T5,age_group,semantic,279,281,0.64,274,5,7,0.982,0.975,0.979,0.989,1,67

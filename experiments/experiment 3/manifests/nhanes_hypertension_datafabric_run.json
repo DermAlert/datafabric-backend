@@ -1,0 +1,1032 @@
+{
+  "base_url": "http://localhost:8004",
+  "connections": {
+    "DEMO_J": {
+      "name": "NHANES HTN 2017-2018 DEMO_J",
+      "description": "DEMO_J from NHANES 2017-2018 for Experiment 3",
+      "connection_type_id": 2,
+      "connection_params": {
+        "host": "nhanes_demo_pg",
+        "port": 5432,
+        "database": "nhanes_demo",
+        "username": "nhanes",
+        "password": "ENC:v1:qmebCKQ6ZwERRAz1t/krMuzC+aPFAmLARKwxjWrt1vmTVcZhiANMhlHihBBxpcluWIo=",
+        "sslmode": "disable"
+      },
+      "content_type": "metadata",
+      "cron_expression": null,
+      "sync_settings": null,
+      "id": 33,
+      "organization_id": 1,
+      "status": "active",
+      "sync_status": "success",
+      "sync_progress": 100,
+      "sync_progress_details": {
+        "phase": "complete",
+        "message": "Metadata extraction completed successfully",
+        "schemas_processed": 3,
+        "tables_processed": 9,
+        "completed_at": "2026-03-27T07:47:12.542406"
+      },
+      "last_sync_time": "2026-03-27T07:47:12.542440Z",
+      "next_sync_time": null
+    },
+    "BMX_J": {
+      "name": "NHANES HTN 2017-2018 BMX_J",
+      "description": "BMX_J from NHANES 2017-2018 for Experiment 3",
+      "connection_type_id": 3,
+      "connection_params": {
+        "host": "nhanes_bmx_mysql",
+        "port": 3306,
+        "database": "nhanes_bmx",
+        "username": "nhanes",
+        "password": "ENC:v1:voe+zNoYn8xWbuUVd2B5dmgK8DbK9ZdizCPNILWWxEHy3nkA+EDZi7OsbuZSQlKuSXU=",
+        "sslmode": "disable"
+      },
+      "content_type": "metadata",
+      "cron_expression": null,
+      "sync_settings": null,
+      "id": 34,
+      "organization_id": 1,
+      "status": "active",
+      "sync_status": "success",
+      "sync_progress": 100,
+      "sync_progress_details": {
+        "phase": "complete",
+        "message": "Metadata extraction completed successfully",
+        "schemas_processed": 3,
+        "tables_processed": 9,
+        "completed_at": "2026-03-27T07:47:22.242421"
+      },
+      "last_sync_time": "2026-03-27T07:47:22.242453Z",
+      "next_sync_time": null
+    },
+    "ALQ_J": {
+      "name": "NHANES HTN 2017-2018 ALQ_J",
+      "description": "ALQ_J from NHANES 2017-2018 for Experiment 3",
+      "connection_type_id": 3,
+      "connection_params": {
+        "host": "nhanes_alq_mysql",
+        "port": 3306,
+        "database": "nhanes_alq",
+        "username": "nhanes",
+        "password": "ENC:v1:MXJara4YnMetQK6X40/CioSmDExu6RY+ZwQW/DU2Z2nXWHH3vq/OEyqo70LTWyPX054=",
+        "sslmode": "disable"
+      },
+      "content_type": "metadata",
+      "cron_expression": null,
+      "sync_settings": null,
+      "id": 35,
+      "organization_id": 1,
+      "status": "active",
+      "sync_status": "success",
+      "sync_progress": 100,
+      "sync_progress_details": {
+        "phase": "complete",
+        "message": "Metadata extraction completed successfully",
+        "schemas_processed": 3,
+        "tables_processed": 9,
+        "completed_at": "2026-03-27T07:47:28.120586"
+      },
+      "last_sync_time": "2026-03-27T07:47:28.120610Z",
+      "next_sync_time": null
+    },
+    "SMQ_J": {
+      "name": "NHANES HTN 2017-2018 SMQ_J",
+      "description": "SMQ_J from NHANES 2017-2018 for Experiment 3",
+      "connection_type_id": 3,
+      "connection_params": {
+        "host": "nhanes_smq_mysql",
+        "port": 3306,
+        "database": "nhanes_smq",
+        "username": "nhanes",
+        "password": "ENC:v1:tiafPIGH7O+otnFJTAjd/pVU306Htd+QrTpQNENsO9YCb2xAhZ9b92Zbq4umcTNW6MU=",
+        "sslmode": "disable"
+      },
+      "content_type": "metadata",
+      "cron_expression": null,
+      "sync_settings": null,
+      "id": 36,
+      "organization_id": 1,
+      "status": "active",
+      "sync_status": "success",
+      "sync_progress": 100,
+      "sync_progress_details": {
+        "phase": "complete",
+        "message": "Metadata extraction completed successfully",
+        "schemas_processed": 3,
+        "tables_processed": 9,
+        "completed_at": "2026-03-27T07:47:33.170152"
+      },
+      "last_sync_time": "2026-03-27T07:47:33.170187Z",
+      "next_sync_time": null
+    },
+    "BPX_J": {
+      "name": "NHANES HTN 2017-2018 BPX_J",
+      "description": "BPX_J from NHANES 2017-2018 for Experiment 3",
+      "connection_type_id": 2,
+      "connection_params": {
+        "host": "nhanes_bpx_pg",
+        "port": 5432,
+        "database": "nhanes_bpx",
+        "username": "nhanes",
+        "password": "ENC:v1:KqlxHeQxidY3tnFD7YzeeEF4DhSjQz0lqZ8ux0kV/wp3Dh8tZQ/IZjNLjGL6ACdnKOQ=",
+        "sslmode": "disable"
+      },
+      "content_type": "metadata",
+      "cron_expression": null,
+      "sync_settings": null,
+      "id": 37,
+      "organization_id": 1,
+      "status": "active",
+      "sync_status": "success",
+      "sync_progress": 100,
+      "sync_progress_details": {
+        "phase": "complete",
+        "message": "Metadata extraction completed successfully",
+        "schemas_processed": 3,
+        "tables_processed": 9,
+        "completed_at": "2026-03-27T07:47:37.861972"
+      },
+      "last_sync_time": "2026-03-27T07:47:37.861998Z",
+      "next_sync_time": null
+    },
+    "BPQ_J": {
+      "name": "NHANES HTN 2017-2018 BPQ_J",
+      "description": "BPQ_J from NHANES 2017-2018 for Experiment 3",
+      "connection_type_id": 2,
+      "connection_params": {
+        "host": "nhanes_bpq_pg",
+        "port": 5432,
+        "database": "nhanes_bpq",
+        "username": "nhanes",
+        "password": "ENC:v1:dxBtWyiYZnUb+afU8/LaNNLfH+pBsS+6cPQy9zlccwxy1cW0aQJamgV2hDM+t66iqak=",
+        "sslmode": "disable"
+      },
+      "content_type": "metadata",
+      "cron_expression": null,
+      "sync_settings": null,
+      "id": 38,
+      "organization_id": 1,
+      "status": "active",
+      "sync_status": "success",
+      "sync_progress": 100,
+      "sync_progress_details": {
+        "phase": "complete",
+        "message": "Metadata extraction completed successfully",
+        "schemas_processed": 3,
+        "tables_processed": 9,
+        "completed_at": "2026-03-27T07:47:42.449669"
+      },
+      "last_sync_time": "2026-03-27T07:47:42.449707Z",
+      "next_sync_time": null
+    }
+  },
+  "metadata": {
+    "DEMO_J": {
+      "connection_id": 33,
+      "schema_id": 74,
+      "schema_name": "public",
+      "table_id": 288,
+      "table_name": "demo_j",
+      "column_ids": {
+        "seqn": 1864,
+        "sddsrvyr": 1865,
+        "ridstatr": 1866,
+        "riagendr": 1867,
+        "ridageyr": 1868,
+        "ridagemn": 1869,
+        "ridreth1": 1870,
+        "ridreth3": 1871,
+        "ridexmon": 1872,
+        "ridexagm": 1873,
+        "dmqmiliz": 1874,
+        "dmqadfc": 1875,
+        "dmdborn4": 1876,
+        "dmdcitzn": 1877,
+        "dmdyrsus": 1878,
+        "dmdeduc3": 1879,
+        "dmdeduc2": 1880,
+        "dmdmartl": 1881,
+        "ridexprg": 1882,
+        "sialang": 1883,
+        "siaproxy": 1884,
+        "siaintrp": 1885,
+        "fialang": 1886,
+        "fiaproxy": 1887,
+        "fiaintrp": 1888,
+        "mialang": 1889,
+        "miaproxy": 1890,
+        "miaintrp": 1891,
+        "aialanga": 1892,
+        "dmdhhsiz": 1893,
+        "dmdfmsiz": 1894,
+        "dmdhhsza": 1895,
+        "dmdhhszb": 1896,
+        "dmdhhsze": 1897,
+        "dmdhrgnd": 1898,
+        "dmdhragz": 1899,
+        "dmdhredz": 1900,
+        "dmdhrmaz": 1901,
+        "dmdhsedz": 1902,
+        "wtint2yr": 1903,
+        "wtmec2yr": 1904,
+        "sdmvpsu": 1905,
+        "sdmvstra": 1906,
+        "indhhin2": 1907,
+        "indfmin2": 1908,
+        "indfmpir": 1909
+      }
+    },
+    "BMX_J": {
+      "connection_id": 34,
+      "schema_id": 76,
+      "schema_name": "nhanes_bmx",
+      "table_id": 297,
+      "table_name": "bmx_j",
+      "column_ids": {
+        "seqn": 1944,
+        "bmdstats": 1945,
+        "bmxwt": 1946,
+        "bmiwt": 1947,
+        "bmxrecum": 1948,
+        "bmirecum": 1949,
+        "bmxhead": 1950,
+        "bmihead": 1951,
+        "bmxht": 1952,
+        "bmiht": 1953,
+        "bmxbmi": 1954,
+        "bmxleg": 1955,
+        "bmileg": 1956,
+        "bmxarml": 1957,
+        "bmiarml": 1958,
+        "bmxarmc": 1959,
+        "bmiarmc": 1960,
+        "bmxwaist": 1961,
+        "bmiwaist": 1962,
+        "bmxhip": 1963,
+        "bmihip": 1964
+      }
+    },
+    "ALQ_J": {
+      "connection_id": 35,
+      "schema_id": 79,
+      "schema_name": "nhanes_alq",
+      "table_id": 306,
+      "table_name": "alq_j",
+      "column_ids": {
+        "seqn": 1999,
+        "alq111": 2000,
+        "alq121": 2001,
+        "alq130": 2002,
+        "alq142": 2003,
+        "alq270": 2004,
+        "alq280": 2005,
+        "alq290": 2006,
+        "alq151": 2007,
+        "alq170": 2008
+      }
+    },
+    "SMQ_J": {
+      "connection_id": 36,
+      "schema_id": 82,
+      "schema_name": "nhanes_smq",
+      "table_id": 315,
+      "table_name": "smq_j",
+      "column_ids": {
+        "seqn": 2043,
+        "smq020": 2044,
+        "smd030": 2045,
+        "smq040": 2046,
+        "smq050q": 2047,
+        "smq050u": 2048,
+        "smd057": 2049,
+        "smq078": 2050,
+        "smd641": 2051,
+        "smd650": 2052,
+        "smd093": 2053,
+        "smdupca": 2054,
+        "smd100br": 2055,
+        "smd100fl": 2056,
+        "smd100mn": 2057,
+        "smd100ln": 2058,
+        "smd100tr": 2059,
+        "smd100ni": 2060,
+        "smd100co": 2061,
+        "smq621": 2062,
+        "smd630": 2063,
+        "smq661": 2064,
+        "smq665a": 2065,
+        "smq665b": 2066,
+        "smq665c": 2067,
+        "smq665d": 2068,
+        "smq670": 2069,
+        "smq848": 2070,
+        "smq852q": 2071,
+        "smq852u": 2072,
+        "smq890": 2073,
+        "smq895": 2074,
+        "smq900": 2075,
+        "smq905": 2076,
+        "smq910": 2077,
+        "smq915": 2078,
+        "smaquex2": 2079
+      }
+    },
+    "BPX_J": {
+      "connection_id": 37,
+      "schema_id": 86,
+      "schema_name": "public",
+      "table_id": 324,
+      "table_name": "bpx_j",
+      "column_ids": {
+        "seqn": 2114,
+        "peascct1": 2115,
+        "bpxchr": 2116,
+        "bpaarm": 2117,
+        "bpacsz": 2118,
+        "bpxpls": 2119,
+        "bpxpuls": 2120,
+        "bpxpty": 2121,
+        "bpxml1": 2122,
+        "bpxsy1": 2123,
+        "bpxdi1": 2124,
+        "bpaen1": 2125,
+        "bpxsy2": 2126,
+        "bpxdi2": 2127,
+        "bpaen2": 2128,
+        "bpxsy3": 2129,
+        "bpxdi3": 2130,
+        "bpaen3": 2131,
+        "bpxsy4": 2132,
+        "bpxdi4": 2133,
+        "bpaen4": 2134
+      }
+    },
+    "BPQ_J": {
+      "connection_id": 38,
+      "schema_id": 89,
+      "schema_name": "public",
+      "table_id": 333,
+      "table_name": "bpq_j",
+      "column_ids": {
+        "seqn": 2169,
+        "bpq020": 2170,
+        "bpq030": 2171,
+        "bpd035": 2172,
+        "bpq040a": 2173,
+        "bpq050a": 2174,
+        "bpq080": 2175,
+        "bpq060": 2176,
+        "bpq070": 2177,
+        "bpq090d": 2178,
+        "bpq100d": 2179
+      }
+    }
+  },
+  "relationships": {
+    "BMX_J": {
+      "id": 112,
+      "left_column": {
+        "column_id": 1864,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 288,
+        "table_name": "demo_j",
+        "schema_name": "public",
+        "connection_id": 33,
+        "connection_name": "NHANES HTN 2017-2018 DEMO_J"
+      },
+      "right_column": {
+        "column_id": 1944,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 297,
+        "table_name": "bmx_j",
+        "schema_name": "nhanes_bmx",
+        "connection_id": 34,
+        "connection_name": "NHANES HTN 2017-2018 BMX_J"
+      },
+      "name": "nhanes_htn_demo_bmx_j_seqn",
+      "description": "NHANES Experiment 3 join on seqn with DEMO_J as cohort anchor",
+      "scope": "inter_connection",
+      "source": "manual",
+      "cardinality": "one_to_one",
+      "default_join_type": "left",
+      "confidence_score": null,
+      "is_verified": true,
+      "is_active": true,
+      "data_criacao": "2026-03-27T07:47:43.345705",
+      "data_atualizacao": "2026-03-27T07:47:43.345705"
+    },
+    "ALQ_J": {
+      "id": 113,
+      "left_column": {
+        "column_id": 1864,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 288,
+        "table_name": "demo_j",
+        "schema_name": "public",
+        "connection_id": 33,
+        "connection_name": "NHANES HTN 2017-2018 DEMO_J"
+      },
+      "right_column": {
+        "column_id": 1999,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 306,
+        "table_name": "alq_j",
+        "schema_name": "nhanes_alq",
+        "connection_id": 35,
+        "connection_name": "NHANES HTN 2017-2018 ALQ_J"
+      },
+      "name": "nhanes_htn_demo_alq_j_seqn",
+      "description": "NHANES Experiment 3 join on seqn with DEMO_J as cohort anchor",
+      "scope": "inter_connection",
+      "source": "manual",
+      "cardinality": "one_to_one",
+      "default_join_type": "left",
+      "confidence_score": null,
+      "is_verified": true,
+      "is_active": true,
+      "data_criacao": "2026-03-27T07:47:43.876571",
+      "data_atualizacao": "2026-03-27T07:47:43.876571"
+    },
+    "SMQ_J": {
+      "id": 114,
+      "left_column": {
+        "column_id": 1864,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 288,
+        "table_name": "demo_j",
+        "schema_name": "public",
+        "connection_id": 33,
+        "connection_name": "NHANES HTN 2017-2018 DEMO_J"
+      },
+      "right_column": {
+        "column_id": 2043,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 315,
+        "table_name": "smq_j",
+        "schema_name": "nhanes_smq",
+        "connection_id": 36,
+        "connection_name": "NHANES HTN 2017-2018 SMQ_J"
+      },
+      "name": "nhanes_htn_demo_smq_j_seqn",
+      "description": "NHANES Experiment 3 join on seqn with DEMO_J as cohort anchor",
+      "scope": "inter_connection",
+      "source": "manual",
+      "cardinality": "one_to_one",
+      "default_join_type": "left",
+      "confidence_score": null,
+      "is_verified": true,
+      "is_active": true,
+      "data_criacao": "2026-03-27T07:47:44.367303",
+      "data_atualizacao": "2026-03-27T07:47:44.367303"
+    },
+    "BPX_J": {
+      "id": 115,
+      "left_column": {
+        "column_id": 1864,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 288,
+        "table_name": "demo_j",
+        "schema_name": "public",
+        "connection_id": 33,
+        "connection_name": "NHANES HTN 2017-2018 DEMO_J"
+      },
+      "right_column": {
+        "column_id": 2114,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 324,
+        "table_name": "bpx_j",
+        "schema_name": "public",
+        "connection_id": 37,
+        "connection_name": "NHANES HTN 2017-2018 BPX_J"
+      },
+      "name": "nhanes_htn_demo_bpx_j_seqn",
+      "description": "NHANES Experiment 3 join on seqn with DEMO_J as cohort anchor",
+      "scope": "inter_connection",
+      "source": "manual",
+      "cardinality": "one_to_one",
+      "default_join_type": "left",
+      "confidence_score": null,
+      "is_verified": true,
+      "is_active": true,
+      "data_criacao": "2026-03-27T07:47:44.909849",
+      "data_atualizacao": "2026-03-27T07:47:44.909849"
+    },
+    "BPQ_J": {
+      "id": 116,
+      "left_column": {
+        "column_id": 1864,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 288,
+        "table_name": "demo_j",
+        "schema_name": "public",
+        "connection_id": 33,
+        "connection_name": "NHANES HTN 2017-2018 DEMO_J"
+      },
+      "right_column": {
+        "column_id": 2169,
+        "column_name": "seqn",
+        "data_type": "double",
+        "table_id": 333,
+        "table_name": "bpq_j",
+        "schema_name": "public",
+        "connection_id": 38,
+        "connection_name": "NHANES HTN 2017-2018 BPQ_J"
+      },
+      "name": "nhanes_htn_demo_bpq_j_seqn",
+      "description": "NHANES Experiment 3 join on seqn with DEMO_J as cohort anchor",
+      "scope": "inter_connection",
+      "source": "manual",
+      "cardinality": "one_to_one",
+      "default_join_type": "left",
+      "confidence_score": null,
+      "is_verified": true,
+      "is_active": true,
+      "data_criacao": "2026-03-27T07:47:45.459619",
+      "data_atualizacao": "2026-03-27T07:47:45.459619"
+    }
+  },
+  "bronze": {
+    "base": {
+      "config": {
+        "id": 43,
+        "name": "nhanes_htn_bronze_base_v1",
+        "description": "NHANES hypertension baseline Bronze snapshot (DEMO+BMX+ALQ+SMQ+BPQ)",
+        "tables": [
+          {
+            "table_id": 288,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 297,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 306,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 315,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 333,
+            "select_all": true,
+            "column_ids": null
+          }
+        ],
+        "relationship_ids": null,
+        "enable_federated_joins": false,
+        "output_format": "delta",
+        "write_mode": "overwrite",
+        "merge_keys": null,
+        "merge_keys_source": null,
+        "current_delta_version": null,
+        "output_bucket": null,
+        "output_path_prefix": null,
+        "partition_columns": null,
+        "properties": {},
+        "is_active": true,
+        "last_execution_time": null,
+        "last_execution_status": null,
+        "last_execution_rows": null,
+        "dataset_id": null,
+        "data_criacao": "2026-03-27T07:47:45.521442",
+        "data_atualizacao": "2026-03-27T07:47:45.521442"
+      },
+      "execution": {
+        "id": 611,
+        "config_id": 43,
+        "status": "success",
+        "started_at": "2026-03-27T07:47:45.603042Z",
+        "finished_at": "2026-03-27T07:48:23.595326Z",
+        "group_results": [
+          {
+            "group_name": "part_nhanes_htn_2017-2018_demo_j_demo_j",
+            "connection_name": "NHANES HTN 2017-2018 DEMO_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_demo_j/",
+            "rows_ingested": 9254,
+            "execution_time_seconds": 13.176984,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_bmx_j_bmx_j",
+            "connection_name": "NHANES HTN 2017-2018 BMX_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_bmx_j/",
+            "rows_ingested": 8704,
+            "execution_time_seconds": 6.392419,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_alq_j_alq_j",
+            "connection_name": "NHANES HTN 2017-2018 ALQ_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_alq_j/",
+            "rows_ingested": 5533,
+            "execution_time_seconds": 5.527149,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_smq_j_smq_j",
+            "connection_name": "NHANES HTN 2017-2018 SMQ_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_smq_j/",
+            "rows_ingested": 6724,
+            "execution_time_seconds": 6.1585,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_bpq_j_bpq_j",
+            "connection_name": "NHANES HTN 2017-2018 BPQ_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_bpq_j/",
+            "rows_ingested": 6161,
+            "execution_time_seconds": 5.364468,
+            "error_message": null
+          }
+        ],
+        "rows_ingested": 36376,
+        "output_paths": [
+          "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_demo_j/",
+          "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_bmx_j/",
+          "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_alq_j/",
+          "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_smq_j/",
+          "s3a://datafabric-bronze/43-nhanes_htn_bronze_base_v1/part_nhanes_htn_2017-2018_bpq_j/"
+        ],
+        "error_message": null,
+        "delta_version": 0,
+        "write_mode_used": "overwrite",
+        "merge_keys_used": null,
+        "rows_inserted": 36376,
+        "rows_updated": 0,
+        "rows_deleted": 0,
+        "config_snapshot": null
+      }
+    },
+    "fabric": {
+      "config": {
+        "id": 44,
+        "name": "nhanes_htn_bronze_fabric_v1",
+        "description": "NHANES hypertension fabric Bronze snapshot (DEMO+BMX+ALQ+SMQ+BPX+BPQ)",
+        "tables": [
+          {
+            "table_id": 288,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 297,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 306,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 315,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 324,
+            "select_all": true,
+            "column_ids": null
+          },
+          {
+            "table_id": 333,
+            "select_all": true,
+            "column_ids": null
+          }
+        ],
+        "relationship_ids": null,
+        "enable_federated_joins": false,
+        "output_format": "delta",
+        "write_mode": "overwrite",
+        "merge_keys": null,
+        "merge_keys_source": null,
+        "current_delta_version": null,
+        "output_bucket": null,
+        "output_path_prefix": null,
+        "partition_columns": null,
+        "properties": {},
+        "is_active": true,
+        "last_execution_time": null,
+        "last_execution_status": null,
+        "last_execution_rows": null,
+        "dataset_id": null,
+        "data_criacao": "2026-03-27T07:47:45.565789",
+        "data_atualizacao": "2026-03-27T07:47:45.565789"
+      },
+      "execution": {
+        "id": 612,
+        "config_id": 44,
+        "status": "success",
+        "started_at": "2026-03-27T07:48:23.639728Z",
+        "finished_at": "2026-03-27T07:48:53.256659Z",
+        "group_results": [
+          {
+            "group_name": "part_nhanes_htn_2017-2018_demo_j_demo_j",
+            "connection_name": "NHANES HTN 2017-2018 DEMO_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_demo_j/",
+            "rows_ingested": 9254,
+            "execution_time_seconds": 5.390812,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_bmx_j_bmx_j",
+            "connection_name": "NHANES HTN 2017-2018 BMX_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_bmx_j/",
+            "rows_ingested": 8704,
+            "execution_time_seconds": 4.45712,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_alq_j_alq_j",
+            "connection_name": "NHANES HTN 2017-2018 ALQ_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_alq_j/",
+            "rows_ingested": 5533,
+            "execution_time_seconds": 4.209897,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_smq_j_smq_j",
+            "connection_name": "NHANES HTN 2017-2018 SMQ_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_smq_j/",
+            "rows_ingested": 6724,
+            "execution_time_seconds": 4.915267,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_bpx_j_bpx_j",
+            "connection_name": "NHANES HTN 2017-2018 BPX_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_bpx_j/",
+            "rows_ingested": 8704,
+            "execution_time_seconds": 4.758872,
+            "error_message": null
+          },
+          {
+            "group_name": "part_nhanes_htn_2017-2018_bpq_j_bpq_j",
+            "connection_name": "NHANES HTN 2017-2018 BPQ_J",
+            "status": "success",
+            "output_path": "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_bpq_j/",
+            "rows_ingested": 6161,
+            "execution_time_seconds": 4.644288,
+            "error_message": null
+          }
+        ],
+        "rows_ingested": 45080,
+        "output_paths": [
+          "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_demo_j/",
+          "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_bmx_j/",
+          "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_alq_j/",
+          "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_smq_j/",
+          "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_bpx_j/",
+          "s3a://datafabric-bronze/44-nhanes_htn_bronze_fabric_v1/part_nhanes_htn_2017-2018_bpq_j/"
+        ],
+        "error_message": null,
+        "delta_version": 0,
+        "write_mode_used": "overwrite",
+        "merge_keys_used": null,
+        "rows_inserted": 45080,
+        "rows_updated": 0,
+        "rows_deleted": 0,
+        "config_snapshot": null
+      }
+    }
+  },
+  "silver": {
+    "base": {
+      "config": {
+        "id": 14,
+        "name": "nhanes_htn_d_base_v1",
+        "description": "NHANES hypertension D_base with explicit cohort filters",
+        "source_bronze_config_id": 43,
+        "source_bronze_config_name": "nhanes_htn_bronze_base_v1",
+        "source_bronze_version": 0,
+        "source_bronze_dataset_id": null,
+        "source_bronze_dataset_name": null,
+        "silver_bucket": "datafabric-silver",
+        "silver_path_prefix": null,
+        "column_group_ids": null,
+        "filters": {
+          "logic": "AND",
+          "conditions": [
+            {
+              "column_id": 1868,
+              "column_name": null,
+              "operator": ">=",
+              "value": 20,
+              "value_min": null,
+              "value_max": null
+            },
+            {
+              "column_id": 1866,
+              "column_name": null,
+              "operator": "=",
+              "value": 2,
+              "value_min": null,
+              "value_max": null
+            },
+            {
+              "column_id": 2170,
+              "column_name": null,
+              "operator": "IN",
+              "value": [
+                1,
+                2
+              ],
+              "value_min": null,
+              "value_max": null
+            }
+          ]
+        },
+        "column_transformations": null,
+        "image_labeling_config": null,
+        "llm_extractions": null,
+        "exclude_unified_source_columns": false,
+        "write_mode": "overwrite",
+        "current_delta_version": null,
+        "last_execution_time": null,
+        "last_execution_status": null,
+        "last_execution_rows": null,
+        "is_active": true
+      },
+      "execution": {
+        "id": 336,
+        "config_id": 14,
+        "status": "success",
+        "started_at": "2026-03-27T07:48:54.147142Z",
+        "finished_at": "2026-03-27T07:49:15.862101Z",
+        "rows_processed": 36376,
+        "rows_output": 5255,
+        "output_path": "s3a://datafabric-silver/14-nhanes_htn_d_base_v1",
+        "error_message": null,
+        "delta_version": 0,
+        "write_mode_used": "overwrite",
+        "merge_keys_used": null,
+        "rows_inserted": 5255,
+        "rows_updated": null,
+        "rows_deleted": null,
+        "config_snapshot": null
+      }
+    },
+    "fabric": {
+      "config": {
+        "id": 15,
+        "name": "nhanes_htn_d_fabric_v1",
+        "description": "NHANES hypertension D_fabric with explicit cohort filters",
+        "source_bronze_config_id": 44,
+        "source_bronze_config_name": "nhanes_htn_bronze_fabric_v1",
+        "source_bronze_version": 0,
+        "source_bronze_dataset_id": null,
+        "source_bronze_dataset_name": null,
+        "silver_bucket": "datafabric-silver",
+        "silver_path_prefix": null,
+        "column_group_ids": null,
+        "filters": {
+          "logic": "AND",
+          "conditions": [
+            {
+              "column_id": 1868,
+              "column_name": null,
+              "operator": ">=",
+              "value": 20,
+              "value_min": null,
+              "value_max": null
+            },
+            {
+              "column_id": 1866,
+              "column_name": null,
+              "operator": "=",
+              "value": 2,
+              "value_min": null,
+              "value_max": null
+            },
+            {
+              "column_id": 2170,
+              "column_name": null,
+              "operator": "IN",
+              "value": [
+                1,
+                2
+              ],
+              "value_min": null,
+              "value_max": null
+            }
+          ]
+        },
+        "column_transformations": null,
+        "image_labeling_config": null,
+        "llm_extractions": null,
+        "exclude_unified_source_columns": false,
+        "write_mode": "overwrite",
+        "current_delta_version": null,
+        "last_execution_time": null,
+        "last_execution_status": null,
+        "last_execution_rows": null,
+        "is_active": true
+      },
+      "execution": {
+        "id": 337,
+        "config_id": 15,
+        "status": "success",
+        "started_at": "2026-03-27T07:49:19.604329Z",
+        "finished_at": "2026-03-27T07:49:40.739939Z",
+        "rows_processed": 45080,
+        "rows_output": 5255,
+        "output_path": "s3a://datafabric-silver/15-nhanes_htn_d_fabric_v1",
+        "error_message": null,
+        "delta_version": 0,
+        "write_mode_used": "overwrite",
+        "merge_keys_used": null,
+        "rows_inserted": 5255,
+        "rows_updated": null,
+        "rows_deleted": null,
+        "config_snapshot": null
+      }
+    }
+  },
+  "delta_sharing": {
+    "share": {
+      "id": 3,
+      "name": "nhanes_hypertension_experiment",
+      "description": null,
+      "organization_id": 1,
+      "status": "active",
+      "owner_email": null,
+      "contact_info": null,
+      "terms_of_use": null,
+      "data_criacao": "2026-03-27T07:49:41.932582",
+      "data_atualizacao": "2026-03-27T07:49:41.932582",
+      "schemas_count": 0,
+      "tables_count": 0,
+      "recipients_count": 0,
+      "recipients": []
+    },
+    "schema": {
+      "id": 3,
+      "name": "v1",
+      "description": null,
+      "share_id": 3,
+      "share_name": "nhanes_hypertension_experiment",
+      "data_criacao": "2026-03-27T07:49:42.007384",
+      "data_atualizacao": "2026-03-27T07:49:42.007384",
+      "tables_count": 0
+    },
+    "exports": {
+      "d_base": {
+        "table_id": 38,
+        "table_name": "d_base_hypertension_v1",
+        "share_id": 3,
+        "share_name": "nhanes_hypertension_experiment",
+        "schema_id": 3,
+        "schema_name": "v1",
+        "source_type": "silver",
+        "source_config_id": 14,
+        "source_config_name": "nhanes_htn_d_base_v1",
+        "storage_location": "datafabric-silver/14-nhanes_htn_d_base_v1",
+        "current_version": 1,
+        "share_mode": "full",
+        "status": "active"
+      },
+      "d_fabric": {
+        "table_id": 39,
+        "table_name": "d_fabric_hypertension_v1",
+        "share_id": 3,
+        "share_name": "nhanes_hypertension_experiment",
+        "schema_id": 3,
+        "schema_name": "v1",
+        "source_type": "silver",
+        "source_config_id": 15,
+        "source_config_name": "nhanes_htn_d_fabric_v1",
+        "storage_location": "datafabric-silver/15-nhanes_htn_d_fabric_v1",
+        "current_version": 1,
+        "share_mode": "full",
+        "status": "active"
+      }
+    }
+  }
+}

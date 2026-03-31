@@ -1,0 +1,11 @@
+concept,arm,total_value_cases,correct_value_cases,normalization_accuracy
+sex_gender,baseline,218,161,0.739
+sex_gender,semantic,218,216,0.991
+diagnosis,baseline,214,146,0.682
+diagnosis,semantic,214,198,0.925
+lesion_type,baseline,180,128,0.711
+lesion_type,semantic,180,171,0.950
+anatomical_site,baseline,329,260,0.790
+anatomical_site,semantic,329,319,0.970
+age_group,baseline,281,230,0.819
+age_group,semantic,281,278,0.989

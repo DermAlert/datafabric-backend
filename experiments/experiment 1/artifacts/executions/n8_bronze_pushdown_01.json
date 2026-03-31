@@ -1,0 +1,330 @@
+{
+  "row": {
+    "run_id": "exp1_20260315_v2",
+    "timestamp": "2026-03-15T22:15:54.293710",
+    "topology_n": 8,
+    "scenario": "bronze_pushdown",
+    "iteration": 1,
+    "is_warmup": true,
+    "config_id": 38,
+    "success": true,
+    "status": "success",
+    "latency_seconds_wall": 36.924905234976904,
+    "execution_time_seconds_api": 36.845859,
+    "rows_processed": 4523,
+    "rows_output": 4523,
+    "size_bytes": 354684,
+    "num_files": 8,
+    "delta_version": 0,
+    "delta_current_version": 0,
+    "cpu_avg_percent": 333.1718181818182,
+    "cpu_max_percent": 401.71,
+    "mem_avg_bytes": 13007252204.181818,
+    "mem_max_bytes": 13146624352,
+    "sample_count": 11,
+    "error_message": null
+  },
+  "raw_response": {
+    "config_id": 38,
+    "config_name": "exp1_20260315_v2_n8_bronze_pushdown",
+    "execution_id": 539,
+    "status": "success",
+    "groups": [
+      {
+        "group_name": "part_exp1_sus_hospital_joined_0",
+        "connection_name": "exp1_sus_hospital",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_sus_hospital/",
+        "rows_ingested": 994,
+        "execution_time_seconds": 5.37931,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_backend_app_joined_0",
+        "connection_name": "exp1_backend_app",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_backend_app/",
+        "rows_ingested": 0,
+        "execution_time_seconds": 1.869223,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_laboratorio_privado_joined_0",
+        "connection_name": "exp1_laboratorio_privado",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_laboratorio_privado/",
+        "rows_ingested": 630,
+        "execution_time_seconds": 4.599284,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_imagem_diagnostica_joined_0",
+        "connection_name": "exp1_imagem_diagnostica",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_imagem_diagnostica/",
+        "rows_ingested": 900,
+        "execution_time_seconds": 4.694584,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_convenio_autorizacoes_joined_0",
+        "connection_name": "exp1_convenio_autorizacoes",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_convenio_autorizacoes/",
+        "rows_ingested": 390,
+        "execution_time_seconds": 4.888953,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_telemedicina_joined_0",
+        "connection_name": "exp1_telemedicina",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_telemedicina/",
+        "rows_ingested": 680,
+        "execution_time_seconds": 4.69071,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_farmacia_alto_custo_joined_0",
+        "connection_name": "exp1_farmacia_alto_custo",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_farmacia_alto_custo/",
+        "rows_ingested": 379,
+        "execution_time_seconds": 4.822398,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_pesquisa_clinica_joined_0",
+        "connection_name": "exp1_pesquisa_clinica",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_pesquisa_clinica/",
+        "rows_ingested": 550,
+        "execution_time_seconds": 4.633029,
+        "error_message": null
+      }
+    ],
+    "total_rows_ingested": 4523,
+    "bronze_paths": [
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_sus_hospital/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_backend_app/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_laboratorio_privado/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_imagem_diagnostica/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_convenio_autorizacoes/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_telemedicina/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_farmacia_alto_custo/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_pesquisa_clinica/"
+    ],
+    "execution_time_seconds": 36.845859,
+    "message": "Bronze ingestion completed successfully. 4523 rows ingested.",
+    "delta_version": 0,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 4523,
+    "rows_updated": 0,
+    "config_snapshot": {
+      "name": "exp1_20260315_v2_n8_bronze_pushdown",
+      "description": "Exp1 N=8 bronze pushdown",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 134,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 152,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 177,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 179,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 198,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 200,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 210,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 211,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 223,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 221,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 232,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 234,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "properties": {},
+      "snapshot_at": "2026-03-16T01:15:15.167658"
+    }
+  },
+  "raw_execution": {
+    "id": 539,
+    "config_id": 38,
+    "status": "success",
+    "started_at": "2026-03-16T01:15:15.167683Z",
+    "finished_at": "2026-03-16T01:15:52.053033Z",
+    "group_results": [
+      {
+        "group_name": "part_exp1_sus_hospital_joined_0",
+        "connection_name": "exp1_sus_hospital",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_sus_hospital/",
+        "rows_ingested": 994,
+        "execution_time_seconds": 5.37931,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_backend_app_joined_0",
+        "connection_name": "exp1_backend_app",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_backend_app/",
+        "rows_ingested": 0,
+        "execution_time_seconds": 1.869223,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_laboratorio_privado_joined_0",
+        "connection_name": "exp1_laboratorio_privado",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_laboratorio_privado/",
+        "rows_ingested": 630,
+        "execution_time_seconds": 4.599284,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_imagem_diagnostica_joined_0",
+        "connection_name": "exp1_imagem_diagnostica",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_imagem_diagnostica/",
+        "rows_ingested": 900,
+        "execution_time_seconds": 4.694584,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_convenio_autorizacoes_joined_0",
+        "connection_name": "exp1_convenio_autorizacoes",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_convenio_autorizacoes/",
+        "rows_ingested": 390,
+        "execution_time_seconds": 4.888953,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_telemedicina_joined_0",
+        "connection_name": "exp1_telemedicina",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_telemedicina/",
+        "rows_ingested": 680,
+        "execution_time_seconds": 4.69071,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_farmacia_alto_custo_joined_0",
+        "connection_name": "exp1_farmacia_alto_custo",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_farmacia_alto_custo/",
+        "rows_ingested": 379,
+        "execution_time_seconds": 4.822398,
+        "error_message": null
+      },
+      {
+        "group_name": "part_exp1_pesquisa_clinica_joined_0",
+        "connection_name": "exp1_pesquisa_clinica",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_pesquisa_clinica/",
+        "rows_ingested": 550,
+        "execution_time_seconds": 4.633029,
+        "error_message": null
+      }
+    ],
+    "rows_ingested": 4523,
+    "output_paths": [
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_sus_hospital/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_backend_app/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_laboratorio_privado/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_imagem_diagnostica/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_convenio_autorizacoes/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_telemedicina/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_farmacia_alto_custo/",
+      "s3a://datafabric-bronze/38-exp1_20260315_v2_n8_bronze_pushdown/part_exp1_pesquisa_clinica/"
+    ],
+    "error_message": null,
+    "delta_version": 0,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 4523,
+    "rows_updated": 0,
+    "rows_deleted": 0,
+    "config_snapshot": null
+  },
+  "raw_version": {
+    "delta_current_version": 0,
+    "delta_version": 0,
+    "size_bytes": 354684,
+    "num_files": 8,
+    "version_total_rows": 4523,
+    "operation": "OVERWRITE"
+  }
+}

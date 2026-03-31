@@ -1,0 +1,6 @@
+concept,candidate_columns,agreements,disagreements,agreement_rate
+sex_gender,6,6,0,1.000
+diagnosis,8,6,2,0.750
+lesion_type,5,4,1,0.800
+anatomical_site,7,6,1,0.857
+age_group,4,4,0,1.000

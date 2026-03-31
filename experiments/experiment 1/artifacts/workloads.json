@@ -1,0 +1,778 @@
+{
+  "1": {
+    "federation": {
+      "id": 7,
+      "name": "exp1_20260315_v2_topology_n1",
+      "description": "Experimento 1 - topologia N=1",
+      "connections": [],
+      "tables": [],
+      "tables_count": 0,
+      "relationships_count": 0,
+      "data_criacao": "2026-03-16T00:23:50.671591",
+      "data_atualizacao": "2026-03-16T00:23:50.671591"
+    },
+    "bronze_pushdown": {
+      "id": 29,
+      "name": "exp1_20260315_v2_n1_bronze_pushdown",
+      "description": "Exp1 N=1 bronze pushdown",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 134,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:23:50.818950",
+      "data_atualizacao": "2026-03-16T00:23:50.818950"
+    },
+    "bronze_federated": {
+      "id": 30,
+      "name": "exp1_20260315_v2_n1_bronze_federated",
+      "description": "Exp1 N=1 bronze federado",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:23:50.919286",
+      "data_atualizacao": "2026-03-16T00:23:50.919286"
+    },
+    "bronze_source_for_silver": {
+      "id": 31,
+      "name": "exp1_20260315_v2_n1_bronze_source_for_silver",
+      "description": "Exp1 N=1 bronze source for silver",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:23:50.979079",
+      "data_atualizacao": "2026-03-16T00:23:50.979079"
+    },
+    "silver_persistent": {
+      "id": 8,
+      "name": "exp1_20260315_v2_n1_silver_persistent",
+      "description": "Exp1 N=1 silver persistente",
+      "source_bronze_config_id": 31,
+      "source_bronze_config_name": "exp1_20260315_v2_n1_bronze_source_for_silver",
+      "source_bronze_version": null,
+      "source_bronze_dataset_id": null,
+      "source_bronze_dataset_name": null,
+      "silver_bucket": "datafabric-silver",
+      "silver_path_prefix": null,
+      "column_group_ids": null,
+      "filters": null,
+      "column_transformations": null,
+      "image_labeling_config": null,
+      "llm_extractions": null,
+      "exclude_unified_source_columns": false,
+      "write_mode": "overwrite",
+      "current_delta_version": null,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "is_active": true
+    }
+  },
+  "2": {
+    "federation": {
+      "id": 8,
+      "name": "exp1_20260315_v2_topology_n2",
+      "description": "Experimento 1 - topologia N=2",
+      "connections": [],
+      "tables": [],
+      "tables_count": 0,
+      "relationships_count": 0,
+      "data_criacao": "2026-03-16T00:35:40.947272",
+      "data_atualizacao": "2026-03-16T00:35:40.947272"
+    },
+    "bronze_pushdown": {
+      "id": 32,
+      "name": "exp1_20260315_v2_n2_bronze_pushdown",
+      "description": "Exp1 N=2 bronze pushdown",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 134,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 152,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:35:41.053874",
+      "data_atualizacao": "2026-03-16T00:35:41.053874"
+    },
+    "bronze_federated": {
+      "id": 33,
+      "name": "exp1_20260315_v2_n2_bronze_federated",
+      "description": "Exp1 N=2 bronze federado",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101
+      ],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:35:41.138456",
+      "data_atualizacao": "2026-03-16T00:35:41.138456"
+    },
+    "bronze_source_for_silver": {
+      "id": 34,
+      "name": "exp1_20260315_v2_n2_bronze_source_for_silver",
+      "description": "Exp1 N=2 bronze source for silver",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101
+      ],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:35:41.204707",
+      "data_atualizacao": "2026-03-16T00:35:41.204707"
+    },
+    "silver_persistent": {
+      "id": 9,
+      "name": "exp1_20260315_v2_n2_silver_persistent",
+      "description": "Exp1 N=2 silver persistente",
+      "source_bronze_config_id": 34,
+      "source_bronze_config_name": "exp1_20260315_v2_n2_bronze_source_for_silver",
+      "source_bronze_version": null,
+      "source_bronze_dataset_id": null,
+      "source_bronze_dataset_name": null,
+      "silver_bucket": "datafabric-silver",
+      "silver_path_prefix": null,
+      "column_group_ids": null,
+      "filters": null,
+      "column_transformations": null,
+      "image_labeling_config": null,
+      "llm_extractions": null,
+      "exclude_unified_source_columns": false,
+      "write_mode": "overwrite",
+      "current_delta_version": null,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "is_active": true
+    }
+  },
+  "4": {
+    "federation": {
+      "id": 9,
+      "name": "exp1_20260315_v2_topology_n4",
+      "description": "Experimento 1 - topologia N=4",
+      "connections": [],
+      "tables": [],
+      "tables_count": 0,
+      "relationships_count": 0,
+      "data_criacao": "2026-03-16T00:48:43.830296",
+      "data_atualizacao": "2026-03-16T00:48:43.830296"
+    },
+    "bronze_pushdown": {
+      "id": 35,
+      "name": "exp1_20260315_v2_n4_bronze_pushdown",
+      "description": "Exp1 N=4 bronze pushdown",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 134,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 152,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 177,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 179,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:48:43.953640",
+      "data_atualizacao": "2026-03-16T00:48:43.953640"
+    },
+    "bronze_federated": {
+      "id": 36,
+      "name": "exp1_20260315_v2_n4_bronze_federated",
+      "description": "Exp1 N=4 bronze federado",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101,
+        102,
+        103
+      ],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:48:44.040574",
+      "data_atualizacao": "2026-03-16T00:48:44.040574"
+    },
+    "bronze_source_for_silver": {
+      "id": 37,
+      "name": "exp1_20260315_v2_n4_bronze_source_for_silver",
+      "description": "Exp1 N=4 bronze source for silver",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101,
+        102,
+        103
+      ],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T00:48:44.111524",
+      "data_atualizacao": "2026-03-16T00:48:44.111524"
+    },
+    "silver_persistent": {
+      "id": 10,
+      "name": "exp1_20260315_v2_n4_silver_persistent",
+      "description": "Exp1 N=4 silver persistente",
+      "source_bronze_config_id": 37,
+      "source_bronze_config_name": "exp1_20260315_v2_n4_bronze_source_for_silver",
+      "source_bronze_version": null,
+      "source_bronze_dataset_id": null,
+      "source_bronze_dataset_name": null,
+      "silver_bucket": "datafabric-silver",
+      "silver_path_prefix": null,
+      "column_group_ids": null,
+      "filters": null,
+      "column_transformations": null,
+      "image_labeling_config": null,
+      "llm_extractions": null,
+      "exclude_unified_source_columns": false,
+      "write_mode": "overwrite",
+      "current_delta_version": null,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "is_active": true
+    }
+  },
+  "8": {
+    "federation": {
+      "id": 10,
+      "name": "exp1_20260315_v2_topology_n8",
+      "description": "Experimento 1 - topologia N=8",
+      "connections": [],
+      "tables": [],
+      "tables_count": 0,
+      "relationships_count": 0,
+      "data_criacao": "2026-03-16T01:14:38.421836",
+      "data_atualizacao": "2026-03-16T01:14:38.421836"
+    },
+    "bronze_pushdown": {
+      "id": 38,
+      "name": "exp1_20260315_v2_n8_bronze_pushdown",
+      "description": "Exp1 N=8 bronze pushdown",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 134,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 152,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 177,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 179,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 198,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 200,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 210,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 211,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 223,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 221,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 232,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 234,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T01:14:38.585402",
+      "data_atualizacao": "2026-03-16T01:14:38.585402"
+    },
+    "bronze_federated": {
+      "id": 39,
+      "name": "exp1_20260315_v2_n8_bronze_federated",
+      "description": "Exp1 N=8 bronze federado",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 198,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 210,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 223,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 232,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107
+      ],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T01:14:38.778522",
+      "data_atualizacao": "2026-03-16T01:14:38.778522"
+    },
+    "bronze_source_for_silver": {
+      "id": 40,
+      "name": "exp1_20260315_v2_n8_bronze_source_for_silver",
+      "description": "Exp1 N=8 bronze source for silver",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 198,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 210,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 223,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 232,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107
+      ],
+      "enable_federated_joins": false,
+      "output_format": "delta",
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "current_delta_version": null,
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "properties": {},
+      "is_active": true,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "dataset_id": null,
+      "data_criacao": "2026-03-16T01:14:38.874669",
+      "data_atualizacao": "2026-03-16T01:14:38.874669"
+    },
+    "silver_persistent": {
+      "id": 11,
+      "name": "exp1_20260315_v2_n8_silver_persistent",
+      "description": "Exp1 N=8 silver persistente",
+      "source_bronze_config_id": 40,
+      "source_bronze_config_name": "exp1_20260315_v2_n8_bronze_source_for_silver",
+      "source_bronze_version": null,
+      "source_bronze_dataset_id": null,
+      "source_bronze_dataset_name": null,
+      "silver_bucket": "datafabric-silver",
+      "silver_path_prefix": null,
+      "column_group_ids": null,
+      "filters": null,
+      "column_transformations": null,
+      "image_labeling_config": null,
+      "llm_extractions": null,
+      "exclude_unified_source_columns": false,
+      "write_mode": "overwrite",
+      "current_delta_version": null,
+      "last_execution_time": null,
+      "last_execution_status": null,
+      "last_execution_rows": null,
+      "is_active": true
+    }
+  }
+}

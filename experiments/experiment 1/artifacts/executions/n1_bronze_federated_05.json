@@ -1,0 +1,115 @@
+{
+  "row": {
+    "run_id": "exp1_20260315_v2",
+    "timestamp": "2026-03-15T21:27:54.895878",
+    "topology_n": 1,
+    "scenario": "bronze_federated",
+    "iteration": 5,
+    "is_warmup": true,
+    "config_id": 30,
+    "success": true,
+    "status": "success",
+    "latency_seconds_wall": 3.728818638002849,
+    "execution_time_seconds_api": 3.667997,
+    "rows_processed": 500,
+    "rows_output": 500,
+    "size_bytes": 51612,
+    "num_files": 1,
+    "delta_version": 4,
+    "delta_current_version": 4,
+    "cpu_avg_percent": 266.225,
+    "cpu_max_percent": 339.01,
+    "mem_avg_bytes": 12182064458,
+    "mem_max_bytes": 12198726331,
+    "sample_count": 2,
+    "error_message": null
+  },
+  "raw_response": {
+    "config_id": 30,
+    "config_name": "exp1_20260315_v2_n1_bronze_federated",
+    "execution_id": 365,
+    "status": "success",
+    "groups": [
+      {
+        "group_name": "part_exp1_sus_hospital_sus_pacientes",
+        "connection_name": "exp1_sus_hospital",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/30-exp1_20260315_v2_n1_bronze_federated/unified/",
+        "rows_ingested": 500,
+        "execution_time_seconds": 3.401673,
+        "error_message": null
+      }
+    ],
+    "total_rows_ingested": 500,
+    "bronze_paths": [
+      "s3a://datafabric-bronze/30-exp1_20260315_v2_n1_bronze_federated/unified/"
+    ],
+    "execution_time_seconds": 3.667997,
+    "message": "Bronze ingestion completed successfully. 500 rows ingested.",
+    "delta_version": 4,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 500,
+    "rows_updated": 0,
+    "config_snapshot": {
+      "name": "exp1_20260315_v2_n1_bronze_federated",
+      "description": "Exp1 N=1 bronze federado",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "properties": {},
+      "snapshot_at": "2026-03-16T00:27:49.300580"
+    }
+  },
+  "raw_execution": {
+    "id": 365,
+    "config_id": 30,
+    "status": "success",
+    "started_at": "2026-03-16T00:27:49.300610Z",
+    "finished_at": "2026-03-16T00:27:53.006052Z",
+    "group_results": [
+      {
+        "group_name": "part_exp1_sus_hospital_sus_pacientes",
+        "connection_name": "exp1_sus_hospital",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/30-exp1_20260315_v2_n1_bronze_federated/unified/",
+        "rows_ingested": 500,
+        "execution_time_seconds": 3.401673,
+        "error_message": null
+      }
+    ],
+    "rows_ingested": 500,
+    "output_paths": [
+      "s3a://datafabric-bronze/30-exp1_20260315_v2_n1_bronze_federated/unified/"
+    ],
+    "error_message": null,
+    "delta_version": 4,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 500,
+    "rows_updated": 0,
+    "rows_deleted": 0,
+    "config_snapshot": null
+  },
+  "raw_version": {
+    "delta_current_version": 4,
+    "delta_version": 4,
+    "size_bytes": 51612,
+    "num_files": 1,
+    "version_total_rows": 500,
+    "operation": "OVERWRITE"
+  }
+}

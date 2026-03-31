@@ -1,0 +1,310 @@
+{
+  "run_id": "exp1_20260315_v2",
+  "generated_at": "2026-03-15T22:54:07.620104",
+  "warmups_discarded": 5,
+  "total_runs_per_scenario": 35,
+  "measured_runs_per_scenario": 30,
+  "api_base": "http://localhost:8004/api",
+  "resource_limits": {
+    "datafabric-backend-dermalert-backend-1": {
+      "cpus": "1.5",
+      "memory": "3g"
+    },
+    "datafabric-backend-postgres-backend-1": {
+      "cpus": "1.0",
+      "memory": "2g"
+    },
+    "datafabric-backend-postgres-airflow-1": {
+      "cpus": "0.75",
+      "memory": "1536m"
+    },
+    "datafabric-backend-redis-1": {
+      "cpus": "0.25",
+      "memory": "256m"
+    },
+    "datafabric-backend-minio-1": {
+      "cpus": "0.5",
+      "memory": "768m"
+    },
+    "datafabric-backend-trino-1": {
+      "cpus": "1.5",
+      "memory": "3g"
+    },
+    "datafabric-backend-spark-master-1": {
+      "cpus": "1.0",
+      "memory": "1536m"
+    },
+    "datafabric-backend-spark-worker-1": {
+      "cpus": "2.0",
+      "memory": "4g"
+    },
+    "datafabric-backend-airflow-webserver-1": {
+      "cpus": "0.75",
+      "memory": "1024m"
+    },
+    "datafabric-backend-airflow-scheduler-1": {
+      "cpus": "0.75",
+      "memory": "1024m"
+    },
+    "datafabric-backend-airflow-worker-1": {
+      "cpus": "1.0",
+      "memory": "1536m"
+    },
+    "datafabric-backend-airflow-triggerer-1": {
+      "cpus": "0.5",
+      "memory": "768m"
+    },
+    "backend-db-1": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    },
+    "sus_mysql": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    },
+    "laboratorio_privado_pg": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    },
+    "imagem_diagnostica_mysql": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    },
+    "convenio_autorizacoes_pg": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    },
+    "telemedicina_mysql": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    },
+    "farmacia_alto_custo_pg": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    },
+    "pesquisa_clinica_mysql": {
+      "cpus": "0.5",
+      "memory": "1024m"
+    }
+  },
+  "scenarios": {
+    "1": {
+      "bronze_federated": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 4.5262351596664905,
+        "latency_median_s": 4.195771607497591,
+        "latency_p95_s": 7.622118337007123,
+        "latency_stdev_s": 1.0303922124655562,
+        "rows_processed_mean": 500,
+        "rows_output_mean": 500,
+        "size_bytes_mean": 51611.96666666667,
+        "num_files_mean": 1,
+        "cpu_avg_percent_mean": 277.51177777777775,
+        "mem_avg_bytes_mean": 12291493930.305555,
+        "errors": []
+      },
+      "bronze_pushdown": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 5.0543565972679065,
+        "latency_median_s": 4.7253095245032455,
+        "latency_p95_s": 8.075262290993123,
+        "latency_stdev_s": 1.1016794667377285,
+        "rows_processed_mean": 994,
+        "rows_output_mean": 994,
+        "size_bytes_mean": 111771.93333333333,
+        "num_files_mean": 1,
+        "cpu_avg_percent_mean": 315.03633333333335,
+        "mem_avg_bytes_mean": 11771777856.033333,
+        "errors": []
+      },
+      "silver_persistent": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 7.094422434299971,
+        "latency_median_s": 6.733167386504647,
+        "latency_p95_s": 9.501354295993224,
+        "latency_stdev_s": 0.9550056466015111,
+        "rows_processed_mean": 500,
+        "rows_output_mean": 500,
+        "size_bytes_mean": null,
+        "num_files_mean": null,
+        "cpu_avg_percent_mean": 295.8318888888889,
+        "mem_avg_bytes_mean": 12276310082.8,
+        "errors": []
+      }
+    },
+    "2": {
+      "bronze_federated": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 4.692222788032571,
+        "latency_median_s": 4.375402893499995,
+        "latency_p95_s": 7.850605539002572,
+        "latency_stdev_s": 1.0690266236166213,
+        "rows_processed_mean": 500,
+        "rows_output_mean": 500,
+        "size_bytes_mean": 56999,
+        "num_files_mean": 1,
+        "cpu_avg_percent_mean": 271.7707222222222,
+        "mem_avg_bytes_mean": 12379971817.661112,
+        "errors": []
+      },
+      "bronze_pushdown": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 6.4068456784317585,
+        "latency_median_s": 6.089755476496066,
+        "latency_p95_s": 9.66446373600047,
+        "latency_stdev_s": 1.1641328088567282,
+        "rows_processed_mean": 994,
+        "rows_output_mean": 994,
+        "size_bytes_mean": 117577.96666666666,
+        "num_files_mean": 2,
+        "cpu_avg_percent_mean": 342.62361111111113,
+        "mem_avg_bytes_mean": 12203119089.038889,
+        "errors": []
+      },
+      "silver_persistent": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 8.956546764998347,
+        "latency_median_s": 8.726202539502992,
+        "latency_p95_s": 11.966883843007963,
+        "latency_stdev_s": 1.0806743322490688,
+        "rows_processed_mean": 500,
+        "rows_output_mean": 500,
+        "size_bytes_mean": null,
+        "num_files_mean": null,
+        "cpu_avg_percent_mean": 317.6373888888889,
+        "mem_avg_bytes_mean": 12507533494.25,
+        "errors": []
+      }
+    },
+    "4": {
+      "bronze_federated": {
+        "runs_measured": 30,
+        "successes": 29,
+        "failures": 1,
+        "failure_rate": 0.033333333333333326,
+        "latency_mean_s": 9.445749925999452,
+        "latency_median_s": 5.275089814007515,
+        "latency_p95_s": 17.824655462027295,
+        "latency_stdev_s": 15.087343462199112,
+        "rows_processed_mean": 600,
+        "rows_output_mean": 600,
+        "size_bytes_mean": 101133.03448275862,
+        "num_files_mean": 1,
+        "cpu_avg_percent_mean": 315.5595540229885,
+        "mem_avg_bytes_mean": 12302993180.249886,
+        "errors": []
+      },
+      "bronze_pushdown": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 14.761809598399365,
+        "latency_median_s": 13.767874716999358,
+        "latency_p95_s": 23.771693874994526,
+        "latency_stdev_s": 3.029882138169431,
+        "rows_processed_mean": 2524,
+        "rows_output_mean": 2524,
+        "size_bytes_mean": 239460.9,
+        "num_files_mean": 4,
+        "cpu_avg_percent_mean": 338.4967880952381,
+        "mem_avg_bytes_mean": 12888711795.852858,
+        "errors": []
+      },
+      "silver_persistent": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 17.43007850263384,
+        "latency_median_s": 17.26041731699661,
+        "latency_p95_s": 20.655559048987925,
+        "latency_stdev_s": 1.5727632851455668,
+        "rows_processed_mean": 1280,
+        "rows_output_mean": 680,
+        "size_bytes_mean": null,
+        "num_files_mean": null,
+        "cpu_avg_percent_mean": 345.57435396825394,
+        "mem_avg_bytes_mean": 11653737920.093174,
+        "errors": []
+      }
+    },
+    "8": {
+      "bronze_federated": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 7.252096930932991,
+        "latency_median_s": 6.875711774511728,
+        "latency_p95_s": 10.207605564995902,
+        "latency_stdev_s": 1.1422012845319176,
+        "rows_processed_mean": 630,
+        "rows_output_mean": 630,
+        "size_bytes_mean": 159220.8,
+        "num_files_mean": 1,
+        "cpu_avg_percent_mean": 342.7546111111111,
+        "mem_avg_bytes_mean": 13839011144.033333,
+        "errors": []
+      },
+      "bronze_pushdown": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 32.649510631067095,
+        "latency_median_s": 30.213888053491246,
+        "latency_p95_s": 54.49811089702416,
+        "latency_stdev_s": 7.566245662971557,
+        "rows_processed_mean": 4523,
+        "rows_output_mean": 4523,
+        "size_bytes_mean": 354683.26666666666,
+        "num_files_mean": 8,
+        "cpu_avg_percent_mean": 339.62615185185183,
+        "mem_avg_bytes_mean": 13654591403.153334,
+        "errors": []
+      },
+      "silver_persistent": {
+        "runs_measured": 30,
+        "successes": 30,
+        "failures": 0,
+        "failure_rate": 0.0,
+        "latency_mean_s": 25.248137831797553,
+        "latency_median_s": 24.59790423999948,
+        "latency_p95_s": 28.52639268198982,
+        "latency_stdev_s": 1.4733885917575917,
+        "rows_processed_mean": 2540,
+        "rows_output_mean": 690,
+        "size_bytes_mean": null,
+        "num_files_mean": null,
+        "cpu_avg_percent_mean": 349.0938412698413,
+        "mem_avg_bytes_mean": 13877736133.75873,
+        "errors": []
+      }
+    }
+  },
+  "notes": [
+    "Bronze rows_processed = total_rows_ingested do execute.",
+    "Bronze rows_output = latest versions[0].total_rows.",
+    "Bronze persistent currently persists with overwrite regardless of requested write_mode.",
+    "Relationship discovery via API discovered only intra-DB FK relations; inter-DB CPF links were created manually."
+  ]
+}

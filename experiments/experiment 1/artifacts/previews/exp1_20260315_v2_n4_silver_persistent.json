@@ -1,0 +1,11 @@
+{
+  "config_id": 10,
+  "config_name": "exp1_20260315_v2_n4_silver_persistent",
+  "source_bronze_dataset": "None",
+  "sql_transformations": "No SQL transformations",
+  "python_transformations": [],
+  "output_columns": [],
+  "estimated_rows": null,
+  "output_path": "s3a://datafabric-silver/10-exp1_20260315_v2_n4_silver_persistent/",
+  "warnings": []
+}

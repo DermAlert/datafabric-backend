@@ -1,0 +1,158 @@
+{
+  "row": {
+    "run_id": "exp1_20260315_v2",
+    "timestamp": "2026-03-15T22:38:31.309353",
+    "topology_n": 8,
+    "scenario": "bronze_federated",
+    "iteration": 31,
+    "is_warmup": false,
+    "config_id": 39,
+    "success": true,
+    "status": "success",
+    "latency_seconds_wall": 10.077877845993498,
+    "execution_time_seconds_api": 10.035141,
+    "rows_processed": 630,
+    "rows_output": 630,
+    "size_bytes": 160196,
+    "num_files": 1,
+    "delta_version": 30,
+    "delta_current_version": 30,
+    "cpu_avg_percent": 364.71,
+    "cpu_max_percent": 493.8,
+    "mem_avg_bytes": 13797941043.666666,
+    "mem_max_bytes": 13970899461,
+    "sample_count": 3,
+    "error_message": null
+  },
+  "raw_response": {
+    "config_id": 39,
+    "config_name": "exp1_20260315_v2_n8_bronze_federated",
+    "execution_id": 604,
+    "status": "success",
+    "groups": [
+      {
+        "group_name": "unified_federated",
+        "connection_name": "federated",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/39-exp1_20260315_v2_n8_bronze_federated/unified/",
+        "rows_ingested": 630,
+        "execution_time_seconds": 8.963054,
+        "error_message": null
+      }
+    ],
+    "total_rows_ingested": 630,
+    "bronze_paths": [
+      "s3a://datafabric-bronze/39-exp1_20260315_v2_n8_bronze_federated/unified/"
+    ],
+    "execution_time_seconds": 10.035141,
+    "message": "Bronze ingestion completed successfully. 630 rows ingested.",
+    "delta_version": 30,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 630,
+    "rows_updated": 0,
+    "config_snapshot": {
+      "name": "exp1_20260315_v2_n8_bronze_federated",
+      "description": "Exp1 N=8 bronze federado",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 198,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 210,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 223,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 232,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101,
+        102,
+        103,
+        104,
+        105,
+        106,
+        107
+      ],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "properties": {},
+      "snapshot_at": "2026-03-16T01:38:20.898740"
+    }
+  },
+  "raw_execution": {
+    "id": 604,
+    "config_id": 39,
+    "status": "success",
+    "started_at": "2026-03-16T01:38:20.898771Z",
+    "finished_at": "2026-03-16T01:38:30.962120Z",
+    "group_results": [
+      {
+        "group_name": "unified_federated",
+        "connection_name": "federated",
+        "status": "success",
+        "output_path": "s3a://datafabric-bronze/39-exp1_20260315_v2_n8_bronze_federated/unified/",
+        "rows_ingested": 630,
+        "execution_time_seconds": 8.963054,
+        "error_message": null
+      }
+    ],
+    "rows_ingested": 630,
+    "output_paths": [
+      "s3a://datafabric-bronze/39-exp1_20260315_v2_n8_bronze_federated/unified/"
+    ],
+    "error_message": null,
+    "delta_version": 30,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": 630,
+    "rows_updated": 0,
+    "rows_deleted": 0,
+    "config_snapshot": null
+  },
+  "raw_version": {
+    "delta_current_version": 30,
+    "delta_version": 30,
+    "size_bytes": 160196,
+    "num_files": 1,
+    "version_total_rows": 630,
+    "operation": "OVERWRITE"
+  }
+}

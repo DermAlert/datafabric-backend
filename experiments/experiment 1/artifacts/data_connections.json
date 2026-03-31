@@ -1,0 +1,250 @@
+{
+  "sus": {
+    "name": "exp1_sus_hospital",
+    "description": "Experimento 1 - sus",
+    "connection_type_id": 3,
+    "connection_params": {
+      "host": "sus_mysql",
+      "port": 3306,
+      "database": "sus_database",
+      "username": "sus_user",
+      "password": "ENC:v1:J0iC5eAnotFdediGBZ5LB3HJqlDlaTcHpFzaFhkCBMB6UFCX6pJpwXx7IjRKUhVgFwz6Nw=="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 20,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 18,
+      "completed_at": "2026-03-15T17:41:19.976984"
+    },
+    "last_sync_time": "2026-03-15T17:41:19.977016Z",
+    "next_sync_time": null
+  },
+  "backend": {
+    "name": "exp1_backend_app",
+    "description": "Experimento 1 - backend",
+    "connection_type_id": 2,
+    "connection_params": {
+      "host": "backend-db-1",
+      "port": 5432,
+      "database": "dermalert",
+      "username": "postgres",
+      "password": "ENC:v1:G5ESLWWpoKaVDtxrYymOEPPjJS3GWH50GBeRuVbdGJfRC33S7WP68WuTp/GPtcMBLpM0zw=="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 21,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 25,
+      "completed_at": "2026-03-15T17:41:37.356391"
+    },
+    "last_sync_time": "2026-03-15T17:41:37.356418Z",
+    "next_sync_time": null
+  },
+  "lab": {
+    "name": "exp1_laboratorio_privado",
+    "description": "Experimento 1 - lab",
+    "connection_type_id": 2,
+    "connection_params": {
+      "host": "laboratorio_privado_pg",
+      "port": 5432,
+      "database": "laboratorio_privado",
+      "username": "lab_user",
+      "password": "ENC:v1:z9lUueR3LdtB5X1Vjb+ePG7St7Nq/iegBjKOzmrVRBhkuzoALgtXTBt2+DLWWCb5ND893Q=="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 22,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 11,
+      "completed_at": "2026-03-15T17:37:40.689465"
+    },
+    "last_sync_time": "2026-03-15T17:37:40.689496Z",
+    "next_sync_time": null
+  },
+  "img": {
+    "name": "exp1_imagem_diagnostica",
+    "description": "Experimento 1 - img",
+    "connection_type_id": 3,
+    "connection_params": {
+      "host": "imagem_diagnostica_mysql",
+      "port": 3306,
+      "database": "imagem_diagnostica",
+      "username": "img_user",
+      "password": "ENC:v1:u0Y8Ad5HBoOy4kxlqnEvBW53/PDIHOIQR3s06th/uD/U06oFByEpl4k85eAVGxBY+YMr1g=="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 23,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 11,
+      "completed_at": "2026-03-15T17:37:55.397267"
+    },
+    "last_sync_time": "2026-03-15T17:37:55.397295Z",
+    "next_sync_time": null
+  },
+  "conv": {
+    "name": "exp1_convenio_autorizacoes",
+    "description": "Experimento 1 - conv",
+    "connection_type_id": 2,
+    "connection_params": {
+      "host": "convenio_autorizacoes_pg",
+      "port": 5432,
+      "database": "convenio_autorizacoes",
+      "username": "conv_user",
+      "password": "ENC:v1:BQL0IbcqKDjR88B7V21fzEif4URC1mcffaEPfqyeEWPPPxEYn0D/RmU/ItAEG1r94bOVRV0="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 24,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 12,
+      "completed_at": "2026-03-15T17:38:07.526970"
+    },
+    "last_sync_time": "2026-03-15T17:38:07.527003Z",
+    "next_sync_time": null
+  },
+  "tele": {
+    "name": "exp1_telemedicina",
+    "description": "Experimento 1 - tele",
+    "connection_type_id": 3,
+    "connection_params": {
+      "host": "telemedicina_mysql",
+      "port": 3306,
+      "database": "telemedicina_db",
+      "username": "tele_user",
+      "password": "ENC:v1:euIhiLU3OnZlfOCjdZ+EDMPPWggI3t+zzSQIEXRAdQxXJbyCNyBJw4u2R4aVrqN+Z6ed12I="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 25,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 11,
+      "completed_at": "2026-03-15T17:38:20.883872"
+    },
+    "last_sync_time": "2026-03-15T17:38:20.883893Z",
+    "next_sync_time": null
+  },
+  "far": {
+    "name": "exp1_farmacia_alto_custo",
+    "description": "Experimento 1 - far",
+    "connection_type_id": 2,
+    "connection_params": {
+      "host": "farmacia_alto_custo_pg",
+      "port": 5432,
+      "database": "farmacia_alto_custo",
+      "username": "far_user",
+      "password": "ENC:v1:zVHWM44XqdJRNDbX8cuTSpvVHuRHMiatrwDSkA3xqxJBtM6y2J0jCnuTGTf+YieJ94Bszw=="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 26,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 11,
+      "completed_at": "2026-03-15T17:38:38.015761"
+    },
+    "last_sync_time": "2026-03-15T17:38:38.015798Z",
+    "next_sync_time": null
+  },
+  "pesq": {
+    "name": "exp1_pesquisa_clinica",
+    "description": "Experimento 1 - pesq",
+    "connection_type_id": 3,
+    "connection_params": {
+      "host": "pesquisa_clinica_mysql",
+      "port": 3306,
+      "database": "pesquisa_clinica",
+      "username": "pesq_user",
+      "password": "ENC:v1:y+00btquYs47NH2kZd8I/XgBJVNrXvcYQ/7FM9l/E9qGGa/E2BCZaBCXX9NlLT8ujatS6Bg="
+    },
+    "content_type": "metadata",
+    "cron_expression": null,
+    "sync_settings": {
+      "mode": "full"
+    },
+    "id": 27,
+    "organization_id": 1,
+    "status": "active",
+    "sync_status": "success",
+    "sync_progress": 100,
+    "sync_progress_details": {
+      "phase": "complete",
+      "message": "Metadata extraction completed successfully",
+      "schemas_processed": 3,
+      "tables_processed": 11,
+      "completed_at": "2026-03-15T17:38:51.007776"
+    },
+    "last_sync_time": "2026-03-15T17:38:51.007808Z",
+    "next_sync_time": null
+  }
+}

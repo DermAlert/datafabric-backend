@@ -1,0 +1,130 @@
+{
+  "row": {
+    "run_id": "exp1_20260315_v2",
+    "timestamp": "2026-03-15T22:00:29.882434",
+    "topology_n": 4,
+    "scenario": "bronze_federated",
+    "iteration": 27,
+    "is_warmup": false,
+    "config_id": 36,
+    "success": false,
+    "status": "failed",
+    "latency_seconds_wall": 1.5054649150115438,
+    "execution_time_seconds_api": 1.438997,
+    "rows_processed": 0,
+    "rows_output": 600,
+    "size_bytes": 100999,
+    "num_files": 1,
+    "delta_version": 25,
+    "delta_current_version": 25,
+    "cpu_avg_percent": 111.42999999999999,
+    "cpu_max_percent": 111.42999999999999,
+    "mem_avg_bytes": 9523198683,
+    "mem_max_bytes": 9523198683,
+    "sample_count": 1,
+    "error_message": null
+  },
+  "raw_response": {
+    "config_id": 36,
+    "config_name": "exp1_20260315_v2_n4_bronze_federated",
+    "execution_id": 529,
+    "status": "failed",
+    "groups": [
+      {
+        "group_name": "unified_federated",
+        "connection_name": "federated",
+        "status": "failed",
+        "output_path": null,
+        "rows_ingested": null,
+        "execution_time_seconds": 0.862408,
+        "error_message": "[Errno 111] Connection refused"
+      }
+    ],
+    "total_rows_ingested": 0,
+    "bronze_paths": [],
+    "execution_time_seconds": 1.438997,
+    "message": "Bronze ingestion failed.",
+    "delta_version": 26,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": null,
+    "rows_updated": null,
+    "config_snapshot": {
+      "name": "exp1_20260315_v2_n4_bronze_federated",
+      "description": "Exp1 N=4 bronze federado",
+      "tables": [
+        {
+          "table_id": 140,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 158,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 176,
+          "select_all": true,
+          "column_ids": null
+        },
+        {
+          "table_id": 181,
+          "select_all": true,
+          "column_ids": null
+        }
+      ],
+      "relationship_ids": [
+        101,
+        102,
+        103
+      ],
+      "enable_federated_joins": true,
+      "output_format": "delta",
+      "output_bucket": null,
+      "output_path_prefix": null,
+      "partition_columns": null,
+      "write_mode": "overwrite",
+      "merge_keys": null,
+      "merge_keys_source": null,
+      "properties": {},
+      "snapshot_at": "2026-03-16T01:00:27.763900"
+    }
+  },
+  "raw_execution": {
+    "id": 529,
+    "config_id": 36,
+    "status": "failed",
+    "started_at": "2026-03-16T01:00:27.763931Z",
+    "finished_at": "2026-03-16T01:00:29.232146Z",
+    "group_results": [
+      {
+        "group_name": "unified_federated",
+        "connection_name": "federated",
+        "status": "failed",
+        "output_path": null,
+        "rows_ingested": null,
+        "execution_time_seconds": 0.862408,
+        "error_message": "[Errno 111] Connection refused"
+      }
+    ],
+    "rows_ingested": 0,
+    "output_paths": [],
+    "error_message": null,
+    "delta_version": 26,
+    "write_mode_used": "overwrite",
+    "merge_keys_used": null,
+    "rows_inserted": null,
+    "rows_updated": null,
+    "rows_deleted": null,
+    "config_snapshot": null
+  },
+  "raw_version": {
+    "delta_current_version": 25,
+    "delta_version": 25,
+    "size_bytes": 100999,
+    "num_files": 1,
+    "version_total_rows": 600,
+    "operation": "OVERWRITE"
+  }
+}

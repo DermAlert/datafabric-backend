@@ -1,0 +1,300 @@
+{
+  "config_id": 30,
+  "config_name": "exp1_20260315_v2_n1_bronze_federated",
+  "ingestion_groups": [
+    {
+      "group_name": "part_exp1_sus_hospital_sus_pacientes",
+      "connection_id": 20,
+      "connection_name": "exp1_sus_hospital",
+      "tables": [
+        {
+          "table_id": 140,
+          "table_name": "sus_pacientes",
+          "schema_name": "sus_database",
+          "selected_columns": [
+            "id",
+            "cpf",
+            "cns",
+            "nome_completo",
+            "nome_mae",
+            "data_nascimento",
+            "sexo",
+            "raca_cor",
+            "municipio_nascimento_ibge",
+            "uf_nascimento",
+            "municipio_residencia_ibge",
+            "uf_residencia",
+            "cep_residencia",
+            "endereco_residencia",
+            "bairro_residencia",
+            "telefone",
+            "email",
+            "situacao_cadastro",
+            "data_obito",
+            "causa_obito_cid10",
+            "data_criacao",
+            "data_atualizacao"
+          ],
+          "column_count": 22
+        }
+      ],
+      "has_joins": false,
+      "estimated_sql": "SELECT \n    t0.\"id\" AS \"id\", t0.\"cpf\" AS \"cpf\", t0.\"cns\" AS \"cns\", t0.\"nome_completo\" AS \"nome_completo\", t0.\"nome_mae\" AS \"nome_mae\", t0.\"data_nascimento\" AS \"data_nascimento\", t0.\"sexo\" AS \"sexo\", t0.\"raca_cor\" AS \"raca_cor\", t0.\"municipio_nascimento_ibge\" AS \"municipio_nascimento_ibge\", t0.\"uf_nascimento\" AS \"uf_nascimento\", t0.\"municipio_residencia_ibge\" AS \"municipio_residencia_ibge\", t0.\"uf_residencia\" AS \"uf_residencia\", t0.\"cep_residencia\" AS \"cep_residencia\", t0.\"endereco_residencia\" AS \"endereco_residencia\", t0.\"bairro_residencia\" AS \"bairro_residencia\", t0.\"telefone\" AS \"telefone\", t0.\"email\" AS \"email\", t0.\"situacao_cadastro\" AS \"situacao_cadastro\", t0.\"data_obito\" AS \"data_obito\", t0.\"causa_obito_cid10\" AS \"causa_obito_cid10\", CAST(t0.\"data_criacao\" AS TIMESTAMP) AS \"data_criacao\", CAST(t0.\"data_atualizacao\" AS TIMESTAMP) AS \"data_atualizacao\", 'sus_pacientes' AS _source_table, CAST(CURRENT_TIMESTAMP AS TIMESTAMP) AS _ingestion_timestamp\nFROM \"exp1_sus_hospital_20\".\"sus_database\".\"sus_pacientes\" t0",
+      "output_path": "s3a://datafabric-bronze/{id}-exp1_20260315_v2_n1_bronze_federated/part_exp1_sus_hospital_sus_pacientes/",
+      "column_mappings": [
+        {
+          "external_column_id": 933,
+          "external_table_id": 140,
+          "original_column_name": "id",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "id",
+          "data_type": "integer",
+          "column_position": 0,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 934,
+          "external_table_id": 140,
+          "original_column_name": "cpf",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "cpf",
+          "data_type": "varchar(11)",
+          "column_position": 1,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 935,
+          "external_table_id": 140,
+          "original_column_name": "cns",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "cns",
+          "data_type": "varchar(15)",
+          "column_position": 2,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 936,
+          "external_table_id": 140,
+          "original_column_name": "nome_completo",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "nome_completo",
+          "data_type": "varchar(200)",
+          "column_position": 3,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 937,
+          "external_table_id": 140,
+          "original_column_name": "nome_mae",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "nome_mae",
+          "data_type": "varchar(200)",
+          "column_position": 4,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 938,
+          "external_table_id": 140,
+          "original_column_name": "data_nascimento",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "data_nascimento",
+          "data_type": "date",
+          "column_position": 5,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 939,
+          "external_table_id": 140,
+          "original_column_name": "sexo",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "sexo",
+          "data_type": "varchar(1)",
+          "column_position": 6,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 940,
+          "external_table_id": 140,
+          "original_column_name": "raca_cor",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "raca_cor",
+          "data_type": "varchar(13)",
+          "column_position": 7,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 941,
+          "external_table_id": 140,
+          "original_column_name": "municipio_nascimento_ibge",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "municipio_nascimento_ibge",
+          "data_type": "varchar(7)",
+          "column_position": 8,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 942,
+          "external_table_id": 140,
+          "original_column_name": "uf_nascimento",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "uf_nascimento",
+          "data_type": "char(2)",
+          "column_position": 9,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 943,
+          "external_table_id": 140,
+          "original_column_name": "municipio_residencia_ibge",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "municipio_residencia_ibge",
+          "data_type": "varchar(7)",
+          "column_position": 10,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 944,
+          "external_table_id": 140,
+          "original_column_name": "uf_residencia",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "uf_residencia",
+          "data_type": "char(2)",
+          "column_position": 11,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 945,
+          "external_table_id": 140,
+          "original_column_name": "cep_residencia",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "cep_residencia",
+          "data_type": "varchar(8)",
+          "column_position": 12,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 946,
+          "external_table_id": 140,
+          "original_column_name": "endereco_residencia",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "endereco_residencia",
+          "data_type": "varchar(300)",
+          "column_position": 13,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 947,
+          "external_table_id": 140,
+          "original_column_name": "bairro_residencia",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "bairro_residencia",
+          "data_type": "varchar(100)",
+          "column_position": 14,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 948,
+          "external_table_id": 140,
+          "original_column_name": "telefone",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "telefone",
+          "data_type": "varchar(11)",
+          "column_position": 15,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 949,
+          "external_table_id": 140,
+          "original_column_name": "email",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "email",
+          "data_type": "varchar(100)",
+          "column_position": 16,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 950,
+          "external_table_id": 140,
+          "original_column_name": "situacao_cadastro",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "situacao_cadastro",
+          "data_type": "varchar(8)",
+          "column_position": 17,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 951,
+          "external_table_id": 140,
+          "original_column_name": "data_obito",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "data_obito",
+          "data_type": "date",
+          "column_position": 18,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 952,
+          "external_table_id": 140,
+          "original_column_name": "causa_obito_cid10",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "causa_obito_cid10",
+          "data_type": "varchar(10)",
+          "column_position": 19,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 953,
+          "external_table_id": 140,
+          "original_column_name": "data_criacao",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "data_criacao",
+          "data_type": "timestamp(0)",
+          "column_position": 20,
+          "is_prefixed": false
+        },
+        {
+          "external_column_id": 954,
+          "external_table_id": 140,
+          "original_column_name": "data_atualizacao",
+          "original_table_name": "sus_pacientes",
+          "original_schema_name": "sus_database",
+          "bronze_column_name": "data_atualizacao",
+          "data_type": "timestamp(0)",
+          "column_position": 21,
+          "is_prefixed": false
+        }
+      ]
+    }
+  ],
+  "inter_db_links": [],
+  "estimated_output_paths": [
+    "s3a://datafabric-bronze/{id}-exp1_20260315_v2_n1_bronze_federated/part_exp1_sus_hospital_sus_pacientes/"
+  ],
+  "total_tables": 1,
+  "total_columns": 22,
+  "warnings": [],
+  "write_mode": "merge",
+  "merge_keys": null,
+  "merge_keys_source": null
+}

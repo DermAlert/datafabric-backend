@@ -1,0 +1,6 @@
+concept,column_group_id,semantic_domain_name,data_dictionary_term_name,columns_count,value_mappings_count,sources_covered
+sex_gender,11,clinical_demographics,sex_gender,6,12,4
+diagnosis,12,clinical_findings,diagnosis,8,21,4
+lesion_type,13,clinical_findings,lesion_type,5,15,3
+anatomical_site,14,clinical_findings,anatomical_site,7,18,4
+age_group,15,clinical_demographics,age_group,4,6,3
