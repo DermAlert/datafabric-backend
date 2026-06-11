@@ -2773,17 +2773,30 @@ class SilverTransformationService:
         if not bronze_config:
             return None
         
-        # Get the latest successful execution
-        exec_result = await self.db.execute(
-            select(BronzeExecution).where(
-                BronzeExecution.config_id == bronze_config_id,
-                BronzeExecution.status == BronzeExecutionStatus.SUCCESS
-            ).order_by(BronzeExecution.started_at.desc()).limit(1)
-        )
-        latest_execution = exec_result.scalar_one_or_none()
-        
+        # Resolve the Bronze execution snapshot the Silver run must read.
+        # When `version` is set, it refers to BronzeExecution.version_number,
+        # which must then be translated to the per-path Delta versions stored
+        # in `path_delta_versions`.
+        if version is not None:
+            exec_result = await self.db.execute(
+                select(BronzeExecution).where(
+                    BronzeExecution.config_id == bronze_config_id,
+                    BronzeExecution.version_number == version,
+                    BronzeExecution.status == BronzeExecutionStatus.SUCCESS,
+                )
+            )
+            bronze_execution = exec_result.scalar_one_or_none()
+        else:
+            exec_result = await self.db.execute(
+                select(BronzeExecution).where(
+                    BronzeExecution.config_id == bronze_config_id,
+                    BronzeExecution.status == BronzeExecutionStatus.SUCCESS
+                ).order_by(BronzeExecution.started_at.desc()).limit(1)
+            )
+            bronze_execution = exec_result.scalar_one_or_none()
+
         has_known_paths = bool(bronze_config.known_output_paths)
-        has_exec_paths = latest_execution and latest_execution.output_paths
+        has_exec_paths = bronze_execution and bronze_execution.output_paths
         
         if not has_known_paths and not has_exec_paths:
             logger.warning(f"No successful execution found for Bronze config {bronze_config_id}")
@@ -2816,13 +2829,13 @@ class SilverTransformationService:
 
         # Build path mapping: prefer known_output_paths (stable), fall back to execution
         group_path_by_name = {}
-        if has_known_paths:
+        if has_known_paths and version is None:
             # known_output_paths is {connection_name: s3a_path}
             # group_name in preview typically matches connection_name
             group_path_by_name = dict(bronze_config.known_output_paths)
         
-        if latest_execution:
-            for g in (latest_execution.group_results or []):
+        if bronze_execution:
+            for g in (bronze_execution.group_results or []):
                 if not isinstance(g, dict):
                     continue
                 group_name = g.get('group_name') or g.get('connection_name')
@@ -2830,7 +2843,8 @@ class SilverTransformationService:
                 if group_name and output_path and group_name not in group_path_by_name:
                     group_path_by_name[group_name] = output_path
 
-        fallback_paths = list((latest_execution.output_paths if latest_execution else None) or [])
+        fallback_paths = list((bronze_execution.output_paths if bronze_execution else None) or [])
+        path_delta_versions = dict((bronze_execution.path_delta_versions or {}) if bronze_execution else {})
         fallback_idx = 0
 
         tables = []
@@ -2850,7 +2864,8 @@ class SilverTransformationService:
                     'group_id': idx,
                     'group_name': group_preview.group_name,
                     'output_path': output_path,
-                    'rows_ingested': latest_execution.rows_ingested
+                    'rows_ingested': bronze_execution.rows_ingested if bronze_execution else None,
+                    'read_version': path_delta_versions.get(output_path),
                 })
 
                 for mapping in (group_preview.column_mappings or []):
@@ -2921,7 +2936,8 @@ class SilverTransformationService:
                     'group_id': idx,
                     'group_name': f"bronze_table_{idx}",
                     'output_path': output_path,
-                    'rows_ingested': latest_execution.rows_ingested
+                    'rows_ingested': bronze_execution.rows_ingested if bronze_execution else None,
+                    'read_version': path_delta_versions.get(output_path),
                 })
 
         return {
@@ -2930,8 +2946,9 @@ class SilverTransformationService:
             'tables': tables,
             'column_mappings': column_map,
             'inter_source_links': inter_source_links,
-            'delta_version': version or latest_execution.delta_version,
-            'execution_id': latest_execution.id
+            'delta_version': version if version is not None else (bronze_execution.delta_version if bronze_execution else None),
+            'path_delta_versions': path_delta_versions,
+            'execution_id': bronze_execution.id if bronze_execution else None
         }
     
     async def _execute_spark_transform(
@@ -3265,10 +3282,17 @@ class SilverTransformationService:
 
         for table in bronze_info.get('tables', []):
             table_path = table['output_path']
+            read_version = table.get('read_version')
             logger.info(f"Reading Bronze table from: {table_path}")
 
             try:
-                df = spark.read.format("delta").load(table_path)
+                reader = spark.read.format("delta")
+                if read_version is not None:
+                    reader = reader.option("versionAsOf", read_version)
+                    logger.info(
+                        f"Using versionAsOf={read_version} for Bronze path {table_path}"
+                    )
+                df = reader.load(table_path)
                 row_count = df.count()
                 total_rows += row_count
                 dfs.append(df)
@@ -3302,6 +3326,8 @@ class SilverTransformationService:
             df = dfs[0]
             for other_df in dfs[1:]:
                 df = df.unionByName(other_df, allowMissingColumns=True)
+
+        df = self._deduplicate_dataframe_columns(df, context="post-join")
 
         logger.info(f"Total rows to process: {total_rows}")
 
@@ -3725,6 +3751,20 @@ class SilverTransformationService:
                     unified_col_name,
                     F.coalesce(F.col(result_join_col), F.col(temp_col_name))
                 )
+
+                # Preserve the joining column alias when the linked sources use
+                # different names for the same business key (for example,
+                # `cpf` <-> `cpf_paciente`). Without this, later links that
+                # reference the alternate name become disconnected and fall back
+                # to CROSS JOIN, which can reintroduce duplicate columns.
+                if result_join_col.lower() != join_df_join_col.lower():
+                    alias_present = any(c.lower() == join_df_join_col.lower() for c in result_df.columns)
+                    if not alias_present:
+                        result_df = result_df.withColumn(join_df_join_col, F.col(unified_col_name))
+                        logger.info(
+                            f"Preserved alternate join alias '{join_df_join_col}' "
+                            f"for unified column '{unified_col_name}'"
+                        )
                 
                 # Drop the temporary join column (now unified)
                 result_df = result_df.drop(temp_col_name)
@@ -3746,6 +3786,37 @@ class SilverTransformationService:
             result_df = result_df.crossJoin(df_map[idx])
         
         return result_df
+
+    def _deduplicate_dataframe_columns(self, df, context: str = "Silver transform"):
+        """
+        Drop duplicate Spark columns while preserving the first occurrence.
+
+        Spark joins can keep multiple columns with the same visible name in the
+        logical plan, which later causes DELTA_DUPLICATE_COLUMNS_FOUND on write.
+        """
+        col_counts: dict = {}
+        for col_name in df.columns:
+            col_counts[col_name] = col_counts.get(col_name, 0) + 1
+
+        duplicate_columns = {col_name for col_name, count in col_counts.items() if count > 1}
+        if not duplicate_columns:
+            return df
+
+        logger.warning(
+            f"Duplicate columns detected during {context}: {duplicate_columns}. "
+            "Keeping only the first occurrence of each duplicate column."
+        )
+
+        keep_indices = []
+        seen_columns: set = set()
+        for idx, col_name in enumerate(df.columns):
+            if col_name not in seen_columns:
+                keep_indices.append(idx)
+                seen_columns.add(col_name)
+            else:
+                logger.warning(f"Dropping duplicate column '{col_name}' at position {idx}")
+
+        return df.select(*[df[idx] for idx in keep_indices])
     
     def _apply_equivalence_groups(
         self, 
@@ -3824,24 +3895,7 @@ class SilverTransformationService:
             mapped_expr_by_bronze_col[bronze_col_name] = mapped_expr
             logger.info(f"Prepared Equivalence value mapping for {bronze_col_name} ({len(mappings)} mappings)")
         
-        # Defensive: drop truly-duplicate columns that slipped through the JOIN
-        # rename logic. PySpark DataFrames can carry two columns with the same
-        # name after a join, which causes AMBIGUOUS_REFERENCE errors later.
-        col_counts: dict = {}
-        for c in df.columns:
-            col_counts[c] = col_counts.get(c, 0) + 1
-        dup_cols = {c for c, cnt in col_counts.items() if cnt > 1}
-        if dup_cols:
-            logger.warning(f"Duplicate columns detected in DataFrame before equivalence: {dup_cols}. Deduplicating.")
-            keep_indices = []
-            seen_for_dedup: set = set()
-            for i, c in enumerate(df.columns):
-                if c not in seen_for_dedup:
-                    keep_indices.append(i)
-                    seen_for_dedup.add(c)
-                else:
-                    logger.warning(f"Dropping duplicate column '{c}' at position {i}")
-            df = df.select(*[df[i] for i in keep_indices])
+        df = self._deduplicate_dataframe_columns(df, context="equivalence")
         
         # Check if we should exclude source columns after unification
         exclude_source_columns = transform_config.get('exclude_unified_source_columns', False)
@@ -4120,10 +4174,17 @@ class SilverTransformationService:
             if trans_type == 'template' and rule_id and rule_id in norm_rules:
                 rule = norm_rules[rule_id]
                 if rule.get('regex_pattern') and rule.get('regex_replacement'):
+                    # Apply pre_process in the SQL path (mirrors Python normalizer behaviour).
+                    # The template engine always generates a pure-digit input regex, so any
+                    # non-digit separators (dashes in dates, spaces, dots …) must be stripped
+                    # before the main regexp_replace runs.
+                    col_expr = F.col(col_name).cast("string")
+                    if rule.get('pre_process') == 'digits_only':
+                        col_expr = F.regexp_replace(col_expr, '[^0-9]', '')
                     df = df.withColumn(
                         col_name,
                         F.regexp_replace(
-                            F.col(col_name),
+                            col_expr,
                             rule['regex_pattern'],
                             rule['regex_replacement']
                         )
@@ -4402,4 +4463,3 @@ class SilverTransformationService:
         except Exception as e:
             logger.error(f"Error querying Silver table: {e}")
             return None
-

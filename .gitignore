@@ -9,3 +9,7 @@ project/.venv
 trino/catalog/*
 register_connections.sh
 project/tests
+scripts
+benchmarks
+experiments
+api_analysis.md
