@@ -1,0 +1,161 @@
+services:
+  exp1sql-sus-pg:
+    image: postgres:15
+    container_name: exp1sql_sus_pg
+    environment:
+      POSTGRES_DB: db_sus_pg
+      POSTGRES_USER: suspg_user
+      POSTGRES_PASSWORD: suspg_pass
+    volumes:
+      - exp1sql_sus_pg_data:/var/lib/postgresql/data
+      - ./db_sus_setup_10k.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U suspg_user -d db_sus_pg"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - shared-network
+
+  exp1sql-sus-mysql:
+    image: mysql:8.0
+    container_name: exp1sql_sus_mysql
+    environment:
+      MYSQL_DATABASE: db_sus_mysql
+      MYSQL_USER: susmy_user
+      MYSQL_PASSWORD: susmy_pass
+      MYSQL_ROOT_PASSWORD: susmy_root_pass
+    volumes:
+      - exp1sql_sus_mysql_data:/var/lib/mysql
+      - ./db_sus_setup_mysql.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -psusmy_root_pass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+    networks:
+      - shared-network
+
+  exp1sql-lab-pg:
+    image: postgres:15
+    container_name: exp1sql_lab_pg
+    environment:
+      POSTGRES_DB: db_laboratorio
+      POSTGRES_USER: labpg_user
+      POSTGRES_PASSWORD: labpg_pass
+    volumes:
+      - exp1sql_lab_pg_data:/var/lib/postgresql/data
+      - ./db_laboratorio_setup_postgres.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U labpg_user -d db_laboratorio"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - shared-network
+
+  exp1sql-img-pg:
+    image: postgres:15
+    container_name: exp1sql_img_pg
+    environment:
+      POSTGRES_DB: db_imagem_pg
+      POSTGRES_USER: imgpg_user
+      POSTGRES_PASSWORD: imgpg_pass
+    volumes:
+      - exp1sql_img_pg_data:/var/lib/postgresql/data
+      - ./db_imagem_setup.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U imgpg_user -d db_imagem_pg"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - shared-network
+
+  exp1sql-img-mysql:
+    image: mysql:8.0
+    container_name: exp1sql_img_mysql
+    environment:
+      MYSQL_DATABASE: db_imagem_mysql
+      MYSQL_USER: imgmy_user
+      MYSQL_PASSWORD: imgmy_pass
+      MYSQL_ROOT_PASSWORD: imgmy_root_pass
+    volumes:
+      - exp1sql_img_mysql_data:/var/lib/mysql
+      - ./db_imagem_setup_mysql.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -pimgmy_root_pass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+    networks:
+      - shared-network
+
+  exp1sql-tele-pg:
+    image: postgres:15
+    container_name: exp1sql_tele_pg
+    environment:
+      POSTGRES_DB: db_telemedicina_pg
+      POSTGRES_USER: telepg_user
+      POSTGRES_PASSWORD: telepg_pass
+    volumes:
+      - exp1sql_tele_pg_data:/var/lib/postgresql/data
+      - ./db_telemedicina_setup.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telepg_user -d db_telemedicina_pg"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - shared-network
+
+  exp1sql-tele-mysql:
+    image: mysql:8.0
+    container_name: exp1sql_tele_mysql
+    environment:
+      MYSQL_DATABASE: db_telemedicina_mysql
+      MYSQL_USER: telemy_user
+      MYSQL_PASSWORD: telemy_pass
+      MYSQL_ROOT_PASSWORD: telemy_root_pass
+    volumes:
+      - exp1sql_tele_mysql_data:/var/lib/mysql
+      - ./db_telemedicina_setup_mysql.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -ptelemy_root_pass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+    networks:
+      - shared-network
+
+  exp1sql-far-pg:
+    image: postgres:15
+    container_name: exp1sql_far_pg
+    environment:
+      POSTGRES_DB: db_farmacia
+      POSTGRES_USER: farpg_user
+      POSTGRES_PASSWORD: farpg_pass
+    volumes:
+      - exp1sql_far_pg_data:/var/lib/postgresql/data
+      - ./db_farmacia_setup.sql:/docker-entrypoint-initdb.d/01_setup.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U farpg_user -d db_farmacia"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    networks:
+      - shared-network
+
+volumes:
+  exp1sql_sus_pg_data:
+  exp1sql_sus_mysql_data:
+  exp1sql_lab_pg_data:
+  exp1sql_img_pg_data:
+  exp1sql_img_mysql_data:
+  exp1sql_tele_pg_data:
+  exp1sql_tele_mysql_data:
+  exp1sql_far_pg_data:
+
+networks:
+  shared-network:
+    external: true

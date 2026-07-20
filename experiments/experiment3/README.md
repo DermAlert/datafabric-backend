@@ -100,13 +100,12 @@ version pinning, and regenerates the article results.
 The backend execution evidence and the current package-validation report are
 available as machine-readable files under `results/`.
 
-## Data use and limitations
+## Scope
 
-The snapshots contain public research metadata with pseudonymous collection,
-image, lesion, and patient identifiers. They must not be interpreted as direct
-patient identifiers or as clinical advice. Fitzpatrick phototype is a recorded
-metadata field and is not treated as a direct measurement of skin color.
+This artifact uses public research metadata rather than clinical images or
+direct patient identifiers. Recorded Fitzpatrick phototype is treated as a
+dataset field, not as a direct measurement of skin color or as clinical advice.
 
-HAM10000 is declared as CC BY-NC, while HIBA Skin Lesions and PAD-UFES-20 are
-declared as CC BY in the frozen source manifest. Users remain responsible for
-following the original collection terms and attribution requirements.
+HAM10000 is declared as CC BY-NC; HIBA Skin Lesions and PAD-UFES-20 are
+declared as CC BY in `config/sources.json`. Their original attribution and use
+conditions continue to apply.
