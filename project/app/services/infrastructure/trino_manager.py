@@ -1,6 +1,7 @@
 import os
 import asyncio
 from typing import Dict, Any, Optional
+from urllib.parse import urlencode
 import aiotrino
 from minio import Minio
 from ...utils.logger import logger
@@ -78,6 +79,26 @@ class TrinoManager:
         props_str = ", ".join(props_list)
         return f"CREATE CATALOG IF NOT EXISTS \"{name}\" USING {connector} WITH ({props_str})"
 
+    @staticmethod
+    def _boolish(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        return str(value).strip().lower() in {"1", "true", "yes", "on", "require", "required"}
+
+    @staticmethod
+    def _append_jdbc_params(base_url: str, params: Dict[str, Any]) -> str:
+        clean = {
+            key: value
+            for key, value in params.items()
+            if value is not None and str(value).strip() != ""
+        }
+        if not clean:
+            return base_url
+        separator = "&" if "?" in base_url else "?"
+        return f"{base_url}{separator}{urlencode(clean)}"
+
     def get_catalog_properties(
         self, connection_type: str, params: Dict[str, Any], connection_id: Optional[int] = None
     ) -> Dict[str, str]:
@@ -114,9 +135,23 @@ class TrinoManager:
             db = params.get("database", "postgres")
             user = params.get("username")
             password = params.get("password")
+            jdbc_url = f"jdbc:postgresql://{effective_host}:{effective_port}/{db}"
+            sslmode = (
+                params.get("sslmode")
+                or params.get("ssl_mode")
+                or params.get("ssl-mode")
+            )
+            if not sslmode and self._boolish(params.get("ssl")):
+                sslmode = "require"
+            jdbc_url = self._append_jdbc_params(
+                jdbc_url,
+                {
+                    "sslmode": sslmode,
+                },
+            )
             
             return {
-                "connection-url": f"jdbc:postgresql://{effective_host}:{effective_port}/{db}",
+                "connection-url": jdbc_url,
                 "connection-user": user,
                 "connection-password": password,
                 "case-insensitive-name-matching": "true",
@@ -177,12 +212,33 @@ class TrinoManager:
             return props
             
         elif connection_type in ["mysql"]:
-             db = params.get("database", "")
              user = params.get("username")
              password = params.get("password")
-             
+             # NOTE: The Trino MySQL connector does NOT support a database/catalog
+             # in the JDBC URL (MysqlJdbcConfig.urlWithoutDatabase requirement).
+             # All MySQL databases are exposed as Trino schemas automatically.
+             jdbc_url = f"jdbc:mysql://{effective_host}:{effective_port}"
+             ssl_mode = (
+                 params.get("sslMode")
+                 or params.get("sslmode")
+                 or params.get("ssl_mode")
+                 or params.get("ssl-mode")
+             )
+             if ssl_mode and ssl_mode.lower() in ("disabled", "disable", "false", "0", "none"):
+                 ssl_mode = "DISABLED"
+             elif ssl_mode and ssl_mode.lower() in ("required", "require", "true", "1"):
+                 ssl_mode = "REQUIRED"
+             if not ssl_mode and self._boolish(params.get("ssl")):
+                 ssl_mode = "REQUIRED"
+             jdbc_url = self._append_jdbc_params(
+                 jdbc_url,
+                 {
+                     "sslMode": ssl_mode,
+                 },
+             )
+
              return {
-                "connection-url": f"jdbc:mysql://{effective_host}:{effective_port}",
+                "connection-url": jdbc_url,
                 "connection-user": user,
                 "connection-password": password,
                 "case-insensitive-name-matching": "true",

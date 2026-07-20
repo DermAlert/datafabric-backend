@@ -1,0 +1,13 @@
+condition,split_strategy,protected_unit,evaluated_images,evaluated_groups,groups_crossing_partitions,group_leakage_percent,images_in_leaky_groups,affected_image_percent
+G2_DERM_CANCER_HISTO,naive_image_hash,lesion,2689,1768,377,21.324,897,33.358
+G2_DERM_CANCER_HISTO,naive_image_hash,patient,533,361,56,15.512,166,31.144
+G2_DERM_CANCER_HISTO,lesion_grouped_hash,lesion,2689,1768,0,0.0,0,0.0
+G2_DERM_CANCER_HISTO,lesion_grouped_hash,patient,533,361,36,9.972,110,20.638
+G2_DERM_CANCER_HISTO,patient_or_lesion_grouped_hash,lesion,2689,1768,0,0.0,0,0.0
+G2_DERM_CANCER_HISTO,patient_or_lesion_grouped_hash,patient,533,361,0,0.0,0,0.0
+G3_CLINICAL_CANCER_PHOTOTYPE,naive_image_hash,lesion,1299,1042,123,11.804,256,19.707
+G3_CLINICAL_CANCER_PHOTOTYPE,naive_image_hash,patient,1299,807,185,22.924,506,38.953
+G3_CLINICAL_CANCER_PHOTOTYPE,lesion_grouped_hash,lesion,1299,1042,0,0.0,0,0.0
+G3_CLINICAL_CANCER_PHOTOTYPE,lesion_grouped_hash,patient,1299,807,89,11.029,279,21.478
+G3_CLINICAL_CANCER_PHOTOTYPE,patient_or_lesion_grouped_hash,lesion,1299,1042,0,0.0,0,0.0
+G3_CLINICAL_CANCER_PHOTOTYPE,patient_or_lesion_grouped_hash,patient,1299,807,0,0.0,0,0.0

@@ -1,0 +1,8 @@
+condition,name,images,lesions,patients,sources,retention_percent,source_provenance_coverage,lesion_id_coverage,patient_id_coverage,license_coverage
+G0_RAW,Raw integrated image union,15634,11975,1996,3,100.0,1.0,1.0,0.250352,1.0
+G1_SEMANTIC,Full harmonized audit,15634,11975,1996,3,100.0,1.0,1.0,0.250352,1.0
+G1_KNOWN_DIAGNOSIS,Known harmonized diagnosis,15403,11802,1980,3,98.522,1.0,1.0,0.250795,1.0
+G1_DERM_KNOWN_HISTO,"Dermoscopy, known diagnosis, histopathology",6892,4305,500,2,44.083,1.0,1.0,0.108532,1.0
+G2_DERM_CANCER_HISTO,"Dermoscopic cancer, histopathology",2689,1768,361,2,17.2,1.0,1.0,0.198215,1.0
+G3_CLINICAL_CANCER_PHOTOTYPE,Clinical cancer with phototype,1299,1042,807,2,8.309,1.0,1.0,1.0,1.0
+G4_CC_BY_POLICY,Exact CC-BY allowlist view,3914,3137,1996,2,25.035,1.0,1.0,1.0,1.0

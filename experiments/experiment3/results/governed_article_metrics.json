@@ -1,0 +1,28 @@
+{
+  "all_backend_hashes_stable_by_condition": true,
+  "all_backend_versions_match_oracle": true,
+  "backend_versions": 9,
+  "combined_phototypes_failing_n30": [
+    "IV",
+    "V",
+    "VI"
+  ],
+  "combined_phototypes_passing_n30": [
+    "I",
+    "II",
+    "III"
+  ],
+  "delta_sharing_delivery_validated": true,
+  "governed_conditions": 3,
+  "input_images": 15634,
+  "mean_materialization_seconds": 9.077,
+  "mean_versioned_read_seconds": 2.275,
+  "naive_g2_lesion_affected_image_percent": 33.358,
+  "naive_g3_patient_affected_image_percent": 38.953,
+  "producer_latest_version": 2,
+  "sample_sd_materialization_seconds": 5.803,
+  "sample_sd_versioned_read_seconds": 0.828,
+  "sensitive_values_persisted": false,
+  "shared_version": 0,
+  "unresolved_records_eliminated_by_v1_1": 1661
+}

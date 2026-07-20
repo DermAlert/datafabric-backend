@@ -12,6 +12,16 @@ This repository runs a data platform stack built around:
 
 The recommended way to run the project is with Docker Compose so every service comes up with the expected network names and ports.
 
+The evaluation artifacts are documented in:
+
+- [Experiment 1 — Federated Query Performance](./experiments/experiment%201/README.md)
+- [Experiment 2 — Semantic Retrieval and Normalization](./experiments/experiment%202/README.md)
+- [Experiment 3 — Governed Dermatology Data Integration](./experiments/experiment3/README.md)
+
+## Accepted paper
+
+[DataFabric-DermAlert: A Tool for Federated Health Data Integration and Fairness-Aware Dataset Construction](./paper.pdf)
+
 ## Services
 
 | Service | What it does | Host port(s) |
@@ -32,7 +42,7 @@ The recommended way to run the project is with Docker Compose so every service c
 
 Note: there is a commented `dataset-service` stub in [`docker-compose.yml`](./docker-compose.yml), but it is not part of the active stack right now.
 
-## Prerequisites
+## Requirements
 
 - Docker
 - Docker Compose v2 (`docker compose`)
@@ -80,7 +90,7 @@ INTERNAL_METASTORE_BUCKET=datafabric-metastore
 
 If you leave `SPARK_MODE` unset, the backend falls back to local Spark mode. For the Docker Compose cluster in this repo, `SPARK_MODE=cluster` is the expected setting.
 
-## Run Everything
+## Installation
 
 From the repository root:
 

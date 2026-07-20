@@ -1,0 +1,61 @@
+{
+  "access_control_enforced": true,
+  "authorized_share_listing_status": 200,
+  "authorized_share_visible": true,
+  "authorized_table_count": 3,
+  "authorized_table_listing_status": 200,
+  "delivery_validated": true,
+  "invalid_token_status": 401,
+  "pinned_release_independent_of_producer_head": true,
+  "producer_latest_versions": {
+    "G2_DERM_CANCER_HISTO": 2,
+    "G3_CLINICAL_CANCER_PHOTOTYPE": 2,
+    "G4_CC_BY_POLICY": 2
+  },
+  "sensitive_values_persisted": false,
+  "tables": {
+    "G2_DERM_CANCER_HISTO": {
+      "declared_bytes": 60798,
+      "delta_version_header": 0,
+      "file_action_count": 1,
+      "metadata_status": 200,
+      "pinned_version_served": true,
+      "protocol_table_name": "derm_cancer_histo",
+      "query_status": 200,
+      "reported_version": 0,
+      "sample_download_status": 206,
+      "sample_has_parquet_magic": true,
+      "schema_field_count": 38,
+      "version_status": 200
+    },
+    "G3_CLINICAL_CANCER_PHOTOTYPE": {
+      "declared_bytes": 50542,
+      "delta_version_header": 0,
+      "file_action_count": 1,
+      "metadata_status": 200,
+      "pinned_version_served": true,
+      "protocol_table_name": "clinical_cancer_phototype",
+      "query_status": 200,
+      "reported_version": 0,
+      "sample_download_status": 206,
+      "sample_has_parquet_magic": true,
+      "schema_field_count": 38,
+      "version_status": 200
+    },
+    "G4_CC_BY_POLICY": {
+      "declared_bytes": 118407,
+      "delta_version_header": 0,
+      "file_action_count": 1,
+      "metadata_status": 200,
+      "pinned_version_served": true,
+      "protocol_table_name": "cc_by_policy",
+      "query_status": 200,
+      "reported_version": 0,
+      "sample_download_status": 206,
+      "sample_has_parquet_magic": true,
+      "schema_field_count": 38,
+      "version_status": 200
+    }
+  },
+  "unassigned_recipient_status": 404
+}

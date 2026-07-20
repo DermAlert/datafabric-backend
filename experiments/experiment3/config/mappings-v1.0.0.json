@@ -1,0 +1,33 @@
+{
+  "catalog_version": "derm-semantic-v1.0.0",
+  "silver_rule_version": "derm-silver-v1.0.0",
+  "missing_token": "MISSING",
+  "unresolved_token": "UNRESOLVED",
+  "diagnosis": {
+    "Melanoma, NOS": {"code": "MEL", "status": "APPROVED_DIRECT"},
+    "Nevus": {"code": "NV", "status": "APPROVED_DIRECT"},
+    "Basal cell carcinoma": {"code": "BCC", "status": "APPROVED_DIRECT"},
+    "Squamous cell carcinoma, NOS": {"code": "SCC", "status": "APPROVED_DIRECT"},
+    "Solar or actinic keratosis": {"code": "AK", "status": "APPROVED_DIRECT"},
+    "Dermatofibroma": {"code": "DF", "status": "APPROVED_DIRECT"},
+    "Pigmented benign keratosis": {"code": "UNRESOLVED", "candidate_code": "BKL", "status": "REVIEW_REQUIRED"},
+    "Seborrheic keratosis": {"code": "UNRESOLVED", "candidate_code": "BKL", "status": "REVIEW_REQUIRED"},
+    "Solar lentigo": {"code": "UNRESOLVED", "candidate_code": "BKL", "status": "REVIEW_REQUIRED"},
+    "Lichen planus like keratosis": {"code": "UNRESOLVED", "candidate_code": "BKL", "status": "REVIEW_REQUIRED"}
+  },
+  "image_type": {
+    "dermoscopic": "DERMOSCOPIC",
+    "clinical: overview": "CLINICAL_OVERVIEW",
+    "clinical: close-up": "CLINICAL_CLOSE_UP"
+  },
+  "recorded_sex": {"female": "FEMALE", "male": "MALE"},
+  "fitzpatrick_allowed": ["I", "II", "III", "IV", "V", "VI"],
+  "age_groups": [
+    {"minimum": 0, "maximum_exclusive": 18, "label": "00-17"},
+    {"minimum": 18, "maximum_exclusive": 30, "label": "18-29"},
+    {"minimum": 30, "maximum_exclusive": 45, "label": "30-44"},
+    {"minimum": 45, "maximum_exclusive": 60, "label": "45-59"},
+    {"minimum": 60, "maximum_exclusive": 75, "label": "60-74"},
+    {"minimum": 75, "maximum_exclusive": 200, "label": "75+"}
+  ]
+}

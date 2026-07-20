@@ -1,0 +1,198 @@
+[
+  {
+    "attempt": 1,
+    "duration_seconds": 0.02813,
+    "method": "GET",
+    "path": "/api/bronze/configs/persistent",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.013408,
+    "method": "GET",
+    "path": "/api/bronze/configs/persistent/14/executions",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.029308,
+    "method": "GET",
+    "path": "/api/equivalence/column-groups",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.069808,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.01842,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/5/executions",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.035158,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.015481,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/6/executions",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.039039,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.012956,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/7/executions",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.03181,
+    "method": "POST",
+    "path": "/api/delta-sharing/shares/search",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.026799,
+    "method": "POST",
+    "path": "/api/delta-sharing/shares/4/schemas/search",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.036845,
+    "method": "POST",
+    "path": "/api/delta-sharing/shares/4/schemas/4/tables/search",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.019084,
+    "method": "POST",
+    "path": "/api/delta-sharing/recipients/search",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.0241,
+    "method": "POST",
+    "path": "/api/delta-sharing/recipients/4/shares",
+    "status_code": 204
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.019761,
+    "method": "POST",
+    "path": "/api/delta-sharing/recipients/search",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.018881,
+    "method": "POST",
+    "path": "/api/delta-sharing/recipients/5/shares",
+    "status_code": 204
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.014427,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/5/executions",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.012875,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/6/executions",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 0.012462,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/7/executions",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 3.136798,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/5/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 2.802237,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/5/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 1.234742,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/5/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 2.641746,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/6/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 2.464901,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/6/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 1.291861,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/6/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 3.260974,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/7/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 3.200707,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/7/data",
+    "status_code": 200
+  },
+  {
+    "attempt": 1,
+    "duration_seconds": 1.403836,
+    "method": "GET",
+    "path": "/api/silver/persistent/configs/7/data",
+    "status_code": 200
+  }
+]

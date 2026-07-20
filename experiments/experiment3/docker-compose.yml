@@ -1,0 +1,86 @@
+# Isolated source databases for Dermatology Experiment 3.
+# The DataFabric stack itself is managed by the repository root compose file.
+
+services:
+  dermexp-ham-postgres:
+    image: postgres:15
+    container_name: dermexp_ham_postgres
+    environment:
+      POSTGRES_USER: ham_user
+      POSTGRES_PASSWORD: ham_pass
+      POSTGRES_DB: ham10000
+    volumes:
+      - dermexp_ham_data:/var/lib/postgresql/data
+      - ./raw/ham10000_metadata.csv:/data/ham10000_metadata.csv:ro
+      - ./source-db/ham/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5441:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ham_user -d ham10000"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - shared-network
+
+  dermexp-hiba-postgres:
+    image: postgres:15
+    container_name: dermexp_hiba_postgres
+    environment:
+      POSTGRES_USER: hiba_user
+      POSTGRES_PASSWORD: hiba_pass
+      POSTGRES_DB: hiba
+    volumes:
+      - dermexp_hiba_data:/var/lib/postgresql/data
+      - ./raw/hiba_metadata.csv:/data/hiba_metadata.csv:ro
+      - ./source-db/hiba/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5442:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hiba_user -d hiba"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - shared-network
+
+  dermexp-pad-mysql:
+    build:
+      context: .
+      dockerfile: source-db/pad/Dockerfile
+    image: dermexp-pad-mysql:8.0
+    container_name: dermexp_pad_mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: pad_root_pass
+      MYSQL_DATABASE: isic
+      MYSQL_USER: pad_user
+      MYSQL_PASSWORD: pad_pass
+    volumes:
+      - dermexp_pad_data:/var/lib/mysql
+      - ./source-db/pad/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "3311:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --local-infile=1
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -u root -ppad_root_pass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 15s
+    networks:
+      - shared-network
+
+volumes:
+  dermexp_ham_data:
+  dermexp_hiba_data:
+  dermexp_pad_data:
+
+networks:
+  shared-network:
+    external: true

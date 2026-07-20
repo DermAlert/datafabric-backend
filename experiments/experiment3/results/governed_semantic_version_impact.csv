@@ -1,0 +1,8 @@
+metric,catalog_v1_0,catalog_v1_1,difference
+total_records,15634,15634,0
+unresolved_diagnosis_records,1661,0,-1661
+BKL_records,0,1661,1661
+approved_dermoscopy_images,11368,12768,1400
+approved_dermoscopy_lesions,8886,9858,972
+changed_harmonized_diagnoses,0,1661,1661
+original_and_provenance_fields_preserved,True,True,0

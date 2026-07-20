@@ -1,0 +1,95 @@
+{
+  "catalog_version": "derm-semantic-v1.1.0",
+  "silver_rule_version": "derm-silver-v1.1.0",
+  "review_method": "LITERATURE_ASSISTED_AUTOMATED_REVIEW",
+  "review_date": "2026-07-14",
+  "review_artifact": "results/automated-mapping-review.md",
+  "missing_token": "MISSING",
+  "unresolved_token": "UNRESOLVED",
+  "diagnosis": {
+    "Melanoma, NOS": {
+      "code": "MEL",
+      "status": "APPROVED_DIRECT",
+      "evidence_ids": ["ISIC_DX", "HIBA_PRIMARY", "PAD_PRIMARY"]
+    },
+    "Nevus": {
+      "code": "NV",
+      "status": "APPROVED_DIRECT",
+      "evidence_ids": ["ISIC_DX", "HIBA_PRIMARY", "PAD_PRIMARY"]
+    },
+    "Basal cell carcinoma": {
+      "code": "BCC",
+      "status": "APPROVED_DIRECT",
+      "evidence_ids": ["ISIC_DX", "HIBA_PRIMARY", "PAD_PRIMARY"]
+    },
+    "Squamous cell carcinoma, NOS": {
+      "code": "SCC",
+      "status": "APPROVED_DIRECT",
+      "evidence_ids": ["ISIC_DX", "HIBA_PRIMARY", "PAD_PRIMARY"]
+    },
+    "Solar or actinic keratosis": {
+      "code": "AK",
+      "status": "APPROVED_DIRECT",
+      "evidence_ids": ["ISIC_DX", "HIBA_PRIMARY", "PAD_PRIMARY"],
+      "scope": "Analytical abbreviation of the observed ISIC diagnosis_3 label; it is not mapped to invasive SCC."
+    },
+    "Dermatofibroma": {
+      "code": "DF",
+      "status": "APPROVED_DIRECT",
+      "evidence_ids": ["ISIC_DX", "HIBA_PRIMARY"]
+    },
+    "Pigmented benign keratosis": {
+      "code": "BKL",
+      "candidate_code": "BKL",
+      "status": "APPROVED_ANALYTICAL_AGGREGATION",
+      "evidence_ids": ["HAM10000_PRIMARY", "ISIC_DX"],
+      "scope": "Legacy HAM10000-style benign keratosis-like analytical cohort only; preserve the original diagnosis."
+    },
+    "Seborrheic keratosis": {
+      "code": "BKL",
+      "candidate_code": "BKL",
+      "status": "APPROVED_ANALYTICAL_AGGREGATION",
+      "evidence_ids": ["HAM10000_PRIMARY", "HIBA_PRIMARY", "PAD_PRIMARY", "ISIC_DX"],
+      "scope": "Legacy HAM10000-style benign keratosis-like analytical cohort only; preserve the original diagnosis."
+    },
+    "Solar lentigo": {
+      "code": "BKL",
+      "candidate_code": "BKL",
+      "status": "APPROVED_ANALYTICAL_AGGREGATION",
+      "evidence_ids": ["HAM10000_PRIMARY", "HIBA_PRIMARY", "ISIC_DX"],
+      "scope": "Legacy HAM10000-style benign keratosis-like analytical cohort only; preserve the original diagnosis."
+    },
+    "Lichen planus like keratosis": {
+      "code": "BKL",
+      "candidate_code": "BKL",
+      "status": "APPROVED_ANALYTICAL_AGGREGATION",
+      "evidence_ids": ["HAM10000_PRIMARY", "HIBA_PRIMARY", "ISIC_DX"],
+      "scope": "Legacy HAM10000-style benign keratosis-like analytical cohort only; preserve the original diagnosis."
+    }
+  },
+  "image_type": {
+    "dermoscopic": "DERMOSCOPIC",
+    "clinical: overview": "CLINICAL_OVERVIEW",
+    "clinical: close-up": "CLINICAL_CLOSE_UP"
+  },
+  "recorded_sex": {
+    "female": "FEMALE",
+    "male": "MALE"
+  },
+  "fitzpatrick_allowed": [
+    "I",
+    "II",
+    "III",
+    "IV",
+    "V",
+    "VI"
+  ],
+  "age_groups": [
+    {"minimum": 0, "maximum_exclusive": 18, "label": "00-17"},
+    {"minimum": 18, "maximum_exclusive": 30, "label": "18-29"},
+    {"minimum": 30, "maximum_exclusive": 45, "label": "30-44"},
+    {"minimum": 45, "maximum_exclusive": 60, "label": "45-59"},
+    {"minimum": 60, "maximum_exclusive": 75, "label": "60-74"},
+    {"minimum": 75, "maximum_exclusive": 200, "label": "75+"}
+  ]
+}
