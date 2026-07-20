@@ -18,10 +18,6 @@ The evaluation artifacts are documented in:
 - [Experiment 2 — Semantic Retrieval and Normalization](./experiments/experiment%202/README.md)
 - [Experiment 3 — Governed Dermatology Data Integration](./experiments/experiment3/README.md)
 
-## Accepted paper
-
-[DataFabric-DermAlert: A Tool for Federated Health Data Integration and Fairness-Aware Dataset Construction](./paper.pdf)
-
 ## Services
 
 | Service | What it does | Host port(s) |
