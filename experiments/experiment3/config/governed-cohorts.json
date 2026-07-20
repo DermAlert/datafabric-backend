@@ -1,0 +1,87 @@
+{
+  "protocol_version": "derm-governed-cohorts-v1.0.0",
+  "frozen_on": "2026-07-15",
+  "malignant_codes": ["MEL", "BCC", "SCC"],
+  "histopathology_value": "histopathology",
+  "known_phototypes": ["I", "II", "III", "IV", "V", "VI"],
+  "subgroup_minimum_patients": 30,
+  "split": {
+    "method": "sha256_modulo_10000",
+    "train_upper_exclusive": 7000,
+    "validation_upper_exclusive": 8500,
+    "test_upper_exclusive": 10000
+  },
+  "conditions": [
+    {
+      "id": "G0_RAW",
+      "name": "Raw integrated image union",
+      "materialized_by": "existing_bronze",
+      "purpose": "Naive image-level baseline preserving all input records"
+    },
+    {
+      "id": "G1_SEMANTIC",
+      "name": "Full harmonized audit",
+      "materialized_by": "existing_silver_v1_1",
+      "purpose": "Semantic normalization with provenance and original values"
+    },
+    {
+      "id": "G2_DERM_CANCER_HISTO",
+      "name": "Histopathology-confirmed dermoscopic cancer cohort",
+      "backend_name": "dermexp3_governed_derm_cancer_histo_v1",
+      "purpose": "Diagnosis-oriented dermoscopy dataset construction",
+      "rules": [
+        "image_type_harmonized = DERMOSCOPIC",
+        "diagnosis_harmonized IN (MEL, BCC, SCC)",
+        "diagnosis_confirm_type = histopathology"
+      ],
+      "backend_filter": {
+        "logic": "AND",
+        "conditions": [
+          {"column_name": "image_type_harmonized", "operator": "=", "value": "DERMOSCOPIC"},
+          {"column_name": "diagnosis_harmonized", "operator": "IN", "value": ["MEL", "BCC", "SCC"]},
+          {"column_name": "diagnosis_confirm_type", "operator": "=", "value": "histopathology"}
+        ]
+      }
+    },
+    {
+      "id": "G3_CLINICAL_CANCER_PHOTOTYPE",
+      "name": "Clinical cancer cohort with recorded phototype",
+      "backend_name": "dermexp3_governed_clinical_cancer_phototype_v1",
+      "purpose": "Patient-level subgroup-evidence audit",
+      "rules": [
+        "image_type_harmonized IN (CLINICAL_OVERVIEW, CLINICAL_CLOSE_UP)",
+        "diagnosis_harmonized IN (MEL, BCC, SCC)",
+        "diagnosis_confirm_type = histopathology",
+        "fitzpatrick_skin_type_harmonized IN (I, II, III, IV, V, VI)"
+      ],
+      "backend_filter": {
+        "logic": "AND",
+        "conditions": [
+          {"column_name": "image_type_harmonized", "operator": "IN", "value": ["CLINICAL_OVERVIEW", "CLINICAL_CLOSE_UP"]},
+          {"column_name": "diagnosis_harmonized", "operator": "IN", "value": ["MEL", "BCC", "SCC"]},
+          {"column_name": "diagnosis_confirm_type", "operator": "=", "value": "histopathology"},
+          {"column_name": "fitzpatrick_skin_type_harmonized", "operator": "IN", "value": ["I", "II", "III", "IV", "V", "VI"]}
+        ]
+      }
+    },
+    {
+      "id": "G4_CC_BY_POLICY",
+      "name": "Experiment-defined CC-BY allowlist view",
+      "backend_name": "dermexp3_governed_cc_by_policy_v1",
+      "purpose": "Demonstrate row-level license provenance and an exact-label release policy without legal interpretation",
+      "rules": ["copyright_license = CC-BY"],
+      "backend_filter": {
+        "logic": "AND",
+        "conditions": [
+          {"column_name": "copyright_license", "operator": "=", "value": "CC-BY"}
+        ]
+      }
+    }
+  ],
+  "interpretation_constraints": [
+    "The phototype threshold is a protocol rule, not a native clinical decision made by DataFabric.",
+    "The CC-BY allowlist is an experiment-defined exact-label policy, not legal advice or a general license-compatibility conclusion.",
+    "Multiple images from one lesion or patient are not statistically independent observations.",
+    "No classifier effectiveness or clinical fairness claim is evaluated."
+  ]
+}

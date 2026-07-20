@@ -1,0 +1,19 @@
+source,phototype,patients,minimum_patients,eligible_for_descriptive_reporting,shortfall
+HIBA Skin Lesions,I,10,30,False,20
+HIBA Skin Lesions,II,146,30,True,0
+HIBA Skin Lesions,III,8,30,False,22
+HIBA Skin Lesions,IV,0,30,False,30
+HIBA Skin Lesions,V,0,30,False,30
+HIBA Skin Lesions,VI,0,30,False,30
+PAD-UFES-20,I,67,30,True,0
+PAD-UFES-20,II,390,30,True,0
+PAD-UFES-20,III,163,30,True,0
+PAD-UFES-20,IV,19,30,False,11
+PAD-UFES-20,V,4,30,False,26
+PAD-UFES-20,VI,0,30,False,30
+ALL_SOURCES,I,77,30,True,0
+ALL_SOURCES,II,536,30,True,0
+ALL_SOURCES,III,171,30,True,0
+ALL_SOURCES,IV,19,30,False,11
+ALL_SOURCES,V,4,30,False,26
+ALL_SOURCES,VI,0,30,False,30

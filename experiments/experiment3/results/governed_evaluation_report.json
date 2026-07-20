@@ -1,0 +1,118 @@
+{
+  "artifacts": {
+    "funnel": "results/governed_cohort_funnel.csv",
+    "granularity": "results/governed_granularity_metrics.csv",
+    "leakage": "results/governed_split_leakage.csv",
+    "phototype_sufficiency": "results/governed_phototype_sufficiency.csv",
+    "rule_compliance": "results/governed_rule_compliance.csv",
+    "semantic_impact": "results/governed_semantic_version_impact.csv"
+  },
+  "conditions": [
+    {
+      "condition": "G0_RAW",
+      "images": 15634,
+      "lesion_id_coverage": 1.0,
+      "lesions": 11975,
+      "license_coverage": 1.0,
+      "name": "Raw integrated image union",
+      "patient_id_coverage": 0.250352,
+      "patients": 1996,
+      "retention_percent": 100.0,
+      "source_provenance_coverage": 1.0,
+      "sources": 3
+    },
+    {
+      "condition": "G1_SEMANTIC",
+      "images": 15634,
+      "lesion_id_coverage": 1.0,
+      "lesions": 11975,
+      "license_coverage": 1.0,
+      "name": "Full harmonized audit",
+      "patient_id_coverage": 0.250352,
+      "patients": 1996,
+      "retention_percent": 100.0,
+      "source_provenance_coverage": 1.0,
+      "sources": 3
+    },
+    {
+      "condition": "G1_KNOWN_DIAGNOSIS",
+      "images": 15403,
+      "lesion_id_coverage": 1.0,
+      "lesions": 11802,
+      "license_coverage": 1.0,
+      "name": "Known harmonized diagnosis",
+      "patient_id_coverage": 0.250795,
+      "patients": 1980,
+      "retention_percent": 98.522,
+      "source_provenance_coverage": 1.0,
+      "sources": 3
+    },
+    {
+      "condition": "G1_DERM_KNOWN_HISTO",
+      "images": 6892,
+      "lesion_id_coverage": 1.0,
+      "lesions": 4305,
+      "license_coverage": 1.0,
+      "name": "Dermoscopy, known diagnosis, histopathology",
+      "patient_id_coverage": 0.108532,
+      "patients": 500,
+      "retention_percent": 44.083,
+      "source_provenance_coverage": 1.0,
+      "sources": 2
+    },
+    {
+      "condition": "G2_DERM_CANCER_HISTO",
+      "images": 2689,
+      "lesion_id_coverage": 1.0,
+      "lesions": 1768,
+      "license_coverage": 1.0,
+      "name": "Dermoscopic cancer, histopathology",
+      "patient_id_coverage": 0.198215,
+      "patients": 361,
+      "retention_percent": 17.2,
+      "source_provenance_coverage": 1.0,
+      "sources": 2
+    },
+    {
+      "condition": "G3_CLINICAL_CANCER_PHOTOTYPE",
+      "images": 1299,
+      "lesion_id_coverage": 1.0,
+      "lesions": 1042,
+      "license_coverage": 1.0,
+      "name": "Clinical cancer with phototype",
+      "patient_id_coverage": 1.0,
+      "patients": 807,
+      "retention_percent": 8.309,
+      "source_provenance_coverage": 1.0,
+      "sources": 2
+    },
+    {
+      "condition": "G4_CC_BY_POLICY",
+      "images": 3914,
+      "lesion_id_coverage": 1.0,
+      "lesions": 3137,
+      "license_coverage": 1.0,
+      "name": "Exact CC-BY allowlist view",
+      "patient_id_coverage": 1.0,
+      "patients": 1996,
+      "retention_percent": 25.035,
+      "source_provenance_coverage": 1.0,
+      "sources": 2
+    }
+  ],
+  "frozen_on": "2026-07-15",
+  "interpretation_constraints": [
+    "The phototype threshold is a protocol rule, not a native clinical decision made by DataFabric.",
+    "The CC-BY allowlist is an experiment-defined exact-label policy, not legal advice or a general license-compatibility conclusion.",
+    "Multiple images from one lesion or patient are not statistically independent observations.",
+    "No classifier effectiveness or clinical fairness claim is evaluated."
+  ],
+  "local_reproducible": true,
+  "protocol_version": "derm-governed-cohorts-v1.0.0",
+  "semantic_change": {
+    "changed_records": 1661,
+    "original_and_provenance_fields_preserved": true
+  },
+  "source_records": 15634,
+  "subgroup_minimum_patients": 30
+}

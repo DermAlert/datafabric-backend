@@ -1,0 +1,28 @@
+{
+  "condition_c0": {
+    "columns": 29,
+    "path": "derived/c0_federated.csv",
+    "records": 15634,
+    "sha256": "d3bcf2aecff98e90452d338fc2c3fe1f5929a95834c32c848fa84f08eef6a324"
+  },
+  "condition_c1": {
+    "columns": 41,
+    "path": "derived/c1_silver.csv",
+    "records": 15634,
+    "sha256": "0b3482087dde63654dea89a01ad5f3038a2248df65f3bd330a7309f9ac5167c3"
+  },
+  "mapping_config_sha256": "3368dd2b7e31c1bce4e920137962021031e0d14d9ae772bcdda0da6931079196",
+  "semantic_catalog_version": "derm-semantic-v1.1.0",
+  "silver_rule_version": "derm-silver-v1.1.0",
+  "source_config_sha256": "c9ff56719c8dc9d3fe2240083a6f5eca6d95cf6fc8fbbac3e7a759b7f8740d28",
+  "source_rows": {
+    "ham10000": 11720,
+    "hiba": 1616,
+    "pad_ufes_20": 2298
+  },
+  "source_sha256": {
+    "ham10000": "d836a9fefa617204aae502d50b55299edfbfe1cb690a4b1a6c7e50803783229f",
+    "hiba": "9593166a1f3767679c0d69554013906ab096d171ad15914fcdf3decb5dd67b47",
+    "pad_ufes_20": "1f5f12758931a73068179bfe0b5eb9c0e03f2e605cf2499eb1d39325138bd8d9"
+  }
+}

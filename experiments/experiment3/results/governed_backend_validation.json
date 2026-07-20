@@ -1,0 +1,230 @@
+{
+  "all_conditions_reproducible": true,
+  "conditions": {
+    "G2_DERM_CANCER_HISTO": {
+      "all_versions_match_independent_oracle": true,
+      "reproducible": true,
+      "row_counts_identical": true,
+      "semantic_hashes_identical": true,
+      "three_versions": true,
+      "versions": [
+        {
+          "condition": "G2_DERM_CANCER_HISTO",
+          "config_id": 5,
+          "delta_version": 0,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 16,
+          "expected_rows": 2689,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 3.003,
+          "reported_total_rows": 2689,
+          "rows": 2689,
+          "semantic_sha256": "aee536ebeba3a96f7e1eef6092bc438c067e10a02768755a59e8498db7f5afbe",
+          "source_counts": {
+            "HAM10000": 2156,
+            "HIBA Skin Lesions": 533
+          },
+          "unexpected_ids": 0
+        },
+        {
+          "condition": "G2_DERM_CANCER_HISTO",
+          "config_id": 5,
+          "delta_version": 1,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 19,
+          "expected_rows": 2689,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 2.726,
+          "reported_total_rows": 2689,
+          "rows": 2689,
+          "semantic_sha256": "aee536ebeba3a96f7e1eef6092bc438c067e10a02768755a59e8498db7f5afbe",
+          "source_counts": {
+            "HAM10000": 2156,
+            "HIBA Skin Lesions": 533
+          },
+          "unexpected_ids": 0
+        },
+        {
+          "condition": "G2_DERM_CANCER_HISTO",
+          "config_id": 5,
+          "delta_version": 2,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 20,
+          "expected_rows": 2689,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 1.126,
+          "reported_total_rows": 2689,
+          "rows": 2689,
+          "semantic_sha256": "aee536ebeba3a96f7e1eef6092bc438c067e10a02768755a59e8498db7f5afbe",
+          "source_counts": {
+            "HAM10000": 2156,
+            "HIBA Skin Lesions": 533
+          },
+          "unexpected_ids": 0
+        }
+      ]
+    },
+    "G3_CLINICAL_CANCER_PHOTOTYPE": {
+      "all_versions_match_independent_oracle": true,
+      "reproducible": true,
+      "row_counts_identical": true,
+      "semantic_hashes_identical": true,
+      "three_versions": true,
+      "versions": [
+        {
+          "condition": "G3_CLINICAL_CANCER_PHOTOTYPE",
+          "config_id": 6,
+          "delta_version": 0,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 17,
+          "expected_rows": 1299,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 2.601,
+          "reported_total_rows": 1299,
+          "rows": 1299,
+          "semantic_sha256": "68fbc1cea596aa0d416b83ac56456814a94fb6be54266bfc88ca4d2232e866ab",
+          "source_counts": {
+            "HIBA Skin Lesions": 210,
+            "PAD-UFES-20": 1089
+          },
+          "unexpected_ids": 0
+        },
+        {
+          "condition": "G3_CLINICAL_CANCER_PHOTOTYPE",
+          "config_id": 6,
+          "delta_version": 1,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 21,
+          "expected_rows": 1299,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 2.42,
+          "reported_total_rows": 1299,
+          "rows": 1299,
+          "semantic_sha256": "68fbc1cea596aa0d416b83ac56456814a94fb6be54266bfc88ca4d2232e866ab",
+          "source_counts": {
+            "HIBA Skin Lesions": 210,
+            "PAD-UFES-20": 1089
+          },
+          "unexpected_ids": 0
+        },
+        {
+          "condition": "G3_CLINICAL_CANCER_PHOTOTYPE",
+          "config_id": 6,
+          "delta_version": 2,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 22,
+          "expected_rows": 1299,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 1.226,
+          "reported_total_rows": 1299,
+          "rows": 1299,
+          "semantic_sha256": "68fbc1cea596aa0d416b83ac56456814a94fb6be54266bfc88ca4d2232e866ab",
+          "source_counts": {
+            "HIBA Skin Lesions": 210,
+            "PAD-UFES-20": 1089
+          },
+          "unexpected_ids": 0
+        }
+      ]
+    },
+    "G4_CC_BY_POLICY": {
+      "all_versions_match_independent_oracle": true,
+      "reproducible": true,
+      "row_counts_identical": true,
+      "semantic_hashes_identical": true,
+      "three_versions": true,
+      "versions": [
+        {
+          "condition": "G4_CC_BY_POLICY",
+          "config_id": 7,
+          "delta_version": 0,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 18,
+          "expected_rows": 3914,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 3.057,
+          "reported_total_rows": 3914,
+          "rows": 3914,
+          "semantic_sha256": "2d1730a56c9a9ee10bfa83ce9b8c09b77fe40cbcd76d40b2f82867124f7ced05",
+          "source_counts": {
+            "HIBA Skin Lesions": 1616,
+            "PAD-UFES-20": 2298
+          },
+          "unexpected_ids": 0
+        },
+        {
+          "condition": "G4_CC_BY_POLICY",
+          "config_id": 7,
+          "delta_version": 1,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 23,
+          "expected_rows": 3914,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 3.042,
+          "reported_total_rows": 3914,
+          "rows": 3914,
+          "semantic_sha256": "2d1730a56c9a9ee10bfa83ce9b8c09b77fe40cbcd76d40b2f82867124f7ced05",
+          "source_counts": {
+            "HIBA Skin Lesions": 1616,
+            "PAD-UFES-20": 2298
+          },
+          "unexpected_ids": 0
+        },
+        {
+          "condition": "G4_CC_BY_POLICY",
+          "config_id": 7,
+          "delta_version": 2,
+          "dynamic_columns_excluded": [
+            "_silver_timestamp",
+            "_transform_config_id"
+          ],
+          "exact_oracle_agreement": true,
+          "execution_id": 24,
+          "expected_rows": 3914,
+          "missing_expected_ids": 0,
+          "query_time_seconds": 1.275,
+          "reported_total_rows": 3914,
+          "rows": 3914,
+          "semantic_sha256": "2d1730a56c9a9ee10bfa83ce9b8c09b77fe40cbcd76d40b2f82867124f7ced05",
+          "source_counts": {
+            "HIBA Skin Lesions": 1616,
+            "PAD-UFES-20": 2298
+          },
+          "unexpected_ids": 0
+        }
+      ]
+    }
+  }
+}

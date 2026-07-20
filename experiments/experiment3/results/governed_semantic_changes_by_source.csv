@@ -1,0 +1,6 @@
+source_collection_name,diagnosis_original_level_3,diagnosis_harmonized,records
+HAM10000,Pigmented benign keratosis,BKL,1338
+HIBA Skin Lesions,Lichen planus like keratosis,BKL,2
+HIBA Skin Lesions,Seborrheic keratosis,BKL,68
+HIBA Skin Lesions,Solar lentigo,BKL,18
+PAD-UFES-20,Seborrheic keratosis,BKL,235

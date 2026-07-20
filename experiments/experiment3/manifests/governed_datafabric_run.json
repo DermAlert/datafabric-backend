@@ -1,0 +1,372 @@
+{
+  "all_backend_validations_passed": true,
+  "api_event_count": 28,
+  "base_url": "http://localhost:8004",
+  "bronze": {
+    "config_id": 14,
+    "delta_version": 0,
+    "name": "dermexp3_bronze_union_v2"
+  },
+  "catalog_version": "derm-semantic-v1.1.0",
+  "conditions": {
+    "G2_DERM_CANCER_HISTO": {
+      "backend_reproducible": true,
+      "config": {
+        "column_group_ids": [
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "filters": {
+          "conditions": [
+            {
+              "column_id": null,
+              "column_name": "image_type_harmonized",
+              "operator": "=",
+              "value": "DERMOSCOPIC",
+              "value_max": null,
+              "value_min": null
+            },
+            {
+              "column_id": null,
+              "column_name": "diagnosis_harmonized",
+              "operator": "IN",
+              "value": [
+                "MEL",
+                "BCC",
+                "SCC"
+              ],
+              "value_max": null,
+              "value_min": null
+            },
+            {
+              "column_id": null,
+              "column_name": "diagnosis_confirm_type",
+              "operator": "=",
+              "value": "histopathology",
+              "value_max": null,
+              "value_min": null
+            }
+          ],
+          "logic": "AND"
+        },
+        "id": 5,
+        "name": "dermexp3_governed_derm_cancer_histo_v1",
+        "source_bronze_config_id": 14,
+        "source_bronze_version": 0
+      },
+      "executions": [
+        {
+          "delta_version": 0,
+          "finished_at": "2026-07-16T02:01:42.365365Z",
+          "id": 16,
+          "rows_output": 2689,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:01:18.079464Z",
+          "status": "success"
+        },
+        {
+          "delta_version": 1,
+          "finished_at": "2026-07-16T02:03:17.054487Z",
+          "id": 19,
+          "rows_output": 2689,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:03:09.980358Z",
+          "status": "success"
+        },
+        {
+          "delta_version": 2,
+          "finished_at": "2026-07-16T02:03:25.086802Z",
+          "id": 20,
+          "rows_output": 2689,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:03:17.143530Z",
+          "status": "success"
+        }
+      ]
+    },
+    "G3_CLINICAL_CANCER_PHOTOTYPE": {
+      "backend_reproducible": true,
+      "config": {
+        "column_group_ids": [
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "filters": {
+          "conditions": [
+            {
+              "column_id": null,
+              "column_name": "image_type_harmonized",
+              "operator": "IN",
+              "value": [
+                "CLINICAL_OVERVIEW",
+                "CLINICAL_CLOSE_UP"
+              ],
+              "value_max": null,
+              "value_min": null
+            },
+            {
+              "column_id": null,
+              "column_name": "diagnosis_harmonized",
+              "operator": "IN",
+              "value": [
+                "MEL",
+                "BCC",
+                "SCC"
+              ],
+              "value_max": null,
+              "value_min": null
+            },
+            {
+              "column_id": null,
+              "column_name": "diagnosis_confirm_type",
+              "operator": "=",
+              "value": "histopathology",
+              "value_max": null,
+              "value_min": null
+            },
+            {
+              "column_id": null,
+              "column_name": "fitzpatrick_skin_type_harmonized",
+              "operator": "IN",
+              "value": [
+                "I",
+                "II",
+                "III",
+                "IV",
+                "V",
+                "VI"
+              ],
+              "value_max": null,
+              "value_min": null
+            }
+          ],
+          "logic": "AND"
+        },
+        "id": 6,
+        "name": "dermexp3_governed_clinical_cancer_phototype_v1",
+        "source_bronze_config_id": 14,
+        "source_bronze_version": 0
+      },
+      "executions": [
+        {
+          "delta_version": 0,
+          "finished_at": "2026-07-16T02:03:00.640069Z",
+          "id": 17,
+          "rows_output": 1299,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:02:52.689389Z",
+          "status": "success"
+        },
+        {
+          "delta_version": 1,
+          "finished_at": "2026-07-16T02:03:30.258344Z",
+          "id": 21,
+          "rows_output": 1299,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:03:25.164788Z",
+          "status": "success"
+        },
+        {
+          "delta_version": 2,
+          "finished_at": "2026-07-16T02:03:37.348801Z",
+          "id": 22,
+          "rows_output": 1299,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:03:30.330432Z",
+          "status": "success"
+        }
+      ]
+    },
+    "G4_CC_BY_POLICY": {
+      "backend_reproducible": true,
+      "config": {
+        "column_group_ids": [
+          13,
+          14,
+          15,
+          16,
+          17
+        ],
+        "filters": {
+          "conditions": [
+            {
+              "column_id": null,
+              "column_name": "copyright_license",
+              "operator": "=",
+              "value": "CC-BY",
+              "value_max": null,
+              "value_min": null
+            }
+          ],
+          "logic": "AND"
+        },
+        "id": 7,
+        "name": "dermexp3_governed_cc_by_policy_v1",
+        "source_bronze_config_id": 14,
+        "source_bronze_version": 0
+      },
+      "executions": [
+        {
+          "delta_version": 0,
+          "finished_at": "2026-07-16T02:03:09.155167Z",
+          "id": 18,
+          "rows_output": 3914,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:03:00.889769Z",
+          "status": "success"
+        },
+        {
+          "delta_version": 1,
+          "finished_at": "2026-07-16T02:03:43.344277Z",
+          "id": 23,
+          "rows_output": 3914,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:03:37.406352Z",
+          "status": "success"
+        },
+        {
+          "delta_version": 2,
+          "finished_at": "2026-07-16T02:03:51.537694Z",
+          "id": 24,
+          "rows_output": 3914,
+          "rows_processed": 15634,
+          "started_at": "2026-07-16T02:03:43.417784Z",
+          "status": "success"
+        }
+      ]
+    }
+  },
+  "protocol_version": "derm-governed-cohorts-v1.0.0",
+  "semantic_groups": [
+    {
+      "id": 13,
+      "name": "diagnosis_harmonized"
+    },
+    {
+      "id": 14,
+      "name": "recorded_sex"
+    },
+    {
+      "id": 15,
+      "name": "image_type_harmonized"
+    },
+    {
+      "id": 16,
+      "name": "fitzpatrick_skin_type_harmonized"
+    },
+    {
+      "id": 17,
+      "name": "anatom_site_harmonized"
+    }
+  ],
+  "sharing": {
+    "authorized_recipient": {
+      "id": 4,
+      "identifier": "dermexp3_external_reviewer_v1",
+      "name": "dermexp3_external_reviewer_v1"
+    },
+    "schema": {
+      "id": 4,
+      "name": "cohorts"
+    },
+    "share": {
+      "id": 4,
+      "name": "dermexp3_governed_release_v1",
+      "status": "active"
+    },
+    "tables": {
+      "G2_DERM_CANCER_HISTO": {
+        "id": 4,
+        "pinned_delta_version": 0,
+        "protocol_table_name": "derm_cancer_histo",
+        "silver_persistent_config_id": 5
+      },
+      "G3_CLINICAL_CANCER_PHOTOTYPE": {
+        "id": 5,
+        "pinned_delta_version": 0,
+        "protocol_table_name": "clinical_cancer_phototype",
+        "silver_persistent_config_id": 6
+      },
+      "G4_CC_BY_POLICY": {
+        "id": 6,
+        "pinned_delta_version": 0,
+        "protocol_table_name": "cc_by_policy",
+        "silver_persistent_config_id": 7
+      }
+    },
+    "unassigned_control": {
+      "id": 5,
+      "identifier": "dermexp3_unassigned_control_v1",
+      "name": "dermexp3_unassigned_control_v1"
+    },
+    "validation": {
+      "access_control_enforced": true,
+      "authorized_share_listing_status": 200,
+      "authorized_share_visible": true,
+      "authorized_table_count": 3,
+      "authorized_table_listing_status": 200,
+      "delivery_validated": true,
+      "invalid_token_status": 401,
+      "pinned_release_independent_of_producer_head": true,
+      "producer_latest_versions": {
+        "G2_DERM_CANCER_HISTO": 2,
+        "G3_CLINICAL_CANCER_PHOTOTYPE": 2,
+        "G4_CC_BY_POLICY": 2
+      },
+      "sensitive_values_persisted": false,
+      "tables": {
+        "G2_DERM_CANCER_HISTO": {
+          "declared_bytes": 60798,
+          "delta_version_header": 0,
+          "file_action_count": 1,
+          "metadata_status": 200,
+          "pinned_version_served": true,
+          "protocol_table_name": "derm_cancer_histo",
+          "query_status": 200,
+          "reported_version": 0,
+          "sample_download_status": 206,
+          "sample_has_parquet_magic": true,
+          "schema_field_count": 38,
+          "version_status": 200
+        },
+        "G3_CLINICAL_CANCER_PHOTOTYPE": {
+          "declared_bytes": 50542,
+          "delta_version_header": 0,
+          "file_action_count": 1,
+          "metadata_status": 200,
+          "pinned_version_served": true,
+          "protocol_table_name": "clinical_cancer_phototype",
+          "query_status": 200,
+          "reported_version": 0,
+          "sample_download_status": 206,
+          "sample_has_parquet_magic": true,
+          "schema_field_count": 38,
+          "version_status": 200
+        },
+        "G4_CC_BY_POLICY": {
+          "declared_bytes": 118407,
+          "delta_version_header": 0,
+          "file_action_count": 1,
+          "metadata_status": 200,
+          "pinned_version_served": true,
+          "protocol_table_name": "cc_by_policy",
+          "query_status": 200,
+          "reported_version": 0,
+          "sample_download_status": 206,
+          "sample_has_parquet_magic": true,
+          "schema_field_count": 38,
+          "version_status": 200
+        }
+      },
+      "unassigned_recipient_status": 404
+    }
+  },
+  "sharing_validation_passed": true,
+  "target_runs_per_condition": 3
+}

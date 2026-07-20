@@ -1,0 +1,5 @@
+source,images,lesions,patients,extra_images_vs_lesions,image_to_lesion_inflation_percent,multi_image_lesions,multi_image_patients,max_images_per_lesion,max_images_per_patient
+HAM10000,11720,8838,0,2882,32.609,2221,0,6,
+HIBA Skin Lesions,1616,1246,623,370,29.695,320,346,6,63.0
+PAD-UFES-20,2298,1891,1373,407,21.523,361,544,6,10.0
+ALL_SOURCES,15634,11975,1996,3659,30.555,2902,890,6,63.0

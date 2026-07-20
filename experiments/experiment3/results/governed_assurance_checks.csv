@@ -1,0 +1,4 @@
+Condition,Backend versions,Stable semantic hash,Exact oracle agreement,Mean materialization (s),Mean versioned read (s),Producer/shared version,Parquet delivered
+G2,3,True,True,13.1,2.28,2 / 0,True
+G3,3,True,True,6.69,2.08,2 / 0,True
+G4,3,True,True,7.44,2.46,2 / 0,True

@@ -1,0 +1,40 @@
+{
+  "manifest_version": "1.0",
+  "snapshot_date": "2026-07-13",
+  "archive": "ISIC Archive",
+  "sources": [
+    {
+      "key": "ham10000",
+      "collection_id": 212,
+      "collection_name": "HAM10000",
+      "collection_url": "https://api.isic-archive.com/collections/212/",
+      "metadata_url": "https://api.isic-archive.com/collections/212/metadata/",
+      "local_filename": "ham10000_metadata.csv",
+      "expected_records": 11720,
+      "license": "CC-BY-NC",
+      "role": "dermoscopy volume and diagnostic reference taxonomy"
+    },
+    {
+      "key": "hiba",
+      "collection_id": 251,
+      "collection_name": "HIBA Skin Lesions",
+      "collection_url": "https://api.isic-archive.com/collections/251/",
+      "metadata_url": "https://api.isic-archive.com/collections/251/metadata/",
+      "local_filename": "hiba_metadata.csv",
+      "expected_records": 1616,
+      "license": "CC-BY",
+      "role": "Argentinian patient, lesion, modality, and phototype metadata"
+    },
+    {
+      "key": "pad_ufes_20",
+      "collection_id": 406,
+      "collection_name": "PAD-UFES-20",
+      "collection_url": "https://api.isic-archive.com/collections/406/",
+      "metadata_url": "https://api.isic-archive.com/collections/406/metadata/",
+      "local_filename": "pad_ufes_20_metadata.csv",
+      "expected_records": 2298,
+      "license": "CC-BY",
+      "role": "Brazilian clinical smartphone, patient, lesion, and phototype metadata"
+    }
+  ]
+}
