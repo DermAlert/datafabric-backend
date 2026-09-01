@@ -8,6 +8,7 @@ x-airflow-common:
   environment:
     &airflow-common-env
     AIRFLOW__CORE__EXECUTOR: CeleryExecutor
+    AIRFLOW_UID: ${AIRFLOW_UID:-50000}
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://postgres:postgres@postgres-airflow/dermalert_airflow
     AIRFLOW__CELERY__RESULT_BACKEND: db+postgresql://postgres:postgres@postgres-airflow/dermalert_airflow
     AIRFLOW__CELERY__BROKER_URL: redis://:@redis:6379/0
@@ -57,7 +58,45 @@ services:
       bash -c "poetry run alembic upgrade head &&
       poetry run uvicorn app.main:app --workers 1 --host 0.0.0.0 --port 8000"
     env_file:
-      - .env
+      - path: .env
+        required: false
+    environment:
+      # Complete local defaults make a fresh checkout boot without creating an
+      # .env file. Values from an existing .env or shell still take precedence.
+      DATABASE_URL: ${DATABASE_URL:-postgresql+asyncpg://postgres:postgres@postgres-backend:5432/dermalert_backend}
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_POOL_MAX_OVERFLOW: ${DB_POOL_MAX_OVERFLOW:-20}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-minio:9000}
+      MINIO_EXTERNAL_ENDPOINT: ${MINIO_EXTERNAL_ENDPOINT:-localhost:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minio}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minio123}
+      MINIO_SECURE: ${MINIO_SECURE:-false}
+      TRINO_HOST: ${TRINO_HOST:-trino}
+      TRINO_PORT: ${TRINO_PORT:-8080}
+      TRINO_USER: ${TRINO_USER:-admin}
+      SPARK_MODE: ${SPARK_MODE:-standalone}
+      SPARK_MASTER: ${SPARK_MASTER:-spark://spark-master:7077}
+      SPARK_SHUFFLE_PARTITIONS: ${SPARK_SHUFFLE_PARTITIONS:-50}
+      SPARK_LOG_LEVEL: ${SPARK_LOG_LEVEL:-WARN}
+      AIRFLOW_API_URL: ${AIRFLOW_API_URL:-http://airflow-webserver:8080}
+      AIRFLOW_API_USER: ${AIRFLOW_API_USER:-airflow}
+      AIRFLOW_API_PASS: ${AIRFLOW_API_PASS:-airflow}
+      INTERNAL_METASTORE_BUCKET: ${INTERNAL_METASTORE_BUCKET:-datafabric-metastore}
+      BRONZE_BUCKET: ${BRONZE_BUCKET:-datafabric-bronze}
+      BRONZE_CATALOG: ${BRONZE_CATALOG:-bronze}
+      BRONZE_SCHEMA: ${BRONZE_SCHEMA:-default}
+      SILVER_BUCKET: ${SILVER_BUCKET:-datafabric-silver}
+      SILVER_CATALOG: ${SILVER_CATALOG:-silver}
+      SILVER_SCHEMA: ${SILVER_SCHEMA:-default}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:-datafabric-local-dev-encryption-key-v1}
+      # Development-safe defaults: the previous 4 GB driver + 6 GB worker,
+      # combined with Trino and Airflow, exhausted a 16 GB Docker VM at boot.
+      # COMPOSE_* variables still allow larger machines to opt in explicitly.
+      SPARK_DRIVER_MEMORY: ${COMPOSE_SPARK_DRIVER_MEMORY:-768m}
+      SPARK_EXECUTOR_MEMORY: ${COMPOSE_SPARK_EXECUTOR_MEMORY:-768m}
+      SPARK_POOL_SIZE: ${COMPOSE_SPARK_POOL_SIZE:-1}
+      THREAD_POOL_SIZE: ${COMPOSE_THREAD_POOL_SIZE:-10}
     volumes:
       - ./project:/usr/src/app
       # Persist Ivy/Maven JAR cache so Spark dependencies (delta-spark,
@@ -73,12 +112,219 @@ services:
     depends_on:
       postgres-backend:
         condition: service_healthy
+      cmpd-postgres:
+        condition: service_healthy
+      ida-mysql:
+        condition: service_healthy
+      reh-postgres:
+        condition: service_healthy
+      cdi-postgres:
+        condition: service_healthy
+      rfa-mysql:
+        condition: service_healthy
+      dermexp_ham_postgres:
+        condition: service_healthy
+      dermexp_hiba_postgres:
+        condition: service_healthy
+      dermexp_pad_mysql:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
       trino:
         condition: service_started
       spark-master:
         condition: service_healthy
+      spark-ivy-init:
+        condition: service_completed_successfully
     extra_hosts:
       - "localhost:host-gateway"
+    networks:
+      - shared-network
+
+  # --------------------------------------------------------------------------
+  # Reusable source databases. Their service names match the hosts stored in
+  # the bundled DataFabric snapshot, so no registration step is required.
+  # --------------------------------------------------------------------------
+  cmpd-postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: cmpd_user
+      POSTGRES_PASSWORD: cmpd_pass
+      POSTGRES_DB: cmpd_preventiva
+    volumes:
+      - cmpd_pgdata:/var/lib/postgresql/data
+      - ./experiments/hospitais/cmpd_postgres/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./experiments/hospitais/seeds/cmpd_postgres_bulk.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    ports:
+      - "5435:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cmpd_user -d cmpd_preventiva"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - shared-network
+
+  ida-mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: ida_root_pass
+    volumes:
+      - ida_mysqldata:/var/lib/mysql
+      - ./experiments/hospitais/ida_mysql/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./experiments/hospitais/seeds/ida_mysql_bulk.sql:/docker-entrypoint-initdb.d/02_seed.sql:ro
+    ports:
+      - "3307:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --innodb-buffer-pool-size=64M
+      - --performance-schema=OFF
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -u root -pida_root_pass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - shared-network
+
+  reh-postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: reh_user
+      POSTGRES_PASSWORD: reh_pass
+      POSTGRES_DB: reh_emergencias
+    volumes:
+      - reh_pgdata:/var/lib/postgresql/data
+      - ./experiments/rede_federada/reh_postgres/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5436:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reh_user -d reh_emergencias"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - shared-network
+
+  cdi-postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: cdi_user
+      POSTGRES_PASSWORD: cdi_pass
+      POSTGRES_DB: cdi_imagem
+    volumes:
+      - cdi_pgdata:/var/lib/postgresql/data
+      - ./experiments/rede_federada/cdi_postgres/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5437:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cdi_user -d cdi_imagem"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - shared-network
+
+  rfa-mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: rfa_root_pass
+    volumes:
+      - rfa_mysqldata:/var/lib/mysql
+      - ./experiments/rede_federada/rfa_mysql/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "3308:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --innodb-buffer-pool-size=64M
+      - --performance-schema=OFF
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -u root -prfa_root_pass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+    networks:
+      - shared-network
+
+  dermexp_ham_postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: ham_user
+      POSTGRES_PASSWORD: ham_pass
+      POSTGRES_DB: ham10000
+    volumes:
+      - dermexp_ham_pgdata:/var/lib/postgresql/data
+      - ./experiments/experiment3/raw/ham10000_metadata.csv:/data/ham10000_metadata.csv:ro
+      - ./experiments/experiment3/source-db/ham/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5441:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ham_user -d ham10000"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - shared-network
+
+  dermexp_hiba_postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: hiba_user
+      POSTGRES_PASSWORD: hiba_pass
+      POSTGRES_DB: hiba
+    volumes:
+      - dermexp_hiba_pgdata:/var/lib/postgresql/data
+      - ./experiments/experiment3/raw/hiba_metadata.csv:/data/hiba_metadata.csv:ro
+      - ./experiments/experiment3/source-db/hiba/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5442:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hiba_user -d hiba"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    networks:
+      - shared-network
+
+  dermexp_pad_mysql:
+    build:
+      context: ./experiments/experiment3
+      dockerfile: source-db/pad/Dockerfile
+    image: datafabric-pad-mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: pad_root_pass
+      MYSQL_DATABASE: isic
+      MYSQL_USER: pad_user
+      MYSQL_PASSWORD: pad_pass
+    volumes:
+      - dermexp_pad_mysqldata:/var/lib/mysql
+      - ./experiments/experiment3/source-db/pad/01_init.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "3311:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+      - --local-infile=1
+      - --innodb-buffer-pool-size=64M
+      - --performance-schema=OFF
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -u root -ppad_root_pass --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
     networks:
       - shared-network
 
@@ -128,6 +374,22 @@ services:
     networks:
       - shared-network
 
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint: /bin/sh
+    command:
+      - -c
+      - |
+        mc alias set local http://minio:9000 minio minio123
+        mc mb --ignore-existing local/datafabric-bronze
+        mc mb --ignore-existing local/datafabric-silver
+        mc mb --ignore-existing local/datafabric-metastore
+    networks:
+      - shared-network
+
   postgres-airflow:
     image: postgres:18.1
     ports: 
@@ -136,7 +398,7 @@ services:
     command: >
       postgres
       -c max_connections=50
-      -c shared_buffers=256MB
+      -c shared_buffers=128MB
       -c work_mem=8MB
       -c jit=off
     environment:
@@ -169,8 +431,8 @@ services:
       -c max_connections=200
       -c io_method=worker
       -c io_workers=4
-      -c shared_buffers=512MB
-      -c work_mem=16MB
+      -c shared_buffers=256MB
+      -c work_mem=8MB
       -c jit=off
     environment:
       - POSTGRES_USER=postgres
@@ -178,6 +440,9 @@ services:
       - POSTGRES_DB=dermalert_backend
     volumes:
       - backend_pgdata:/var/lib/postgresql
+      # PostgreSQL executes these files only when the named volume is empty.
+      # The snapshot contains an anonymized, reusable development database.
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
      test: ["CMD-SHELL", "pg_isready -U postgres"]
      interval: 10s
@@ -280,6 +545,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.spark-worker
+    image: datafabric-spark:4.0.0
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
       --host spark-master --port 7077 --webui-port 8082
@@ -313,15 +579,16 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.spark-worker
+    image: datafabric-spark:4.0.0
     command: >
       /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker
       spark://spark-master:7077 --webui-port 8083
     environment:
       SPARK_MASTER: spark://spark-master:7077
-      # Give each worker 6 GB RAM and 4 cores — adjust to your machine.
-      # With pool_size=3, max 3 jobs × 2 executors = 6 executors share these.
-      SPARK_WORKER_MEMORY: ${SPARK_WORKER_MEMORY:-6g}
-      SPARK_WORKER_CORES: ${SPARK_WORKER_CORES:-4}
+      # Keep the zero-configuration stack inside a typical 16 GB Docker VM.
+      # Larger values can be opted into without editing this file.
+      SPARK_WORKER_MEMORY: ${COMPOSE_SPARK_WORKER_MEMORY:-1536m}
+      SPARK_WORKER_CORES: ${COMPOSE_SPARK_WORKER_CORES:-2}
       SPARK_WORKER_WEBUI_PORT: "8083"
       AWS_ACCESS_KEY_ID: minio
       AWS_SECRET_ACCESS_KEY: minio123
@@ -337,20 +604,34 @@ services:
     # Detect the "TCP survives master restart" scenario: the Master loses all
     # in-memory state after a restart, but the Worker's existing TCP connection
     # keeps heartbeats flowing — the Master just ignores them because the Worker
-    # ID is completely unknown to the new process. Without this healthcheck the
-    # Worker sits unregistered indefinitely, making all Spark jobs stall.
+    # ID is completely unknown to the new process. The healthcheck exposes that
+    # state without killing a worker that is still completing its first boot.
     #
     # The check queries the Master REST API and verifies that THIS worker
     # (matched by container hostname) appears with state ALIVE. If not, the
-    # container is marked unhealthy → Docker restarts it → clean registration.
+    # container is marked unhealthy so the failure is visible to operators.
     healthcheck:
       test:
         - "CMD-SHELL"
-        - "python3 -c \"import urllib.request as u,json,sys,socket,os; ip=socket.gethostbyname(socket.gethostname()); data=json.loads(u.urlopen('http://spark-master:8082/json/',timeout=5).read()); sys.exit(0) if any(w.get('state')=='ALIVE' and ip in w.get('id','') for w in data.get('workers',[])) else os.system('kill 1')\""
+        - "python3 -c \"import urllib.request as u,json,sys,socket; ip=socket.gethostbyname(socket.gethostname()); data=json.loads(u.urlopen('http://spark-master:8082/json/',timeout=5).read()); sys.exit(0 if any(w.get('state')=='ALIVE' and ip in w.get('id','') for w in data.get('workers',[])) else 1)\""
       interval: 30s
       timeout: 10s
       retries: 2
       start_period: 60s
+
+  # Seed the backend's persistent Ivy cache from the image. This prevents the
+  # first application boot from downloading the large AWS SDK bundle.
+  spark-ivy-init:
+    build:
+      context: .
+      dockerfile: Dockerfile.spark-worker
+    image: datafabric-spark:4.0.0
+    entrypoint: /bin/sh
+    command: -c "cp -a /root/.ivy2.5.2/. /tmp/.ivy2/"
+    volumes:
+      - spark_ivy_cache:/tmp/.ivy2
+    networks:
+      - shared-network
 
   airflow-webserver:
     <<: *airflow-common
@@ -402,6 +683,7 @@ services:
     environment:
       <<: *airflow-common-env
       DUMB_INIT_SETSID: "0"
+      AIRFLOW__CELERY__WORKER_CONCURRENCY: ${COMPOSE_AIRFLOW_WORKER_CONCURRENCY:-1}
     restart: always
     depends_on:
       <<: *airflow-common-depends-on
@@ -433,7 +715,7 @@ services:
     command:
       - -c
       - |
-        if [[ -z "${AIRFLOW_UID}" ]]; then
+        if [[ -z "$${AIRFLOW_UID:-}" ]]; then
           echo
           echo -e "\033[1;33mWARNING!!!: AIRFLOW_UID not set!\e[0m"
           echo "If you are on Linux, you SHOULD follow the instructions below to set "
@@ -476,7 +758,7 @@ services:
           echo
         fi
         mkdir -p /sources/logs /sources/dags /sources/plugins
-        chown -R "${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
+        chown -R "$${AIRFLOW_UID}:0" /sources/{logs,dags,plugins}
         /entrypoint airflow version
         airflow pools set spark_pool $${SPARK_POOL_SIZE:-3} "Controls max concurrent Spark jobs (Silver + Bronze)" || true
         airflow connections add datafabric_backend \
@@ -512,10 +794,17 @@ services:
 volumes:
   airflow_pgdata:
   backend_pgdata:
+  cmpd_pgdata:
+  ida_mysqldata:
+  reh_pgdata:
+  cdi_pgdata:
+  rfa_mysqldata:
+  dermexp_ham_pgdata:
+  dermexp_hiba_pgdata:
+  dermexp_pad_mysqldata:
   metastore_pgdata:
   spark_ivy_cache:
   spark_master_recovery:
 
 networks:
   shared-network:
-    external: true

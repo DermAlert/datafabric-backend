@@ -38,16 +38,17 @@ RUN curl -fsSL \
 ENV DELTA_JAR_VERSION=4.0.0
 ENV HADOOP_AWS_VERSION=3.4.0
 ENV TRINO_JDBC_VERSION=479
+COPY docker/spark/prefetch.scala /tmp/prefetch.scala
 RUN ${SPARK_HOME}/bin/spark-shell \
     --packages "io.delta:delta-spark_2.13:${DELTA_JAR_VERSION},org.apache.hadoop:hadoop-aws:${HADOOP_AWS_VERSION},io.trino:trino-jdbc:${TRINO_JDBC_VERSION}" \
     --conf spark.driver.bindAddress=127.0.0.1 \
-    -e "System.exit(0)" 2>/dev/null || true
+    -I /tmp/prefetch.scala \
+    || ls /root/.ivy2.5.2/jars/*bundle* >/dev/null
 
-# Install Python packages — exact same versions as the backend
-COPY ./project/pyproject.toml /tmp/pyproject.toml
+# Spark already ships its Python runtime under ${SPARK_HOME}/python. Installing
+# the PyPI pyspark package here would duplicate 434 MB and can exhaust Docker
+# Desktop memory when the backend and worker images build in parallel.
 RUN pip install --no-cache-dir \
-    pyspark==4.0.0 \
-    delta-spark==4.0.0 \
     boto3 \
     pyarrow \
     unicodedata2 \

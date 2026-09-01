@@ -24,7 +24,16 @@ The evaluation artifacts are documented in:
 | --- | --- | --- |
 | `dermalert-backend` | FastAPI API server | `8004` |
 | `postgres-backend` | Main application database | `5434` |
+| `cmpd-postgres` | CMPD PostgreSQL demo source | `5435` |
+| `ida-mysql` | IDA MySQL demo source | `3307` |
+| `reh-postgres` | REH PostgreSQL demo source | `5436` |
+| `cdi-postgres` | CDI PostgreSQL demo source | `5437` |
+| `rfa-mysql` | RFA MySQL demo source | `3308` |
+| `dermexp_ham_postgres` | HAM10000 PostgreSQL demo source | `5441` |
+| `dermexp_hiba_postgres` | HIBA PostgreSQL demo source | `5442` |
+| `dermexp_pad_mysql` | PAD-UFES-20 MySQL demo source | `3311` |
 | `minio` | Object storage API and console | `9000`, `9001` |
+| `minio-init` | Creates the Bronze, Silver, and metastore buckets | one-off job |
 | `trino` | SQL query engine | `8089` |
 | `spark-master` | Spark master + UI | `7077`, `8082` |
 | `spark-worker` | Spark worker UI | `8083` |
@@ -48,7 +57,10 @@ Note: there is a commented `dataset-service` stub in [`docker-compose.yml`](./do
 
 ## Environment
 
-The root [`.env`](./.env) file is loaded by Docker Compose and by the backend container.
+The root `.env` file is optional. Docker Compose includes local development
+defaults, so a fresh checkout starts with `docker compose up --build` without
+creating or editing any configuration file. Add `.env` only to override those
+defaults (for example, to enable an external LLM provider).
 
 Important:
 
@@ -97,6 +109,11 @@ docker compose up -d --build
 What happens during startup:
 
 - `airflow-init` bootstraps Airflow and creates default resources
+- On the first startup of a new `backend_pgdata` volume, PostgreSQL restores the anonymized development snapshot from `docker/postgres/init/`
+- Five synthetic hospital databases and three public dermatology metadata databases are created and populated automatically
+- The restored DataFabric connections already use the Compose service names and matching local development credentials
+- `minio-init` creates the Bronze, Silver, and internal metastore buckets
+- The backend waits for every source database and bucket to be ready before it starts
 - `dermalert-backend` runs Alembic migrations automatically before starting Uvicorn
 - Spark and Trino may take a little while on the first boot
 - The first Spark-related startup can be slower because dependencies and JARs are cached
@@ -195,10 +212,36 @@ docker compose exec dermalert-backend poetry run alembic upgrade head
 
 Persistent data is stored in:
 
-- Docker named volumes for PostgreSQL, Spark recovery, and Spark Ivy cache
+- Docker named volumes for the application database, all source databases, Spark recovery, and Spark Ivy cache
 - [`./data`](./data) for MinIO object data
 
 If you run `docker compose down -v`, the PostgreSQL databases and Docker-managed caches are removed.
+
+The application database is automatically populated only when PostgreSQL creates
+a new `backend_pgdata` volume. Existing volumes are never overwritten. To recreate
+the test database from the bundled snapshot:
+
+```bash
+docker compose down
+docker volume rm datafabric-backend_backend_pgdata
+docker compose up -d --build
+```
+
+The volume name assumes the default Compose project name. Check it first with
+`docker volume ls` if you use `COMPOSE_PROJECT_NAME` or `docker compose -p`.
+
+### Refreshing the development snapshot
+
+With `postgres-backend` running and containing the desired reference data, run:
+
+```bash
+./docker/postgres/export-seed.sh
+```
+
+The exporter clones the database into a temporary database, anonymizes sensitive
+fields there, writes `docker/postgres/init/20-demo-data.sql.gz`, validates the
+result, and removes the temporary database. It does not modify the source database.
+Commit the refreshed snapshot together with intentional schema changes.
 
 ## Troubleshooting
 

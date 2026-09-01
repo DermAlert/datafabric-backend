@@ -10,9 +10,9 @@ from app.api.schemas.search import BaseSearchRequest, SearchDataResult
 
 from app.database.utils import DatabaseService
 from app.database.models import core
-from app.services.connection_manager import test_connection
+from app.services.connections.connection_manager import test_connection
 from app.utils.connection_validators import validate_metadata_connection
-from app.services.airflow_client import get_airflow_client
+from app.services.infrastructure.airflow_client import get_airflow_client
 from app.services.credential_service import get_credential_service
 
 logger = logging.getLogger(__name__)

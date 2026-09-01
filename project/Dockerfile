@@ -11,14 +11,16 @@ ENV PYSPARK_HADOOP_VERSION 3
 ENV PYSPARK_PYTHON=python3.11
 ENV PYSPARK_DRIVER_PYTHON=python3.11
 
-RUN apt-get update && apt-get install -y openjdk-17-jdk
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+    openjdk-17-jre-headless \
+    netcat-openbsd \
+    gcc \
+    postgresql-client \
+    curl \
+  && rm -rf /var/lib/apt/lists/*
 ENV JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
 ENV PATH="$JAVA_HOME/bin:$PATH"
-
-# install system dependencies
-RUN apt-get update \
-  && apt-get -y install netcat-openbsd gcc postgresql curl \
-  && apt-get clean
 
 # install poetry
 RUN curl -sSL https://install.python-poetry.org | python3 -
