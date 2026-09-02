@@ -2609,10 +2609,10 @@ AS
         
         # Build consistent output path based on config_id (not dataset_id)
         bucket = output_bucket or self.bronze_bucket
+        safe_config_name = sanitize_s3_path_component(config_name)
         if output_path_prefix:
             base_path = f"s3a://{bucket}/{output_path_prefix}"
         else:
-            safe_config_name = sanitize_s3_path_component(config_name)
             base_path = f"s3a://{bucket}/{config_id}-{safe_config_name}"
         
         # Generate SQL for data extraction
@@ -2867,4 +2867,3 @@ AS
             'size_bytes': versioning_stats.get('size_bytes'),
             'num_files': versioning_stats.get('num_files'),
         }
-
