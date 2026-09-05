@@ -3293,6 +3293,14 @@ class SilverTransformationService:
                         f"Using versionAsOf={read_version} for Bronze path {table_path}"
                     )
                 df = reader.load(table_path)
+                # Older Bronze snapshots can carry a source-specific VARCHAR(n)
+                # constraint for this literal provenance column. Normalize it
+                # before unioning partitions whose table names differ in length.
+                if "_source_table" in df.columns:
+                    df = df.withColumn(
+                        "_source_table",
+                        F.col("_source_table").cast(StringType()),
+                    )
                 row_count = df.count()
                 total_rows += row_count
                 dfs.append(df)

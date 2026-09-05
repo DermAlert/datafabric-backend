@@ -2725,6 +2725,18 @@ AS
                         f"Loaded Spark DataFrame via Trino JDBC with schema: {df.schema}"
                     )
 
+                    # Trino reports string literals using their exact VARCHAR
+                    # length (for example VARCHAR(17)). Persisting that metadata
+                    # makes later UNIONs fail when another source name is longer.
+                    # Bronze provenance is descriptive text, so store it as an
+                    # unconstrained Spark string in every source partition.
+                    if "_source_table" in df.columns:
+                        from pyspark.sql import functions as _spark_functions
+                        df = df.withColumn(
+                            "_source_table",
+                            _spark_functions.col("_source_table").cast("string"),
+                        )
+
                     # --- ADD BRONZE IMAGE PATH COLUMNS ---
                     dataset_folder = f"{config_id}-{safe_config_name}"
                     
@@ -2867,4 +2879,3 @@ AS
             'size_bytes': versioning_stats.get('size_bytes'),
             'num_files': versioning_stats.get('num_files'),
         }
-
