@@ -2,6 +2,20 @@
 
 -- Reusable local-only account for exercising authenticated API endpoints.
 -- The snapshot sanitizer removes every original password before this file runs.
+-- PostgreSQL's reserved .test domain is intentionally anonymized, but Pydantic's
+-- EmailStr rejects it, so use the equally fictitious and validator-safe example.com.
+UPDATE core.users
+SET email = regexp_replace(email, '@example[.]test$', '@example.com')
+WHERE email ~ '@example[.]test$';
+
+UPDATE delta_sharing.recipients
+SET email = regexp_replace(email, '@example[.]test$', '@example.com')
+WHERE email ~ '@example[.]test$';
+
+UPDATE delta_sharing.shares
+SET owner_email = regexp_replace(owner_email, '@example[.]test$', '@example.com')
+WHERE owner_email ~ '@example[.]test$';
+
 INSERT INTO core.roles (name, nivel_acesso)
 VALUES ('Administrador', 0)
 ON CONFLICT (name) DO UPDATE
@@ -20,7 +34,7 @@ INSERT INTO core.users (
 VALUES (
     (SELECT id FROM core.organizacoes ORDER BY id LIMIT 1),
     'Administrador de demonstração',
-    'admin@example.test',
+    'admin@example.com',
     '12345678901',
     '$2b$12$oklUjzY9dz/j3xWmwslkmOckmhe40mS6PIHgWAbHO5gjZoUaqLJxC',
     false,

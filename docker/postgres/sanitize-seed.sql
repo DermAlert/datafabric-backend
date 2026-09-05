@@ -35,7 +35,7 @@ SET connection_params = (
 
 UPDATE core.users
 SET nome_usuario = 'Usuário de teste ' || id,
-    email = 'usuario-' || id || '@example.test',
+    email = 'usuario-' || id || '@example.com',
     cpf = lpad(id::text, 11, '0'),
     senha_hash = NULL,
     password_reset_token = NULL,
@@ -46,7 +46,7 @@ SET nome_usuario = 'Usuário de teste ' || id,
 UPDATE delta_sharing.recipients
 SET identifier = 'recipient-' || id,
     name = 'Destinatário de teste ' || id,
-    email = CASE WHEN email IS NULL THEN NULL ELSE 'recipient-' || id || '@example.test' END,
+    email = CASE WHEN email IS NULL THEN NULL ELSE 'recipient-' || id || '@example.com' END,
     organization_name = CASE WHEN organization_name IS NULL THEN NULL ELSE 'Organização de teste' END,
     bearer_token = 'dev-recipient-token-' || id,
     token_expiry = NULL,
@@ -54,7 +54,7 @@ SET identifier = 'recipient-' || id,
     notes = NULL;
 
 UPDATE delta_sharing.shares
-SET owner_email = CASE WHEN owner_email IS NULL THEN NULL ELSE 'owner@example.test' END,
+SET owner_email = CASE WHEN owner_email IS NULL THEN NULL ELSE 'owner@example.com' END,
     contact_info = NULL;
 
 UPDATE delta_sharing.recipient_access_logs
@@ -103,7 +103,7 @@ BEGIN
 
     IF EXISTS (
         SELECT 1 FROM delta_sharing.recipients
-        WHERE email IS NOT NULL AND email !~ '@example[.]test$'
+        WHERE email IS NOT NULL AND email !~ '@example[.]com$'
     ) THEN
         RAISE EXCEPTION 'Non-test recipient email remains in seed database';
     END IF;
