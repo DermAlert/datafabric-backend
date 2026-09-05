@@ -34,6 +34,7 @@ The evaluation artifacts are documented in:
 | `dermexp_pad_mysql` | PAD-UFES-20 MySQL demo source | `3311` |
 | `minio` | Object storage API and console | `9000`, `9001` |
 | `minio-init` | Creates the Bronze, Silver, and metastore buckets | one-off job |
+| `materialize-init` | Materializes missing bundled Bronze and Silver datasets | one-off job |
 | `trino` | SQL query engine | `8089` |
 | `spark-master` | Spark master + UI | `7077`, `8082` |
 | `spark-worker` | Spark worker UI | `8083` |
@@ -115,6 +116,7 @@ What happens during startup:
 - `minio-init` creates the Bronze, Silver, and internal metastore buckets
 - The backend waits for every source database and bucket to be ready before it starts
 - `dermalert-backend` runs Alembic migrations automatically before starting Uvicorn
+- `materialize-init` validates and materializes any bundled persistent Bronze and Silver dataset whose Delta data is missing
 - Spark and Trino may take a little while on the first boot
 - The first Spark-related startup can be slower because dependencies and JARs are cached
 

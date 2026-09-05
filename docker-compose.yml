@@ -143,6 +143,22 @@ services:
     networks:
       - shared-network
 
+  # Idempotent one-off bootstrap for persistent datasets bundled in the
+  # anonymized snapshot. Existing Delta tables are validated and preserved.
+  materialize-init:
+    image: curlimages/curl:8.12.1
+    depends_on:
+      dermalert-backend:
+        condition: service_started
+    environment:
+      DATAFABRIC_API_URL: http://dermalert-backend:8000
+    volumes:
+      - ./docker/bootstrap-materialized-data.sh:/bootstrap-materialized-data.sh:ro
+    entrypoint: ["/bin/sh", "/bootstrap-materialized-data.sh"]
+    restart: "no"
+    networks:
+      - shared-network
+
   # --------------------------------------------------------------------------
   # Reusable source databases. Their service names match the hosts stored in
   # the bundled DataFabric snapshot, so no registration step is required.
