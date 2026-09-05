@@ -517,7 +517,9 @@ services:
   #   restart: unless-stopped
 
   trino:
-    image: trinodb/trino:latest
+    # 451 remains compatible with older x86-64 CPUs used by the deployment
+    # server. Newer images require x86-64-v3 and fail before Trino can start.
+    image: trinodb/trino:451
     platform: linux/amd64 
     ports:
       - "8089:8080"
