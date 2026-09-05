@@ -36,3 +36,7 @@ WITH (FORMAT CSV, HEADER TRUE, ENCODING 'UTF8');
 
 CREATE UNIQUE INDEX ham10000_metadata_isic_id_idx
 ON isic.metadata (isic_id);
+
+-- Compatibility alias used by the original experiment-v1 metadata snapshot.
+CREATE VIEW isic.ham10000_metadata AS
+SELECT * FROM isic.metadata;

@@ -61,3 +61,7 @@ IGNORE 1 LINES
   @sex
 )
 SET sex = TRIM(TRAILING '\r' FROM @sex);
+
+-- Compatibility alias used by the original experiment-v1 metadata snapshot.
+CREATE VIEW pad_ufes_20_metadata AS
+SELECT * FROM metadata;

@@ -40,3 +40,7 @@ CREATE UNIQUE INDEX hiba_metadata_isic_id_idx
 ON isic.metadata (isic_id);
 CREATE INDEX hiba_metadata_patient_id_idx
 ON isic.metadata (patient_id);
+
+-- Compatibility alias used by the original experiment-v1 metadata snapshot.
+CREATE VIEW isic.hiba_metadata AS
+SELECT * FROM isic.metadata;
