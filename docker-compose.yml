@@ -72,8 +72,10 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-minio}
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-minio123}
       MINIO_SECURE: ${MINIO_SECURE:-false}
-      TRINO_HOST: ${TRINO_HOST:-trino}
-      TRINO_PORT: ${TRINO_PORT:-8080}
+      # These are container-network addresses. Do not let a host-oriented .env
+      # (for example localhost:8089) leak into Spark executor JDBC URLs.
+      TRINO_HOST: trino
+      TRINO_PORT: 8080
       TRINO_USER: ${TRINO_USER:-admin}
       SPARK_MODE: ${SPARK_MODE:-standalone}
       SPARK_MASTER: ${SPARK_MASTER:-spark://spark-master:7077}
